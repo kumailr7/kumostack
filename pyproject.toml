@@ -28,6 +28,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tf = [
+    "python-hcl2>=8",
+    "packaging>=23.0",
+]
 full = [
     "duckdb>=0.10.0",
     "docker>=7.0.0",
@@ -52,12 +56,13 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ministackorg/ministack"
-Repository = "https://github.com/ministackorg/ministack"
-Issues = "https://github.com/ministackorg/ministack/issues"
+Homepage = "https://github.com/kumailr7/ministack"
+Repository = "https://github.com/kumailr7/ministack"
+Issues = "https://github.com/kumailr7/ministack/issues"
 
 [project.scripts]
 ministack = "ministack.app:main"
+tfstack   = "ministack.cli.tfstack:main"
 
 [tool.setuptools.packages.find]
 include = ["ministack*"]

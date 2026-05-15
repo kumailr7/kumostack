@@ -28,6 +28,39 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  dashboard:
+    build: ./dashboard
+    image: ministack-dashboard:latest
+    container_name: ministack-dashboard
+    ports:
+      - "3003:3000"
+    environment:
+      - MINISTACK_ENDPOINT=http://ministack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+    depends_on:
+      ministack:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ministack-grafana
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Allow embedding in the dashboard iframe
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     container_name: ministack-redis
@@ -57,3 +90,6 @@ services:
   #     timeout: 3s
   #     retries: 5
   #   restart: unless-stopped
+
+volumes:
+  grafana-data:

@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+# tfstack — direct-execution entry point (no install required).
+# When installed via pip, the console_script in pyproject.toml takes over.
+from ministack.cli.tfstack import main
+main()
