@@ -678,7 +678,11 @@ async def _handle_pre_body_request(method: str, path: str, headers: dict, query_
     if response is not None:
         return response
 
-    return await _handle_admin_reset(path, method, query_params)
+    response = await _handle_admin_reset(path, method, query_params)
+    if response is not None:
+        return response
+
+    return await _handle_chaos_request(method, path, b"", query_params)
 
 
 def _handle_transfer_sftp_ports_request(method: str, path: str):
@@ -790,7 +794,12 @@ async def _handle_post_body_shortcuts(method: str, path: str, headers: dict, bod
     if response is not None:
         # See _handle_pre_body_request: browser-based OIDC clients need CORS.
         return _with_data_plane_headers(response, request_id)
-    return await _handle_admin_config_request(path, method, body)
+
+    response = await _handle_admin_config_request(path, method, body)
+    if response is not None:
+        return response
+
+    return await _handle_chaos_request(method, path, body, query_params)
 
 
 # ---------------------------------------------------------------------------
@@ -1374,6 +1383,18 @@ async def _dispatch_service_request(
             json.dumps({"error": f"Unsupported service: {service}"}).encode(),
         )
 
+    # ── Chaos fault injection ───────────────────────────────────────────
+    # Extract action from query params or X-Amz-Target header
+    _action = (query_params.get("Action", [None])[0]
+               or headers.get("x-amz-target", "").split(".")[-1]
+               or "*")
+    _chaos_fault = await _apply_chaos(service, _action)
+    if _chaos_fault is not None:
+        _chaos_status, _chaos_hdrs, _chaos_body = _chaos_fault
+        _chaos_hdrs.update({"x-amzn-requestid": request_id, "Access-Control-Allow-Origin": "*"})
+        return _chaos_status, _chaos_hdrs, _chaos_body
+    # ── End chaos ──────────────────────────────────────────────────────
+
     try:
         status, resp_headers, resp_body = await handler(method, path, headers, body, query_params)
     except Exception as e:
@@ -1398,6 +1419,177 @@ async def _dispatch_service_request(
         }
     )
     return status, resp_headers, resp_body
+
+
+# ---------------------------------------------------------------------------
+# Chaos Engineering — fault injection store + middleware
+# ---------------------------------------------------------------------------
+
+import random
+import threading
+import time as _time
+
+_chaos_lock = threading.Lock()
+_chaos_rules: dict[str, dict] = {}  # rule_id → rule
+
+
+def _chaos_rule_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _chaos_rule_expired(rule: dict) -> bool:
+    exp = rule.get("expires_at")
+    return bool(exp and _time.time() > exp)
+
+
+def _chaos_active_rules() -> list[dict]:
+    now = _time.time()
+    with _chaos_lock:
+        return [
+            r for r in _chaos_rules.values()
+            if r["status"] == "active" and (not r.get("expires_at") or r["expires_at"] > now)
+        ]
+
+
+def _chaos_match(rule: dict, service: str, action: str) -> bool:
+    rs = rule.get("target_service", "*")
+    ra = rule.get("target_action", "*")
+    return (rs in ("*", service)) and (ra in ("*", action))
+
+
+async def _apply_chaos(service: str, action: str):
+    """Check active chaos rules and optionally raise a fault response tuple.
+
+    Returns a (status, headers, body) tuple if a fault fires, else None.
+    """
+    for rule in _chaos_active_rules():
+        if not _chaos_match(rule, service, action):
+            continue
+        if random.random() > rule.get("fault_rate", 1.0):
+            continue
+
+        # Record trigger
+        with _chaos_lock:
+            if rule["id"] in _chaos_rules:
+                _chaos_rules[rule["id"]]["trigger_count"] += 1
+                _chaos_rules[rule["id"]]["last_triggered"] = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+
+        ft = rule.get("fault_type", "error")
+        headers = {"Content-Type": "application/json"}
+
+        if ft == "latency":
+            await asyncio.sleep(rule.get("delay_ms", 1000) / 1000)
+            return None  # latency-only, let request proceed
+
+        if ft == "throttle":
+            return (
+                400, headers,
+                json.dumps({
+                    "__type": "ThrottlingException",
+                    "message": f"Rate exceeded — chaos rule '{rule['id']}' is active",
+                }).encode(),
+            )
+
+        if ft == "unavailable":
+            return (
+                503, headers,
+                json.dumps({
+                    "__type": "ServiceUnavailableException",
+                    "message": f"Service unavailable — chaos rule '{rule['id']}' is active",
+                }).encode(),
+            )
+
+        if ft == "timeout":
+            await asyncio.sleep(30)  # force a client timeout
+            return (504, headers, json.dumps({"__type": "GatewayTimeout"}).encode())
+
+        # default: generic error
+        return (
+            500, headers,
+            json.dumps({
+                "__type": "InternalError",
+                "message": f"Injected error — chaos rule '{rule['id']}' is active",
+            }).encode(),
+        )
+    return None
+
+
+async def _handle_chaos_request(method: str, path: str, body: bytes, query_params: dict):
+    """Handle /_kumostack/chaos/* requests."""
+    if not path.startswith("/_kumostack/chaos"):
+        return None
+    ct = {"Content-Type": "application/json"}
+
+    # GET /_kumostack/chaos  — list all rules
+    if method == "GET" and path == "/_kumostack/chaos":
+        with _chaos_lock:
+            rules = list(_chaos_rules.values())
+        return 200, ct, json.dumps({"rules": rules}).encode()
+
+    # POST /_kumostack/chaos  — create rule
+    if method == "POST" and path == "/_kumostack/chaos":
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return 400, ct, json.dumps({"error": "invalid JSON"}).encode()
+
+        now = _time.time()
+        duration = int(data.get("duration_seconds", 0))
+        rule = {
+            "id":             data.get("id") or _chaos_rule_id(),
+            "name":           data.get("name", "Untitled experiment"),
+            "target_service": data.get("target_service", "*"),
+            "target_action":  data.get("target_action", "*"),
+            "fault_type":     data.get("fault_type", "error"),
+            "fault_rate":     float(data.get("fault_rate", 1.0)),
+            "delay_ms":       int(data.get("delay_ms", 1000)),
+            "status":         "active",
+            "created_at":     _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "expires_at":     now + duration if duration > 0 else None,
+            "duration_seconds": duration,
+            "trigger_count":  0,
+            "last_triggered": None,
+        }
+        with _chaos_lock:
+            _chaos_rules[rule["id"]] = rule
+        logger.info("Chaos rule created: %s (%s → %s fault_type=%s rate=%.0f%%)",
+                    rule["id"], rule["target_service"], rule["target_action"],
+                    rule["fault_type"], rule["fault_rate"] * 100)
+        return 200, ct, json.dumps(rule).encode()
+
+    # DELETE /_kumostack/chaos/<id>  — stop/remove rule
+    if method == "DELETE" and path.startswith("/_kumostack/chaos/"):
+        rule_id = path.split("/")[-1]
+        with _chaos_lock:
+            removed = _chaos_rules.pop(rule_id, None)
+        if not removed:
+            return 404, ct, json.dumps({"error": "rule not found"}).encode()
+        logger.info("Chaos rule removed: %s", rule_id)
+        return 200, ct, json.dumps({"deleted": rule_id}).encode()
+
+    # PATCH /_kumostack/chaos/<id>  — update status (stop/resume)
+    if method == "PATCH" and path.startswith("/_kumostack/chaos/"):
+        rule_id = path.split("/")[-1]
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return 400, ct, json.dumps({"error": "invalid JSON"}).encode()
+        with _chaos_lock:
+            if rule_id not in _chaos_rules:
+                return 404, ct, json.dumps({"error": "rule not found"}).encode()
+            if "status" in data:
+                _chaos_rules[rule_id]["status"] = data["status"]
+            updated = dict(_chaos_rules[rule_id])
+        return 200, ct, json.dumps(updated).encode()
+
+    # DELETE /_kumostack/chaos  — clear all rules
+    if method == "DELETE" and path == "/_kumostack/chaos":
+        with _chaos_lock:
+            count = len(_chaos_rules)
+            _chaos_rules.clear()
+        return 200, ct, json.dumps({"cleared": count}).encode()
+
+    return None
 
 
 # ---------------------------------------------------------------------------

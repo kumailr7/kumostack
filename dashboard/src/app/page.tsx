@@ -164,7 +164,8 @@ const COLUMNS: Section[][] = [
 
 const NAV_ITEMS = [
   { id: "Overview",         label: "Overview",         icon: <IconGrid /> },
-  { id: "Organizations",    label: "Organizations",    icon: <IconOrg />, highlight: true },
+  { id: "Organizations",    label: "Organizations",    icon: <IconOrg /> },
+  { id: "Chaos",            label: "Chaos Engineering", icon: <IconChaos />, highlight: true },
   { id: "Stackport",        label: "Resource Browser", icon: <IconStackport /> },
   { id: "Diagrams",         label: "Diagrams",         icon: <IconDrawio /> },
   { id: "Tutorials",        label: "Tutorials",        icon: <IconBook /> },
@@ -252,7 +253,8 @@ function IconTerminal() { return <svg width="16" height="16" viewBox="0 0 24 24"
 function IconChevron({ open }: { open: boolean }) {
   return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? "rotate(0deg)" : "rotate(180deg)", transition: "transform 0.2s" }}><polyline points="15 18 9 12 15 6"/></svg>;
 }
-function IconOrg() { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><rect x="1" y="17" width="6" height="4" rx="1"/><rect x="9" y="17" width="6" height="4" rx="1"/><rect x="17" y="17" width="6" height="4" rx="1"/><path d="M4 17v-3a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v3M12 6v7"/></svg>; }
+function IconOrg()   { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><rect x="1" y="17" width="6" height="4" rx="1"/><rect x="9" y="17" width="6" height="4" rx="1"/><rect x="17" y="17" width="6" height="4" rx="1"/><path d="M4 17v-3a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v3M12 6v7"/></svg>; }
+function IconChaos() { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>; }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -2040,6 +2042,261 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
   );
 }
 
+// ─── Chaos Engineering Tab ───────────────────────────────────────────────────
+
+const FAULT_TYPES = [
+  { id: "error",       label: "Error",       color: "#ef4444", desc: "Return a generic 500 InternalError" },
+  { id: "throttle",    label: "Throttle",    color: "#f59e0b", desc: "Return a 400 ThrottlingException" },
+  { id: "unavailable", label: "Unavailable", color: "#8b5cf6", desc: "Return a 503 ServiceUnavailableException" },
+  { id: "latency",     label: "Latency",     color: "#3b82f6", desc: "Add a delay (ms) before the normal response" },
+  { id: "timeout",     label: "Timeout",     color: "#ec4899", desc: "Hold the connection open for 30s (force client timeout)" },
+];
+
+const SERVICES_LIST = ["*","s3","sqs","lambda","dynamodb","sns","rds","iam","secretsmanager","cloudwatch","kinesis","stepfunctions","ec2","apigateway","elasticache"];
+
+interface ChaosRule {
+  id: string; name: string;
+  target_service: string; target_action: string;
+  fault_type: string; fault_rate: number; delay_ms: number;
+  status: string; created_at: string; expires_at: number | null;
+  duration_seconds: number; trigger_count: number; last_triggered: string | null;
+}
+
+function ChaosTab({ connected }: { connected: boolean }) {
+  const [rules, setRules]       = useState<ChaosRule[]>([]);
+  const [loading, setLoading]   = useState(false);
+  const [showForm, setShowForm] = useState(false);
+
+  const [name,      setName]      = useState("My Experiment");
+  const [service,   setService]   = useState("*");
+  const [action,    setAction]    = useState("*");
+  const [faultType, setFaultType] = useState("error");
+  const [rate,      setRate]      = useState(100);
+  const [delayMs,   setDelayMs]   = useState(1000);
+  const [duration,  setDuration]  = useState(0);
+
+  const fetchRules = useCallback(() => {
+    if (!connected) return;
+    fetch("/api/chaos").then(r => r.json()).then(d => setRules(d.rules ?? [])).catch(() => {});
+  }, [connected]);
+
+  useEffect(() => { fetchRules(); const id = setInterval(fetchRules, 5000); return () => clearInterval(id); }, [fetchRules]);
+
+  const createRule = async () => {
+    setLoading(true);
+    await fetch("/api/chaos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, target_service: service, target_action: action, fault_type: faultType, fault_rate: rate / 100, delay_ms: delayMs, duration_seconds: duration }),
+    });
+    setShowForm(false); setLoading(false); fetchRules();
+  };
+
+  const deleteRule = async (id: string) => {
+    await fetch(`/api/chaos?id=${id}`, { method: "DELETE" });
+    fetchRules();
+  };
+
+  const toggleRule = async (r: ChaosRule) => {
+    await fetch(`/api/chaos?id=${r.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: r.status === "active" ? "stopped" : "active" }),
+    });
+    fetchRules();
+  };
+
+  const clearAll = async () => {
+    await fetch("/api/chaos", { method: "DELETE" });
+    fetchRules();
+  };
+
+  const activeCount   = rules.filter(r => r.status === "active").length;
+  const triggerTotal  = rules.reduce((s, r) => s + r.trigger_count, 0);
+  const ft = FAULT_TYPES.find(f => f.id === faultType);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Chaos Engineering</h1>
+          <p className="page-subtitle">Inject faults into KumoStack services to test application resilience</p>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {rules.length > 0 && (
+            <button className="pill-btn" onClick={clearAll} style={{ color: "#ef4444", borderColor: "#ef444440" }}>Clear All</button>
+          )}
+          <button className="btn-primary" onClick={() => setShowForm(!showForm)} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New Experiment
+          </button>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 28 }}>
+        {[
+          { label: "Total Rules",     value: rules.length,   color: "#60a5fa" },
+          { label: "Active",          value: activeCount,    color: activeCount > 0 ? "#ef4444" : "var(--text-dim)" },
+          { label: "Faults Injected", value: triggerTotal,   color: triggerTotal > 0 ? "#f59e0b" : "var(--text-dim)" },
+          { label: "Services Hit",    value: new Set(rules.filter(r=>r.trigger_count>0).map(r=>r.target_service)).size, color: "#8b5cf6" },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{ background: "var(--bg-card)", border: `1px solid ${color}25`, borderRadius: "var(--radius)", padding: "14px 18px", display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color, letterSpacing: "-0.03em", lineHeight: 1 }}>{value}</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Fault type quick reference */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8, marginBottom: 28 }}>
+        {FAULT_TYPES.map(f => (
+          <div key={f.id} style={{ background: "var(--bg-card)", border: `1px solid ${f.color}30`, borderRadius: "var(--radius-sm)", padding: "10px 14px" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: f.color, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>{f.label}</div>
+            <div style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.4 }}>{f.desc}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* New experiment form */}
+      {showForm && (
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-strong)", borderRadius: "var(--radius)", padding: 24, marginBottom: 28 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 20 }}>New Chaos Experiment</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Name</label>
+              <input className="search" value={name} onChange={e => setName(e.target.value)} style={{ width: "100%", marginBottom: 0 }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Fault Type</label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {FAULT_TYPES.map(f => (
+                  <button key={f.id} onClick={() => setFaultType(f.id)} style={{ padding: "5px 12px", fontSize: 12, fontWeight: 700, background: faultType === f.id ? f.color + "20" : "var(--bg-elevated)", border: `1px solid ${faultType === f.id ? f.color : "var(--border)"}`, color: faultType === f.id ? f.color : "var(--text-dim)", borderRadius: "var(--radius-sm)", cursor: "pointer" }}>{f.label}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Target Service</label>
+              <select value={service} onChange={e => setService(e.target.value)} style={{ width: "100%", background: "var(--bg-card)", border: "1px solid var(--border-strong)", padding: "8px 12px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>
+                {SERVICES_LIST.map(s => <option key={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Target Action <span style={{ color: "var(--text-faint)", fontWeight: 400 }}>(* = all)</span></label>
+              <input className="search" value={action} onChange={e => setAction(e.target.value)} placeholder="e.g. SendMessage, GetObject, *" style={{ width: "100%", marginBottom: 0 }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Fault Rate — {rate}%</label>
+              <input type="range" min={1} max={100} value={rate} onChange={e => setRate(Number(e.target.value))} style={{ width: "100%", accentColor: ft?.color }} />
+            </div>
+            {faultType === "latency" ? (
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Delay (ms)</label>
+                <input className="search" type="number" min={0} value={delayMs} onChange={e => setDelayMs(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} />
+              </div>
+            ) : (
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Duration (seconds, 0 = indefinite)</label>
+                <input className="search" type="number" min={0} value={duration} onChange={e => setDuration(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} />
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button className="btn-primary" onClick={createRule} disabled={loading} style={{ flex: 1 }}>{loading ? "Creating…" : `Inject ${ft?.label ?? "Fault"}`}</button>
+            <button className="pill-btn" onClick={() => setShowForm(false)} style={{ flex: 1 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Rules table */}
+      {rules.length === 0 ? (
+        <div className="empty-state">No active experiments. Click <strong>New Experiment</strong> to inject a fault.</div>
+      ) : (
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                {["Name","Target","Fault","Rate","Triggers","Expires","Status",""].map(h => (
+                  <th key={h} style={{ padding: "10px 14px", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rules.map(r => {
+                const fInfo = FAULT_TYPES.find(f => f.id === r.fault_type);
+                const isActive = r.status === "active";
+                const expiresIn = r.expires_at ? Math.max(0, Math.round((r.expires_at - Date.now() / 1000))) : null;
+                return (
+                  <tr key={r.id} style={{ borderBottom: "1px solid var(--border)", opacity: isActive ? 1 : 0.5 }}>
+                    <td style={{ padding: "12px 14px" }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{r.name}</div>
+                      <div style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "var(--font-mono, monospace)" }}>{r.id}</div>
+                    </td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <div style={{ fontSize: 12, color: "var(--text)" }}>{r.target_service}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-faint)" }}>{r.target_action}</div>
+                    </td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", background: `${fInfo?.color ?? "#6b7280"}18`, border: `1px solid ${fInfo?.color ?? "#6b7280"}35`, color: fInfo?.color ?? "var(--text-dim)", borderRadius: 3 }}>{r.fault_type}</span>
+                    </td>
+                    <td style={{ padding: "12px 14px", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{Math.round(r.fault_rate * 100)}%</td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: r.trigger_count > 0 ? "#f59e0b" : "var(--text-dim)" }}>{r.trigger_count}</div>
+                      {r.last_triggered && <div style={{ fontSize: 10, color: "var(--text-faint)" }}>{r.last_triggered.replace("T"," ").replace("Z","")}</div>}
+                    </td>
+                    <td style={{ padding: "12px 14px", fontSize: 12, color: "var(--text-dim)" }}>
+                      {expiresIn !== null ? (expiresIn > 0 ? `${expiresIn}s` : "expired") : "∞"}
+                    </td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <span className={`pill ${isActive ? "pill--red" : "pill--dim"}`} style={{ fontSize: 10 }}>{r.status.toUpperCase()}</span>
+                    </td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button className="pill-btn" onClick={() => toggleRule(r)} style={{ fontSize: 11, padding: "3px 10px" }}>{isActive ? "Stop" : "Resume"}</button>
+                        <button className="pill-btn" onClick={() => deleteRule(r.id)} style={{ fontSize: 11, padding: "3px 10px", color: "#ef4444", borderColor: "#ef444440" }}>Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Quick preset experiments */}
+      <div className="section-header" style={{ marginTop: 40, marginBottom: 16 }}>QUICK PRESETS</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 12 }}>
+        {[
+          { name: "SQS Throttle Storm",    service: "sqs",      action: "SendMessage",    fault_type: "throttle",    fault_rate: 0.5,  delay_ms: 0,    duration_seconds: 60,  desc: "Throttle 50% of SQS SendMessage for 60 seconds" },
+          { name: "Lambda Outage",         service: "lambda",   action: "Invoke",         fault_type: "unavailable", fault_rate: 1.0,  delay_ms: 0,    duration_seconds: 30,  desc: "Block all Lambda invocations for 30 seconds" },
+          { name: "DynamoDB Latency",      service: "dynamodb", action: "*",              fault_type: "latency",     fault_rate: 0.8,  delay_ms: 2000, duration_seconds: 120, desc: "Add 2s latency to 80% of DynamoDB calls" },
+          { name: "S3 Flaky Reads",        service: "s3",       action: "GetObject",      fault_type: "error",       fault_rate: 0.3,  delay_ms: 0,    duration_seconds: 60,  desc: "Fail 30% of S3 GetObject requests" },
+          { name: "Full Stack Chaos",      service: "*",        action: "*",              fault_type: "error",       fault_rate: 0.1,  delay_ms: 0,    duration_seconds: 30,  desc: "Random 10% error rate across all services" },
+          { name: "Secrets Manager Deny",  service: "secretsmanager", action: "GetSecretValue", fault_type: "error", fault_rate: 1.0, delay_ms: 0, duration_seconds: 60, desc: "Block all secret reads — test secret rotation fallback" },
+        ].map(p => (
+          <div key={p.name} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "16px 18px" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{p.name}</div>
+            <div style={{ fontSize: 12, color: "var(--text-faint)", marginBottom: 12, lineHeight: 1.5 }}>{p.desc}</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+              <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{p.service}</span>
+              <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{p.fault_type}</span>
+              <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{Math.round(p.fault_rate*100)}%</span>
+              {p.duration_seconds > 0 && <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{p.duration_seconds}s</span>}
+            </div>
+            <button className="btn-primary" onClick={async () => {
+              await fetch("/api/chaos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...p }) });
+              fetchRules();
+            }} style={{ width: "100%", fontSize: 12 }}>
+              Inject Fault
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -2093,6 +2350,7 @@ export default function Dashboard() {
       <main className={`app-main${["Stackport","Diagrams"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
         {activeTab === "Overview"       && <OverviewTab connected={connected} serviceStatus={serviceStatus} version={version} resourceCounts={resourceCounts} totalResources={totalResources} />}
         {activeTab === "Organizations"  && <OrganizationsTab activeAccount={activeAccount} setActiveAccount={setActiveAccount} />}
+        {activeTab === "Chaos"          && <ChaosTab connected={connected} />}
         {activeTab === "Stackport"      && <StackportTab />}
         {activeTab === "Diagrams"       && <DiagramsTab />}
         {activeTab === "Tutorials"      && <TutorialsTab />}
