@@ -1,0 +1,100 @@
+site_name: Ministack Docs
+site_url: https://kumailr7.github.io/ministack/
+site_description: Tutorials, guides, and reference for Ministack — the free, open-source local AWS emulator.
+site_author: kumailr7
+repo_name: kumailr7/ministack
+repo_url: https://github.com/kumailr7/ministack
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/images/logo.png
+  favicon: assets/images/logo.png
+  palette:
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.follow
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/kumailr7/ministack
+    - icon: fontawesome/brands/docker
+      link: https://hub.docker.com/r/ministackorg/ministack
+  generator: false
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - Overview: tutorials/index.md
+      - Getting Started: tutorials/getting-started.md
+      - S3 — Object Storage: tutorials/s3.md
+      - Lambda — Serverless Functions: tutorials/lambda.md
+      - RDS — Managed Databases: tutorials/rds.md
+      - DynamoDB — NoSQL: tutorials/dynamodb.md
+      - SQS & SNS — Messaging: tutorials/sqs-sns.md
+      - API Gateway: tutorials/api-gateway.md
+  - Guides:
+      - Overview: guides/index.md
+      - Grafana Monitoring: guides/grafana.md
+      - Vector.dev Log Archiving: guides/vector-logging.md
+      - draw.io Architecture Diagrams: guides/drawio.md
+      - Using awslocal TUI: guides/awslocal-tui.md
+      - Stackport Resource Browser: guides/stackport.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - Supported Services: reference/services.md
+      - Ports & Endpoints: reference/ports.md

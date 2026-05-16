@@ -1,0 +1,195 @@
+# =============================================================================
+# Vector.dev  ·  Ministack Observability Pipeline
+#
+# Flow:
+#   Docker containers
+#     └─► docker_logs  (source)
+#           └─► enrich  (remap: add service, category, environment)
+#                 └─► parse_level  (remap: detect ERROR/WARN/INFO/DEBUG)
+#                       └─► aws_enrich  (remap: extract AWS action/service)
+#                             ├─► loki_all    (sink → Grafana Loki, all logs)
+#                             ├─► loki_errors (sink → Grafana Loki, errors only)
+#                             ├─► s3_archive  (sink → Ministack S3, archival)
+#                             └─► console_errors (sink → stderr, debug)
+# =============================================================================
+
+# ─── API  (exposes /health, /metrics, /components on :8686) ──────────────────
+[api]
+enabled    = true
+address    = "0.0.0.0:8686"
+playground = true
+
+# =============================================================================
+# SOURCE: collect stdout/stderr from every container on the Docker host
+# =============================================================================
+[sources.docker_logs]
+type               = "docker_logs"
+# exclude the vector container itself to avoid log loops
+exclude_containers = ["ministack-vector"]
+
+# =============================================================================
+# TRANSFORMS
+# =============================================================================
+
+# ── 1. Service + category enrichment ─────────────────────────────────────────
+[transforms.enrich]
+type   = "remap"
+inputs = ["docker_logs"]
+source = '''
+.service = replace(string!(.container_name), r'^/', "")
+
+.category = if match(.service, r'^ministack-rds') {
+  "database"
+} else if match(.service, r'^ministack-redis') {
+  "cache"
+} else if .service == "ministack" {
+  "aws-emulator"
+} else if match(.service, r'^ministack-grafana|^ministack-prometheus|^ministack-loki|^ministack-cadvisor') {
+  "observability"
+} else if .service == "ministack-dashboard" || .service == "ministack-stackport" {
+  "frontend"
+} else {
+  "infra"
+}
+
+.environment = "local-dev"
+.stack       = "ministack"
+.message     = string!(.message)
+'''
+
+# ── 2. Log-level detection ────────────────────────────────────────────────────
+[transforms.parse_level]
+type   = "remap"
+inputs = ["enrich"]
+source = '''
+msg = downcase(string!(.message))
+
+.level = if match(msg, r'error|exception|traceback|critical|fatal|panic') {
+  "error"
+} else if match(msg, r'warn(?:ing)?') {
+  "warn"
+} else if match(msg, r'debug|trace') {
+  "debug"
+} else {
+  "info"
+}
+'''
+
+# ── 3. AWS API call enrichment ────────────────────────────────────────────────
+[transforms.aws_enrich]
+type   = "remap"
+inputs = ["parse_level"]
+source = '''
+action, err = parse_regex(.message, r'Action=(?P<action>[A-Za-z]+)')
+if err == null {
+  .aws_action = action.action
+}
+
+# Flag potential slow RDS queries (>= 3 digits of milliseconds) — infallible
+.is_slow_query = match!(.message, r'duration: \d{3,}')
+'''
+
+# ── 4. Route errors to a separate stream ─────────────────────────────────────
+[transforms.route_errors]
+type   = "route"
+inputs = ["aws_enrich"]
+
+[transforms.route_errors.route]
+errors = '.level == "error"'
+
+# =============================================================================
+# SINKS
+# =============================================================================
+
+# ── Loki: all logs ────────────────────────────────────────────────────────────
+[sinks.loki_all]
+type           = "loki"
+inputs         = ["aws_enrich"]
+endpoint       = "http://loki:3100"
+encoding.codec = "json"
+
+[sinks.loki_all.labels]
+job         = "vector"
+stack       = "ministack"
+service     = "{{ service }}"
+category    = "{{ category }}"
+level       = "{{ level }}"
+environment = "local-dev"
+
+# ── Loki: errors-only stream ──────────────────────────────────────────────────
+[sinks.loki_errors]
+type           = "loki"
+inputs         = ["route_errors.errors"]
+endpoint       = "http://loki:3100"
+encoding.codec = "json"
+
+[sinks.loki_errors.labels]
+job      = "vector-errors"
+stack    = "ministack"
+service  = "{{ service }}"
+level    = "error"
+stream   = "errors"
+
+# ── S3: archive all logs to Ministack (log lifecycle demo) ────────────────────
+[sinks.s3_archive]
+type                  = "aws_s3"
+inputs                = ["aws_enrich"]
+bucket                = "ministack-logs"
+region                = "us-east-1"
+endpoint              = "http://ministack:4566"
+key_prefix            = "logs/{{ category }}/{{ service }}/%Y/%m/%d/"
+encoding.codec        = "json"
+compression           = "gzip"
+batch.timeout_secs    = 60
+batch.max_bytes       = 10485760
+
+[sinks.s3_archive.tls]
+verify_certificate = false
+
+# ── Garage: cold archive — ALL logs, gzip, 5-minute batches ──────────────────
+# Garage is a self-hosted S3-compatible store (https://garagehq.deuxfleurs.fr)
+# Lifecycle policy: 365-day retention on logs-cold-archive bucket
+[sinks.garage_cold_archive]
+type                   = "aws_s3"
+inputs                 = ["aws_enrich"]
+bucket                 = "logs-cold-archive"
+region                 = "us-east-1"
+endpoint               = "${GARAGE_S3_ENDPOINT}"
+key_prefix             = "logs/{{ category }}/{{ service }}/%Y/%m/%d/%H/"
+encoding.codec         = "json"
+compression            = "gzip"
+batch.timeout_secs     = 300        # 5-minute batches (cold storage — less frequent)
+batch.max_bytes        = 52428800   # 50 MB max per object
+
+[sinks.garage_cold_archive.auth]
+access_key_id     = "${GARAGE_ACCESS_KEY}"
+secret_access_key = "${GARAGE_SECRET_KEY}"
+
+[sinks.garage_cold_archive.tls]
+verify_certificate = false
+
+# ── Garage: RDS slow-query archive — dedicated bucket, 2-year retention ───────
+[sinks.garage_rds_archive]
+type                   = "aws_s3"
+inputs                 = ["route_errors.errors"]   # errors only for RDS
+bucket                 = "logs-rds-archive"
+region                 = "us-east-1"
+endpoint               = "${GARAGE_S3_ENDPOINT}"
+key_prefix             = "rds/errors/%Y/%m/%d/"
+encoding.codec         = "json"
+compression            = "gzip"
+batch.timeout_secs     = 60
+
+[sinks.garage_rds_archive.auth]
+access_key_id     = "${GARAGE_ACCESS_KEY}"
+secret_access_key = "${GARAGE_SECRET_KEY}"
+
+[sinks.garage_rds_archive.tls]
+verify_certificate = false
+
+# ── Console: show errors in stderr for easy debugging ─────────────────────────
+[sinks.console_errors]
+type           = "console"
+inputs         = ["route_errors.errors"]
+encoding.codec = "text"
+target         = "stderr"

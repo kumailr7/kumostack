@@ -1,0 +1,21 @@
+# Garage single-node configuration for Ministack log archiving
+# Docs: https://garagehq.deuxfleurs.fr/documentation/reference-manual/configuration/
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir     = "/var/lib/garage/data"
+
+# Single-node: no replication needed
+replication_factor = 1
+
+# Internal RPC (only used within a cluster — still required)
+rpc_secret   = "4425f5c26c5e11581d3223904324dcb5b5d5dfb14e5e7f35e38c595424f5f1e6"
+rpc_bind_addr = "[::]:3901"
+
+[s3_api]
+api_bind_addr = "[::]:3900"
+s3_region     = "us-east-1"    # use same region as Ministack for Vector compatibility
+root_domain   = ".s3.garage"
+
+[admin]
+api_bind_addr = "0.0.0.0:3903"
+admin_token   = "garage-admin-token"
