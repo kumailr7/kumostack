@@ -1362,50 +1362,125 @@ function StateTab({ connected }: { connected: boolean }) {
 
 // ─── App Inspector Tab ────────────────────────────────────────────────────────
 
-interface ApiRequest { id: string; method: string; service: string; path: string; status: number; duration_ms: number; timestamp: string }
+interface ApiRequest { id: string; method: string; service: string; action: string; path: string; status: number; duration_ms: number; timestamp: string; region: string }
 function AppInspectorTab({ connected }: { connected: boolean }) {
   const [requests, setRequests] = useState<ApiRequest[]>([]);
   const [loading, setLoading]   = useState(false);
-  const [live, setLive]         = useState(false);
+  const [live, setLive]         = useState(true);
+  const [filter, setFilter]     = useState("");
+
   const load = useCallback(() => {
     setLoading(true);
-    fetch("/api/requests").then((r) => r.json()).then((d) => { setRequests(Array.isArray(d) ? d : []); setLoading(false); }).catch(() => { setRequests([]); setLoading(false); });
+    fetch("/api/requests").then((r) => r.json()).then((d) => {
+      setRequests(Array.isArray(d) ? d : []);
+      setLoading(false);
+    }).catch(() => { setRequests([]); setLoading(false); });
   }, []);
+
   useEffect(() => { if (connected) load(); }, [connected, load]);
-  useEffect(() => { if (!live || !connected) return; const id = setInterval(load, 3000); return () => clearInterval(id); }, [live, connected, load]);
+  useEffect(() => {
+    if (!live || !connected) return;
+    const id = setInterval(load, 2000);
+    return () => clearInterval(id);
+  }, [live, connected, load]);
+
+  const visible = filter
+    ? requests.filter(r => r.service?.includes(filter) || r.path?.includes(filter) || r.action?.includes(filter))
+    : requests;
+
+  const errorCount  = visible.filter(r => r.status >= 400).length;
+  const chaosCount  = visible.filter(r => r.status === 429 || r.status === 503).length;
+
   return (
     <div>
       <div className="page-header">
-        <div><h1 className="page-title">App Inspector</h1><p className="page-subtitle">Live AWS API request trace</p></div>
+        <div>
+          <h1 className="page-title">App Inspector</h1>
+          <p className="page-subtitle">Live AWS API request trace — last 500 calls</p>
+        </div>
         <div className="tab-actions">
-          <button className={`btn btn-sm ${live ? "btn-primary" : ""}`} onClick={() => setLive(!live)}>{live ? "⏸ Pause" : "▶ Live"}</button>
-          <button className="btn btn-sm" onClick={load} disabled={!connected}>Refresh</button>
+          <button className={`btn btn-sm${live ? " btn-primary" : ""}`} onClick={() => setLive(!live)}>
+            {live ? "⏸ Pause" : "▶ Live"}
+          </button>
+          <button className="btn btn-sm" onClick={load} disabled={!connected || loading}>↺ Refresh</button>
           <button className="btn btn-sm btn-danger" onClick={() => setRequests([])}>Clear</button>
         </div>
       </div>
+
       {!connected && <DisconnectedNotice />}
+
       {connected && (
-        <div className="table-wrap">
-          {loading && requests.length === 0 && <div className="empty-state">Loading…</div>}
-          {!loading && requests.length === 0 && <div className="empty-state">No API requests captured yet.</div>}
-          {requests.length > 0 && (
-            <table className="data-table">
-              <thead><tr><th>Method</th><th>Service</th><th>Path</th><th>Status</th><th>Duration</th><th>Time</th></tr></thead>
-              <tbody>
-                {requests.map((r) => (
-                  <tr key={r.id}>
-                    <td><span className={`method-badge method-${r.method.toLowerCase()}`}>{r.method}</span></td>
-                    <td className="td-dim">{r.service}</td>
-                    <td className="td-mono" style={{ maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.path}</td>
-                    <td><span className={`pill ${r.status < 400 ? "pill--green" : "pill--red"}`}>{r.status}</span></td>
-                    <td className="td-dim">{r.duration_ms}ms</td>
-                    <td className="td-dim" style={{ whiteSpace: "nowrap" }}>{r.timestamp}</td>
+        <>
+          {/* Stats + filter row */}
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              {[
+                { label: "Total",    value: visible.length,  color: "var(--text-dim)" },
+                { label: "Errors",   value: errorCount,      color: errorCount  > 0 ? "#ef4444" : "var(--text-dim)" },
+                { label: "Chaos",    value: chaosCount,      color: chaosCount  > 0 ? "#f59e0b" : "var(--text-dim)" },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "6px 14px", display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontSize: 16, fontWeight: 700, color, lineHeight: 1 }}>{value}</span>
+                  <span style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</span>
+                </div>
+              ))}
+            </div>
+            <input
+              className="search"
+              placeholder="Filter by service, action, path…"
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+              style={{ marginLeft: "auto", width: 260, marginBottom: 0 }}
+            />
+          </div>
+
+          <div className="table-wrap">
+            {loading && requests.length === 0 && <div className="empty-state">Loading…</div>}
+            {!loading && requests.length === 0 && (
+              <div className="empty-state">No API requests yet. Make an AWS SDK call to see it appear here.</div>
+            )}
+            {visible.length > 0 && (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Method</th>
+                    <th>Service</th>
+                    <th>Action</th>
+                    <th>Path</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Region</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+                </thead>
+                <tbody>
+                  {visible.map((r) => {
+                    const isError = r.status >= 400;
+                    const isChaos = r.status === 429 || r.status === 503;
+                    return (
+                      <tr key={r.id} style={{ opacity: isError ? 0.95 : 1 }}>
+                        <td className="td-dim" style={{ whiteSpace: "nowrap", fontSize: 11 }}>{r.timestamp?.slice(11, 19)}</td>
+                        <td><span className={`method-badge method-${r.method?.toLowerCase()}`}>{r.method}</span></td>
+                        <td style={{ fontWeight: 600, color: "var(--text)", fontSize: 12 }}>{r.service}</td>
+                        <td className="td-dim" style={{ fontSize: 11, fontFamily: "var(--font-mono,monospace)" }}>{r.action}</td>
+                        <td className="td-mono" style={{ maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11 }}>{r.path}</td>
+                        <td>
+                          <span className={`pill ${isChaos ? "" : r.status < 400 ? "pill--green" : "pill--red"}`} style={{ fontSize: 10, background: isChaos ? "#f59e0b20" : undefined, color: isChaos ? "#f59e0b" : undefined, border: isChaos ? "1px solid #f59e0b40" : undefined }}>
+                            {r.status}
+                          </span>
+                        </td>
+                        <td className="td-dim" style={{ whiteSpace: "nowrap" }}>
+                          <span style={{ color: r.duration_ms > 1000 ? "#f59e0b" : "inherit" }}>{r.duration_ms}ms</span>
+                        </td>
+                        <td className="td-dim" style={{ fontSize: 11 }}>{r.region}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
@@ -2370,58 +2445,103 @@ function ChaosTab({ connected }: { connected: boolean }) {
             </div>
           )}
 
-          <div className="section-header" style={{ marginTop: 28, marginBottom: 12 }}>AVAILABLE CONTAINERS</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
-            {containers.map(c => (
-              <div key={c.id} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
-                <span className={`svc-dot ${c.status === "running" ? "svc-dot--up" : "svc-dot--idle"}`} />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
-                  <div style={{ fontSize: 10, color: "var(--text-faint)" }}>{c.status} · {c.image.split(":")[0].split("/").pop()}</div>
-                </div>
-                <button className="pill-btn" onClick={() => setPumbaContainer(c.name)} style={{ marginLeft: "auto", fontSize: 10, padding: "2px 8px", flexShrink: 0 }}>Target</button>
+          <div className="section-header" style={{ marginTop: 28, marginBottom: 12 }}>AWS SERVICE CONTAINERS</div>
+          {containers.length === 0 ? (
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "24px 28px", color: "var(--text-dim)", fontSize: 13, lineHeight: 1.8 }}>
+              <div style={{ fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>No AWS service containers running</div>
+              Pumba targets containers created by KumoStack when you provision AWS services. Start one of the following to see it here:
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+                {["RDS — CreateDBInstance", "ElastiCache — CreateCacheCluster", "OpenSearch — CreateDomain", "ECS — CreateCluster", "EKS — CreateCluster"].map(s => (
+                  <span key={s} style={{ fontSize: 11, padding: "3px 9px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{s}</span>
+                ))}
               </div>
-            ))}
-            {containers.length === 0 && <div style={{ fontSize: 13, color: "var(--text-faint)", padding: "8px 0" }}>No KumoStack containers detected. Start RDS or ElastiCache services first.</div>}
-          </div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))", gap: 8 }}>
+              {containers.map(c => (
+                <div key={c.id} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className={`svc-dot ${c.status === "running" ? "svc-dot--up" : "svc-dot--idle"}`} />
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                    <div style={{ fontSize: 10, color: "var(--text-faint)" }}>{c.status} · {c.image.split(":")[0].split("/").pop()}</div>
+                  </div>
+                  <button className="pill-btn" onClick={() => setPumbaContainer(c.name)} style={{ fontSize: 10, padding: "2px 8px", flexShrink: 0 }}>Target</button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {/* ── REGION FAILOVER ── */}
       {activeSection === "region" && (
         <div>
-          <div className="section-header" style={{ marginBottom: 16 }}>MULTI-REGION ARCHITECTURE</div>
-          {/* Architecture diagram — based on the Route53 failover diagram */}
-          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 28, marginBottom: 28, overflowX: "auto" }}>
-            <div style={{ display: "flex", alignItems: "stretch", gap: 0, minWidth: 700 }}>
-              {/* Route53 */}
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 24px 0 0", gap: 8 }}>
-                <div style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(99,91,199,0.2)", border: "2px solid #635bc7", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🌐</div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)" }}>Route 53</div>
-                <div style={{ fontSize: 10, color: "var(--text-faint)" }}>DNS Failover</div>
+          <div className="section-header" style={{ marginBottom: 16 }}>ROUTE 53 FAILOVER DIAGRAM</div>
+
+          {/* ── Failover diagram ── */}
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "24px 28px", marginBottom: 24, overflowX: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 0, minWidth: 680 }}>
+
+              {/* Route 53 box */}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, minWidth: 100 }}>
+                <div style={{ width: 52, height: 52, borderRadius: "50%", background: "rgba(99,91,199,0.15)", border: "2px solid #635bc7", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#635bc7" strokeWidth="1.8"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", textAlign: "center" }}>Route 53</div>
+                <div style={{ fontSize: 9, color: "var(--text-faint)", textAlign: "center", lineHeight: 1.4 }}>DNS Failover<br/>Health Check</div>
               </div>
-              {/* Lines to regions */}
-              <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-around", gap: 8, flex: 1 }}>
-                {[{ region: "us-east-1", label: "Primary", color: "#10b981" }, { region: "eu-central-1", label: "Standby", color: "#f59e0b" }].map(({ region, label, color }) => {
+
+              {/* Arrows + regions */}
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+                {([
+                  { region: "us-east-1",   label: "Primary",  roleColor: "#10b981", svcs: ["API Gateway","Lambda","DynamoDB","Replication λ"] },
+                  { region: "eu-central-1", label: "Standby",  roleColor: "#f59e0b", svcs: ["API Gateway","Lambda","DynamoDB"] },
+                ] as const).map(({ region, label, roleColor, svcs }) => {
                   const status = regionHealth[region] ?? "healthy";
                   const sc = REGION_STATUS_COLOR[status] ?? "#10b981";
+                  const isActive = status === "healthy" || status === "degraded";
                   return (
-                    <div key={region} style={{ background: `${sc}08`, border: `2px dashed ${sc}60`, borderRadius: "var(--radius)", padding: "16px 20px", display: "flex", alignItems: "center", gap: 16 }}>
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: sc, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{region}</div>
-                        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-                          {["API Gateway", "Lambda", "DynamoDB"].map(svc => <span key={svc} style={{ fontSize: 10, padding: "2px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: status === "down" ? "#ef4444" : "var(--text-dim)" }}>{svc}</span>)}
-                          {region === "us-east-1" && <span style={{ fontSize: 10, padding: "2px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>Replication λ</span>}
-                        </div>
+                    <div key={region} style={{ display: "flex", alignItems: "center", gap: 0 }}>
+                      {/* arrow */}
+                      <div style={{ display: "flex", alignItems: "center", width: 60, flexShrink: 0 }}>
+                        <div style={{ flex: 1, height: 2, background: isActive ? sc : "#3f3f3f", transition: "background 0.3s" }} />
+                        <svg width="8" height="12" viewBox="0 0 8 12" fill={isActive ? sc : "#3f3f3f"}><path d="M0 0 L8 6 L0 12 Z"/></svg>
                       </div>
-                      <div style={{ marginLeft: "auto", display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
-                        <span className={`pill ${status === "healthy" ? "pill--green" : status === "degraded" ? "" : "pill--red"}`} style={{ fontSize: 10 }}>{status.toUpperCase()}</span>
-                        <div style={{ display: "flex", gap: 5 }}>
-                          {status !== "healthy"   && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}   style={{ fontSize: 10, padding: "2px 8px", color: "#10b981", borderColor: "#10b98140" }}>Restore</button>}
-                          {status !== "degraded"  && <button className="pill-btn" onClick={() => setRegion(region, "degraded")}  style={{ fontSize: 10, padding: "2px 8px", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
-                          {status !== "down"      && <button className="pill-btn" onClick={() => setRegion(region, "down")}      style={{ fontSize: 10, padding: "2px 8px", color: "#ef4444", borderColor: "#ef444440" }}>Take Down</button>}
+                      {/* region card */}
+                      <div style={{ flex: 1, background: `${sc}08`, border: `1.5px solid ${sc}40`, borderRadius: "var(--radius)", padding: "14px 18px", transition: "border-color 0.3s" }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10 }}>
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", background: `${roleColor}20`, border: `1px solid ${roleColor}50`, color: roleColor, borderRadius: 3, letterSpacing: "0.1em" }}>{label}</span>
+                              <span className={`pill ${status === "healthy" ? "pill--green" : status === "degraded" ? "" : "pill--red"}`} style={{ fontSize: 9 }}>{status.toUpperCase()}</span>
+                            </div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", fontFamily: "var(--font-mono,monospace)" }}>{region}</div>
+                          </div>
+                          <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
+                            {status !== "healthy"  && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}  style={{ fontSize: 10, padding: "3px 10px", color: "#10b981", borderColor: "#10b98140" }}>✓ Restore</button>}
+                            {status !== "degraded" && <button className="pill-btn" onClick={() => setRegion(region, "degraded")} style={{ fontSize: 10, padding: "3px 10px", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
+                            {status !== "down"     && <button className="pill-btn" onClick={() => setRegion(region, "down")}     style={{ fontSize: 10, padding: "3px 10px", color: "#ef4444", borderColor: "#ef444440" }}>Take Down</button>}
+                          </div>
                         </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                          {svcs.map(svc => (
+                            <span key={svc} style={{ fontSize: 10, padding: "2px 8px", background: "var(--bg-elevated)", border: `1px solid ${status === "down" ? "#ef444440" : "var(--border)"}`, borderRadius: 3, color: status === "down" ? "#ef4444" : "var(--text-dim)" }}>
+                              {status === "down" && <span style={{ marginRight: 3 }}>✗</span>}{svc}
+                            </span>
+                          ))}
+                        </div>
+                        {status === "degraded" && (
+                          <div style={{ marginTop: 8, fontSize: 10, color: "#f59e0b", display: "flex", alignItems: "center", gap: 5 }}>
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                            +1–3s random latency on all API calls
+                          </div>
+                        )}
+                        {status === "down" && (
+                          <div style={{ marginTop: 8, fontSize: 10, color: "#ef4444", display: "flex", alignItems: "center", gap: 5 }}>
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                            503 ServiceUnavailableException for all calls to this region
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -2431,31 +2551,31 @@ function ChaosTab({ connected }: { connected: boolean }) {
           </div>
 
           <div className="section-header" style={{ marginBottom: 12 }}>ALL REGIONS</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))", gap: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(210px,1fr))", gap: 8 }}>
             {REGIONS_LIST.map(region => {
               const status = regionHealth[region] ?? "healthy";
               const sc = REGION_STATUS_COLOR[status] ?? "#10b981";
               return (
-                <div key={region} style={{ background: "var(--bg-card)", border: `1px solid ${sc}30`, borderRadius: "var(--radius-sm)", padding: "12px 14px" }}>
+                <div key={region} style={{ background: "var(--bg-card)", border: `1px solid ${sc}35`, borderRadius: "var(--radius-sm)", padding: "12px 14px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{region}</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", fontFamily: "var(--font-mono,monospace)" }}>{region}</div>
                     <span className={`pill ${status === "healthy" ? "pill--green" : status === "degraded" ? "" : "pill--red"}`} style={{ fontSize: 9 }}>{status.toUpperCase()}</span>
                   </div>
-                  <div style={{ display: "flex", gap: 5 }}>
-                    {status !== "healthy"  && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}  style={{ flex: 1, fontSize: 10, padding: "2px 0", color: "#10b981", borderColor: "#10b98140" }}>✓ Restore</button>}
-                    {status !== "degraded" && <button className="pill-btn" onClick={() => setRegion(region, "degraded")} style={{ flex: 1, fontSize: 10, padding: "2px 0", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
-                    {status !== "down"     && <button className="pill-btn" onClick={() => setRegion(region, "down")}     style={{ flex: 1, fontSize: 10, padding: "2px 0", color: "#ef4444", borderColor: "#ef444440" }}>Down</button>}
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {status !== "healthy"  && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}  style={{ flex: 1, fontSize: 9, padding: "3px 0", color: "#10b981", borderColor: "#10b98140" }}>✓ Restore</button>}
+                    {status !== "degraded" && <button className="pill-btn" onClick={() => setRegion(region, "degraded")} style={{ flex: 1, fontSize: 9, padding: "3px 0", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
+                    {status !== "down"     && <button className="pill-btn" onClick={() => setRegion(region, "down")}     style={{ flex: 1, fontSize: 9, padding: "3px 0", color: "#ef4444", borderColor: "#ef444440" }}>Down</button>}
                   </div>
                 </div>
               );
             })}
           </div>
 
-          <div style={{ marginTop: 24, padding: "14px 18px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
-            <strong style={{ color: "var(--text)" }}>How region chaos works:</strong> Setting a region to <strong style={{ color: "#ef4444" }}>DOWN</strong> causes KumoStack to return
-            503 ServiceUnavailableException for every API call whose SigV4 credential scope targets that region — simulating a full region outage.
-            <strong style={{ color: "#f59e0b" }}> DEGRADED</strong> adds 1–3s random latency to every call in that region.
-            Route 53 health checks for the failed region return UNHEALTHY, triggering DNS failover to the standby region.
+          <div style={{ marginTop: 20, padding: "12px 16px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", fontSize: 11, color: "var(--text-dim)", lineHeight: 1.7 }}>
+            <strong style={{ color: "var(--text)" }}>How it works:</strong>{" "}
+            <strong style={{ color: "#ef4444" }}>DOWN</strong> → KumoStack returns 503 for every call whose SigV4 scope targets that region.{" "}
+            <strong style={{ color: "#f59e0b" }}>DEGRADED</strong> → adds 1–3s random latency per call.
+            Route 53 health checks flip UNHEALTHY for down regions, triggering DNS failover to the standby.
           </div>
         </div>
       )}

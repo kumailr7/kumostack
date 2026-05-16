@@ -9,9 +9,10 @@ import {
 } from "@aws-sdk/client-elastic-load-balancing-v2";
 import { CloudFrontClient, ListDistributionsCommand } from "@aws-sdk/client-cloudfront";
 import { RDSClient, DescribeDBInstancesCommand } from "@aws-sdk/client-rds";
-import { LambdaClient, ListFunctionsCommand } from "@aws-sdk/client-lambda";
+import { LambdaClient, ListFunctionsCommand, ListEventSourceMappingsCommand, GetFunctionCommand } from "@aws-sdk/client-lambda";
 import { DynamoDBClient, ListTablesCommand } from "@aws-sdk/client-dynamodb";
 import { SQSClient, ListQueuesCommand } from "@aws-sdk/client-sqs";
+import { SNSClient, ListTopicsCommand, ListSubscriptionsCommand } from "@aws-sdk/client-sns";
 import { WAFV2Client, ListWebACLsCommand, ListResourcesForWebACLCommand } from "@aws-sdk/client-wafv2";
 import { ECRClient, DescribeRepositoriesCommand } from "@aws-sdk/client-ecr";
 import { SecretsManagerClient, ListSecretsCommand } from "@aws-sdk/client-secrets-manager";
@@ -100,6 +101,7 @@ export async function GET() {
     security: [], cdn: [], networking: [], compute: [],
     storage: [], database: [], messaging: [], secrets: [],
   };
+  const snsArnToNodeId = new Map<string, string>();
 
   // S3
   const s3 = new S3Client({ ...baseConfig, forcePathStyle: true });
@@ -217,18 +219,72 @@ export async function GET() {
   for (const table of (await tryFetch(() => dynamo.send(new ListTablesCommand({}))))?.TableNames ?? [])
     groups.database.push(node(`dynamo-${table}`, table, "dynamodb", "active"));
 
-  // Lambda
-  const lambda = new LambdaClient(baseConfig);
-  for (const fn of (await tryFetch(() => lambda.send(new ListFunctionsCommand({}))))?.Functions ?? []) {
-    const name = fn.FunctionName ?? "fn";
-    groups.compute.push(node(`lambda-${name}`, name, "lambda", "active", { runtime: fn.Runtime ?? "" }));
+  // SNS — populate snsArnToNodeId before Lambda so Lambda→SNS edges resolve
+  const snsc = new SNSClient(baseConfig);
+  const snsTopics = (await tryFetch(() => snsc.send(new ListTopicsCommand({}))))?.Topics ?? [];
+  for (const t of snsTopics) {
+    const arn = t.TopicArn ?? "";
+    const name = arn.split(":").pop() ?? arn;
+    const nid = `sns-${name}`;
+    groups.messaging.push(node(nid, name, "sns", "active", { arn }));
+    snsArnToNodeId.set(arn, nid);
   }
 
-  // SQS
+  // SQS — populate sqsArnToNodeId before ESM edges
+  const sqsArnToNodeId = new Map<string, string>();
   const sqs = new SQSClient(baseConfig);
-  for (const url of (await tryFetch(() => sqs.send(new ListQueuesCommand({}))))?.QueueUrls ?? []) {
+  const sqsUrls = (await tryFetch(() => sqs.send(new ListQueuesCommand({}))))?.QueueUrls ?? [];
+  for (const url of sqsUrls) {
     const name = url.split("/").pop() ?? "queue";
-    groups.messaging.push(node(`sqs-${name}`, name, "sqs", "active", { url }));
+    const sqsArn = `arn:aws:sqs:${REGION}:000000000000:${name}`;
+    const nid = `sqs-${name}`;
+    groups.messaging.push(node(nid, name, "sqs", "active", { url }));
+    sqsArnToNodeId.set(sqsArn, nid);
+  }
+
+  // SNS → SQS subscription edges
+  const subs = (await tryFetch(() => snsc.send(new ListSubscriptionsCommand({}))))?.Subscriptions ?? [];
+  for (const sub of subs) {
+    if (sub.Protocol !== "sqs") continue;
+    const snsSrc = snsArnToNodeId.get(sub.TopicArn ?? "");
+    const sqsDst = sqsArnToNodeId.get(sub.Endpoint ?? "");
+    if (snsSrc && sqsDst) edges.push(edge(snsSrc, sqsDst, "publish"));
+  }
+
+  // Lambda — built after SNS/SQS so env-var edges resolve
+  const lambda = new LambdaClient(baseConfig);
+  const lambdaFns = (await tryFetch(() => lambda.send(new ListFunctionsCommand({}))))?.Functions ?? [];
+  for (const fn of lambdaFns) {
+    const name = fn.FunctionName ?? "fn";
+    const nid = `lambda-${name}`;
+    const envVars = fn.Environment?.Variables ?? {};
+    groups.compute.push(node(nid, name, "lambda", "active", { runtime: fn.Runtime ?? "" }));
+    for (const [k, v] of Object.entries(envVars)) {
+      if ((k === "TABLE_NAME" || k.endsWith("_TABLE")) && v) {
+        const dynId = `dynamo-${v}`;
+        if (groups.database.some(n => n.id === dynId)) edges.push(edge(nid, dynId, "read/write"));
+      }
+      if ((k.includes("TOPIC") || k.includes("SNS")) && v.startsWith("arn:aws:sns")) {
+        const snsDst = snsArnToNodeId.get(v);
+        if (snsDst) edges.push(edge(nid, snsDst, "publish"));
+      }
+      if (k.includes("QUEUE") && v) {
+        const queueName = v.split("/").pop() ?? "";
+        const sqsDst = `sqs-${queueName}`;
+        if (groups.messaging.some(n => n.id === sqsDst)) edges.push(edge(nid, sqsDst, "send"));
+      }
+    }
+  }
+
+  // SQS → Lambda (event source mappings)
+  const esms = (await tryFetch(() => lambda.send(new ListEventSourceMappingsCommand({}))))?.EventSourceMappings ?? [];
+  for (const esm of esms) {
+    const src = esm.EventSourceArn ?? "";
+    const fnName = esm.FunctionArn?.split(":").pop() ?? "";
+    const srcId = sqsArnToNodeId.get(src) ?? snsArnToNodeId.get(src);
+    const dstId = `lambda-${fnName}`;
+    if (srcId && groups.compute.some(n => n.id === dstId))
+      edges.push(edge(srcId, dstId, "trigger"));
   }
 
   // Secrets Manager

@@ -682,6 +682,10 @@ async def _handle_pre_body_request(method: str, path: str, headers: dict, query_
     if response is not None:
         return response
 
+    response = await _handle_requests_log(path, method, query_params)
+    if response is not None:
+        return response
+
     response = await _handle_chaos_request(method, path, b"", query_params)
     if response is not None:
         return response
@@ -740,6 +744,18 @@ async def _handle_cognito_body_request(method: str, path: str, headers: dict, bo
     if path in _COGNITO_USERINFO_PATHS and method == "POST":
         return _get_module("cognito").handle_oauth2_userinfo(method, path, headers, body, query_params)
     return None
+
+
+async def _handle_requests_log(path: str, method: str, query_params: dict):
+    """GET /_kumostack/requests — return recent API request trace."""
+    if path != "/_kumostack/requests" or method != "GET":
+        return None
+    ct = {"Content-Type": "application/json"}
+    limit = int((query_params.get("limit") or [200])[0])
+    with _request_log_lock:
+        entries = list(_request_log)[-limit:]
+    entries.reverse()  # newest first
+    return 200, ct, json.dumps(entries).encode()
 
 
 async def _handle_admin_config_request(path: str, method: str, body: bytes):
@@ -1401,6 +1417,7 @@ async def _dispatch_service_request(
     method: str, path: str, headers: dict, body: bytes, query_params: dict, request_id: str
 ):
     """Dispatch a request through the generic service router."""
+    _t_start = _time.monotonic()
     routing_params = _routing_params(method, path, headers, body, query_params)
     service = detect_service(method, path, headers, routing_params)
     region = extract_region(headers)
@@ -1439,6 +1456,22 @@ async def _dispatch_service_request(
 
     _maybe_record_cloudtrail(service, method, path, headers, body, query_params, request_id, region)
 
+    # ── Append to request trace log ────────────────────────────────────
+    _t_end = _time.monotonic()
+    with _request_log_lock:
+        _request_log.append({
+            "id":          request_id,
+            "method":      method,
+            "service":     service,
+            "action":      _action,
+            "path":        path,
+            "status":      status,
+            "duration_ms": round((_t_end - _t_start) * 1000) if "_t_start" in dir() else 0,
+            "timestamp":   _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "region":      region,
+        })
+    # ── End request log ────────────────────────────────────────────────
+
     resp_headers.update(
         {
             "Access-Control-Allow-Origin": "*",
@@ -1460,9 +1493,14 @@ async def _dispatch_service_request(
 import random
 import threading
 import time as _time
+from collections import deque
 
 _chaos_lock = threading.Lock()
 _chaos_rules: dict[str, dict] = {}  # rule_id → rule
+
+# ── Request trace log ────────────────────────────────────────────────────────
+_request_log: deque = deque(maxlen=500)  # ring buffer of recent API calls
+_request_log_lock = threading.Lock()
 
 # Region health: region → "healthy" | "degraded" | "down"
 _region_health: dict[str, str] = {}
@@ -1749,23 +1787,41 @@ async def _handle_chaos_containers(method: str, path: str):
     dc = _get_docker_client()
     if not dc:
         return 200, ct, json.dumps({"containers": []}).encode()
+    # Internal KumoStack platform containers — never valid Pumba targets
+    _INFRA_NAMES = frozenset({
+        "kumostack", "kumostack-dashboard", "kumostack-vector", "kumostack-stackport",
+        "kumostack-drawio", "kumostack-loki", "kumostack-prometheus", "kumostack-grafana",
+        "kumostack-cadvisor", "kumostack-garage", "kumostack-redis-exporter",
+        "ministack-dashboard", "ministack-vector", "ministack-loki", "ministack-prometheus",
+        "ministack-grafana", "ministack-cadvisor",
+    })
     try:
-        running = dc.containers.list(filters={"label": "kumostack"})
-        result = [
-            {"name": c.name, "id": c.short_id, "status": c.status,
-             "labels": dict(c.labels), "image": c.image.tags[0] if c.image.tags else "unknown"}
-            for c in running
-        ]
-        # Also include known infrastructure containers by name prefix
-        all_c = dc.containers.list(all=False)
-        infra = [
-            {"name": c.name, "id": c.short_id, "status": c.status,
-             "labels": {}, "image": c.image.tags[0] if c.image.tags else "unknown"}
-            for c in all_c if any(c.name.startswith(p) for p in (
-                "kumostack-", "ministack-", "ministack"
-            )) and c.name not in {r["name"] for r in result}
-        ]
-        return 200, ct, json.dumps({"containers": result + infra}).encode()
+        # Primary: containers labeled with kumostack service labels (RDS, ElastiCache, OpenSearch, ECS, EKS…)
+        service_containers: list[dict] = []
+        seen_ids: set[str] = set()
+
+        for label_filter in ("kumostack=rds", "kumostack=elasticache", "kumostack=ecs",
+                             "kumostack=eks", "kumostack=lambda",
+                             "com.kumostack.service"):
+            for c in dc.containers.list(filters={"label": label_filter}):
+                if c.short_id in seen_ids:
+                    continue
+                seen_ids.add(c.short_id)
+                svc_type = (
+                    c.labels.get("kumostack") or
+                    c.labels.get("com.kumostack.service") or
+                    "aws"
+                )
+                service_containers.append({
+                    "name":     c.name,
+                    "id":       c.short_id,
+                    "status":   c.status,
+                    "labels":   dict(c.labels),
+                    "image":    c.image.tags[0] if c.image.tags else "unknown",
+                    "svc_type": svc_type,
+                })
+
+        return 200, ct, json.dumps({"containers": service_containers}).encode()
     except Exception as e:
         return 500, ct, json.dumps({"error": str(e)}).encode()
 
