@@ -2,8 +2,11 @@ name: Sync Upstream
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Every 6 hours
-  workflow_dispatch: # Allow manual trigger
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   sync:
@@ -12,7 +15,8 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Fetch all history for all branches and tags
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -21,18 +25,13 @@ jobs:
 
       - name: Sync with upstream
         run: |
-          # Add upstream remote
           git remote add upstream https://github.com/ministackorg/ministack.git
           git fetch upstream
 
-          # Switch to main branch
           git checkout main
 
-          # Merge upstream main into local main
-          # --no-edit skips the editor for the commit message
-          # --ff-only ensures we only fast-forward, failing if there are conflicts
-          # If conflicts occur, the action will fail, alerting the owner to manual intervention
-          git merge upstream/main --ff-only
+          # Merge upstream changes — allow merge commits since fork has diverged
+          # If there are conflicts this step will fail and alert the owner
+          git merge upstream/main --no-edit
 
-          # Push changes back to the fork's origin
           git push origin main

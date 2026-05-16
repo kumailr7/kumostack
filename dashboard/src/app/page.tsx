@@ -164,7 +164,8 @@ const COLUMNS: Section[][] = [
 
 const NAV_ITEMS = [
   { id: "Overview",         label: "Overview",         icon: <IconGrid /> },
-  { id: "Stackport",        label: "Resource Browser", icon: <IconStackport />, highlight: true },
+  { id: "Organizations",    label: "Organizations",    icon: <IconOrg />, highlight: true },
+  { id: "Stackport",        label: "Resource Browser", icon: <IconStackport /> },
   { id: "Diagrams",         label: "Diagrams",         icon: <IconDrawio /> },
   { id: "Tutorials",        label: "Tutorials",        icon: <IconBook /> },
   { id: "Extensions",       label: "Extensions",       icon: <IconPuzzle /> },
@@ -179,6 +180,61 @@ const REGIONS = ["us-east-1","us-east-2","us-west-1","us-west-2","eu-west-1","eu
 
 type ServiceStatus    = Record<string, string>;
 type ResourceCounts   = Record<string, number>;
+
+// ─── Multi-Account / Organizations Types ──────────────────────────────────────
+
+type AccountStatus = "ACTIVE" | "SUSPENDED";
+type AccountType   = "MANAGEMENT" | "MEMBER";
+
+interface Account {
+  id:     string;
+  name:   string;
+  email:  string;
+  status: AccountStatus;
+  region: string;
+  ouId:   string | null;
+  type:   AccountType;
+  color:  string;
+}
+
+interface OrgUnit {
+  id:       string;
+  name:     string;
+  parentId: string | null;
+}
+
+interface SCP {
+  id:          string;
+  name:        string;
+  description: string;
+  effect:      "ALLOW" | "DENY";
+  services:    string[];
+  attachedTo:  string[];
+  status:      "ENABLED" | "DISABLED";
+}
+
+const MOCK_OUS: OrgUnit[] = [
+  { id: "r-0001",  name: "Root",          parentId: null      },
+  { id: "ou-eng",  name: "Engineering",   parentId: "r-0001"  },
+  { id: "ou-data", name: "Data Platform", parentId: "r-0001"  },
+  { id: "ou-prod", name: "Production",    parentId: "r-0001"  },
+];
+
+const MOCK_ACCOUNTS: Account[] = [
+  { id: "000000000000", name: "management",   email: "root@kumostack.local",    status: "ACTIVE", region: "us-east-1", ouId: "r-0001",  type: "MANAGEMENT", color: "#10b981" },
+  { id: "111111111111", name: "dev-team",     email: "dev@kumostack.local",     status: "ACTIVE", region: "us-east-1", ouId: "ou-eng",  type: "MEMBER",     color: "#3b82f6" },
+  { id: "222222222222", name: "staging",      email: "staging@kumostack.local", status: "ACTIVE", region: "us-east-1", ouId: "ou-eng",  type: "MEMBER",     color: "#f59e0b" },
+  { id: "333333333333", name: "production",   email: "prod@kumostack.local",    status: "ACTIVE", region: "us-east-2", ouId: "ou-prod", type: "MEMBER",     color: "#ef4444" },
+  { id: "444444444444", name: "data-pipeline",email: "data@kumostack.local",    status: "ACTIVE", region: "us-west-2", ouId: "ou-data", type: "MEMBER",     color: "#8b5cf6" },
+];
+
+const MOCK_SCPS: SCP[] = [
+  { id: "scp-001", name: "DenyS3BucketDelete",  description: "Prevent S3 bucket deletion in production",      effect: "DENY",  services: ["S3"],     attachedTo: ["ou-prod"],              status: "ENABLED"  },
+  { id: "scp-002", name: "RequireRegionLock",    description: "Restrict to us-east-1 and us-east-2 only",     effect: "DENY",  services: ["*"],      attachedTo: ["r-0001"],               status: "ENABLED"  },
+  { id: "scp-003", name: "DenyRootUser",         description: "Deny all actions performed by the root user",  effect: "DENY",  services: ["*"],      attachedTo: ["r-0001"],               status: "ENABLED"  },
+  { id: "scp-004", name: "AllowLambdaFullDev",   description: "Allow full Lambda access in Engineering OU",   effect: "ALLOW", services: ["Lambda"], attachedTo: ["ou-eng"],               status: "ENABLED"  },
+  { id: "scp-005", name: "DenyIAMUserCreate",    description: "Enforce federation — no long-term IAM users",  effect: "DENY",  services: ["IAM"],    attachedTo: ["ou-prod", "ou-data"],   status: "DISABLED" },
+];
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -196,6 +252,7 @@ function IconTerminal() { return <svg width="16" height="16" viewBox="0 0 24 24"
 function IconChevron({ open }: { open: boolean }) {
   return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? "rotate(0deg)" : "rotate(180deg)", transition: "transform 0.2s" }}><polyline points="15 18 9 12 15 6"/></svg>;
 }
+function IconOrg() { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><rect x="1" y="17" width="6" height="4" rx="1"/><rect x="9" y="17" width="6" height="4" rx="1"/><rect x="17" y="17" width="6" height="4" rx="1"/><path d="M4 17v-3a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v3M12 6v7"/></svg>; }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -249,7 +306,7 @@ interface Tutorial {
   tags: string[];
 }
 
-const DOCS_BASE = "https://kumailr7.github.io/kumostack";
+const DOCS_BASE = "https://kumailr7.github.io/ministack";
 
 const TUTORIALS: Tutorial[] = [
   {
@@ -406,7 +463,7 @@ function TutorialsTab() {
             {TUTORIALS.length} hands-on guides — built for KumoStack ·{" "}
             <a href={DOCS_BASE} target="_blank" rel="noreferrer"
                style={{ color: "var(--accent)", textDecoration: "none" }}>
-              kumailr7.github.io/kumostack ↗
+              kumailr7.github.io/ministack ↗
             </a>
           </p>
         </div>
@@ -537,7 +594,7 @@ function TutorialsTab() {
 // ─── Diagrams Tab (draw.io) ───────────────────────────────────────────────────
 
 // Starter KumoStack architecture diagram encoded as draw.io XML
-const MINISTACK_TEMPLATE_XML = encodeURIComponent(`
+const KUMOSTACK_TEMPLATE_XML = encodeURIComponent(`
 <mxGraphModel>
   <root>
     <mxCell id="0"/>
@@ -650,7 +707,7 @@ function DiagramsTab() {
 
   // Build draw.io URL with template pre-loaded
   const editorUrl  = `${DRAWIO_URL}/?embed=1&ui=dark&spin=1&proto=json&libraries=1`;
-  const templateUrl = `${DRAWIO_URL}/?embed=1&ui=dark&spin=1&xml=${MINISTACK_TEMPLATE_XML}&title=KumoStack%20Architecture`;
+  const templateUrl = `${DRAWIO_URL}/?embed=1&ui=dark&spin=1&xml=${KUMOSTACK_TEMPLATE_XML}&title=KumoStack%20Architecture`;
 
   return (
     <div className="fullscreen-tab">
@@ -785,14 +842,18 @@ function StackportTab() {
 
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
-function Sidebar({ activeTab, setTab, connected, version, collapsed, setCollapsed }: {
+function Sidebar({ activeTab, setTab, connected, version, collapsed, setCollapsed, activeAccount, setActiveAccount }: {
   activeTab: string;
   setTab: (t: string) => void;
   connected: boolean;
   version: string | null;
   collapsed: boolean;
   setCollapsed: (v: boolean) => void;
+  activeAccount: Account;
+  setActiveAccount: (a: Account) => void;
 }) {
+  const [showAccounts, setShowAccounts] = useState(false);
+
   return (
     <aside className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`}>
       {/* Logo row */}
@@ -811,13 +872,61 @@ function Sidebar({ activeTab, setTab, connected, version, collapsed, setCollapse
         </button>
       </div>
 
+      {/* Account switcher */}
+      <div className="sidebar-account" style={{ position: "relative" }}>
+        <button
+          className="sidebar-account-btn"
+          onClick={() => setShowAccounts(!showAccounts)}
+          title={collapsed ? activeAccount.name : undefined}
+        >
+          <span className="acct-dot" style={{ background: activeAccount.color }} />
+          {!collapsed && (
+            <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {activeAccount.name}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "var(--font-mono, monospace)" }}>
+                {activeAccount.id} · {activeAccount.region}
+              </div>
+            </div>
+          )}
+          {!collapsed && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg>}
+        </button>
+
+        {/* Account dropdown */}
+        {showAccounts && !collapsed && (
+          <div className="acct-dropdown">
+            <div className="acct-dropdown-header">SWITCH ACCOUNT</div>
+            {MOCK_ACCOUNTS.map((a) => (
+              <button
+                key={a.id}
+                className={`acct-option${a.id === activeAccount.id ? " acct-option--active" : ""}`}
+                onClick={() => { setActiveAccount(a); setShowAccounts(false); }}
+              >
+                <span className="acct-dot" style={{ background: a.color }} />
+                <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</div>
+                  <div style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "var(--font-mono, monospace)" }}>{a.id}</div>
+                </div>
+                {a.type === "MANAGEMENT" && <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", background: "rgba(16,185,129,0.15)", color: "var(--accent)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 3, flexShrink: 0 }}>ROOT</span>}
+                {a.id === activeAccount.id && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>}
+              </button>
+            ))}
+            <button className="acct-option acct-option--add" onClick={() => { setShowAccounts(false); setTab("Organizations"); }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <span style={{ fontSize: 12, color: "var(--text-dim)" }}>Manage accounts</span>
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* Nav */}
       <nav className="sidebar-nav">
         {NAV_ITEMS.map((item) => (
           <button
             key={item.id}
             className={`sidebar-item${activeTab === item.id ? " sidebar-item--active" : ""}${"highlight" in item && item.highlight ? " sidebar-item--highlight" : ""}`}
-            onClick={() => setTab(item.id)}
+            onClick={() => { setTab(item.id); setShowAccounts(false); }}
             title={collapsed ? item.label : undefined}
           >
             <span className="sidebar-item-icon">{item.icon}</span>
@@ -1050,9 +1159,9 @@ function OverviewTab({ connected, serviceStatus, version, resourceCounts, totalR
       <div className="footer" style={{ marginTop: 40 }}>
         <div>KumoStack · MIT License · <span className="mono">port 4566</span></div>
         <div>
-          <a href="https://github.com/kumailr7/kumostack" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/kumailr7/ministack" target="_blank" rel="noreferrer">GitHub</a>
           {" · "}
-          <a href="https://hub.docker.com/r/kumostackorg/kumostack" target="_blank" rel="noreferrer">Docker Hub</a>
+          <a href="https://hub.docker.com/r/ministackorg/ministack" target="_blank" rel="noreferrer">Docker Hub</a>
         </div>
       </div>
     </div>
@@ -1619,6 +1728,292 @@ function ExtensionsTab() {
   );
 }
 
+// ─── Organizations Tab ────────────────────────────────────────────────────────
+
+function OrganizationsTab({ activeAccount, setActiveAccount }: {
+  activeAccount: Account;
+  setActiveAccount: (a: Account) => void;
+}) {
+  const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
+  const [selectedOu, setSelectedOu]           = useState<OrgUnit | null>(null);
+  const [showCreateAccount, setShowCreateAccount] = useState(false);
+  const [newName, setNewName]   = useState("");
+  const [newRegion, setNewRegion] = useState("us-east-1");
+  const [newOu, setNewOu]       = useState("r-0001");
+  const [accounts, setAccounts] = useState<Account[]>(MOCK_ACCOUNTS);
+  const [scps, setScps]         = useState<SCP[]>(MOCK_SCPS);
+
+  const ouChildren = (ouId: string) => accounts.filter((a) => a.ouId === ouId);
+  const ouDescendantOus = (ouId: string) => MOCK_OUS.filter((o) => o.parentId === ouId);
+
+  const acctCount = (ouId: string): number => {
+    const direct = accounts.filter((a) => a.ouId === ouId).length;
+    const children = MOCK_OUS.filter((o) => o.parentId === ouId).reduce((s, o) => s + acctCount(o.id), 0);
+    return direct + children;
+  };
+
+  const handleCreateAccount = () => {
+    if (!newName.trim()) return;
+    const newId = String(Math.floor(Math.random() * 9e11) + 1e11);
+    const colors = ["#3b82f6","#f59e0b","#8b5cf6","#ec4899","#14b8a6","#f97316"];
+    const newAcct: Account = {
+      id: newId, name: newName.trim(), email: `${newName.trim()}@kumostack.local`,
+      status: "ACTIVE", region: newRegion, ouId: newOu, type: "MEMBER",
+      color: colors[Math.floor(Math.random() * colors.length)],
+    };
+    setAccounts([...accounts, newAcct]);
+    setShowCreateAccount(false);
+    setNewName("");
+    setSelectedAccount(newAcct);
+  };
+
+  const toggleScpStatus = (id: string) => {
+    setScps(scps.map((s) => s.id === id ? { ...s, status: s.status === "ENABLED" ? "DISABLED" : "ENABLED" } : s));
+  };
+
+  const attachedLabel = (attachedTo: string[]) =>
+    attachedTo.map((id) => {
+      const ou = MOCK_OUS.find((o) => o.id === id);
+      const ac = accounts.find((a) => a.id === id);
+      return ou?.name ?? ac?.name ?? id;
+    }).join(", ");
+
+  const OuNode = ({ ou, depth }: { ou: OrgUnit; depth: number }) => {
+    const children = ouDescendantOus(ou.id);
+    const members  = ouChildren(ou.id);
+    const isRoot   = ou.parentId === null;
+    return (
+      <div style={{ paddingLeft: depth * 16 }}>
+        <button
+          className={`org-tree-node org-tree-node--ou${selectedOu?.id === ou.id ? " org-tree-node--selected" : ""}`}
+          onClick={() => { setSelectedOu(ou); setSelectedAccount(null); }}
+        >
+          <span style={{ fontSize: 13, marginRight: 6 }}>{isRoot ? "🏛" : "📁"}</span>
+          <span style={{ fontWeight: 600, fontSize: 13 }}>{ou.name}</span>
+          <span className="org-badge">{acctCount(ou.id)}</span>
+        </button>
+        {children.map((c) => <OuNode key={c.id} ou={c} depth={depth + 1} />)}
+        {members.map((a) => (
+          <div key={a.id} style={{ paddingLeft: 16 }}>
+            <button
+              className={`org-tree-node${selectedAccount?.id === a.id ? " org-tree-node--selected" : ""}${a.id === activeAccount.id ? " org-tree-node--active-acct" : ""}`}
+              onClick={() => { setSelectedAccount(a); setSelectedOu(null); }}
+            >
+              <span className="acct-dot" style={{ background: a.color, width: 8, height: 8, flexShrink: 0 }} />
+              <span style={{ fontSize: 13, flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
+              {a.type === "MANAGEMENT" && <span className="org-badge org-badge--root">ROOT</span>}
+              {a.id === activeAccount.id && <span className="org-badge org-badge--active">ACTIVE</span>}
+              {a.status === "SUSPENDED" && <span className="org-badge org-badge--suspended">SUSPENDED</span>}
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Organizations</h1>
+          <p className="page-subtitle">Manage accounts, OUs, and Service Control Policies</p>
+        </div>
+        <button className="btn-primary" onClick={() => setShowCreateAccount(true)} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Account
+        </button>
+      </div>
+
+      {/* Create Account Modal */}
+      {showCreateAccount && (
+        <div className="org-modal-overlay" onClick={() => setShowCreateAccount(false)}>
+          <div className="org-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="org-modal-header">
+              <span style={{ fontWeight: 700, fontSize: 14 }}>Create Account</span>
+              <button onClick={() => setShowCreateAccount(false)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}>✕</button>
+            </div>
+            <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Account Name</label>
+                <input className="search" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. payments-team" style={{ width: "100%", marginBottom: 0 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Default Region</label>
+                <select value={newRegion} onChange={(e) => setNewRegion(e.target.value)} style={{ width: "100%", background: "var(--bg-card)", border: "1px solid var(--border-strong)", padding: "8px 12px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>
+                  {REGIONS.map((r) => <option key={r}>{r}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Organizational Unit</label>
+                <select value={newOu} onChange={(e) => setNewOu(e.target.value)} style={{ width: "100%", background: "var(--bg-card)", border: "1px solid var(--border-strong)", padding: "8px 12px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>
+                  {MOCK_OUS.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                </select>
+              </div>
+              <div style={{ display: "flex", gap: 10, paddingTop: 4 }}>
+                <button className="btn-primary" onClick={handleCreateAccount} style={{ flex: 1 }}>Create</button>
+                <button className="pill-btn" onClick={() => setShowCreateAccount(false)} style={{ flex: 1 }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main grid: tree + detail panel */}
+      <div className="org-grid">
+        {/* Tree */}
+        <div className="org-tree-panel">
+          <div className="section-header">ORGANIZATION TREE</div>
+          <div className="org-tree-scroll">
+            {MOCK_OUS.filter((o) => o.parentId === null).map((root) => (
+              <OuNode key={root.id} ou={root} depth={0} />
+            ))}
+          </div>
+          <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 11, color: "var(--text-faint)" }}>{accounts.length} accounts · {MOCK_OUS.length} OUs</div>
+          </div>
+        </div>
+
+        {/* Detail panel */}
+        <div className="org-detail-panel">
+          {!selectedAccount && !selectedOu && (
+            <div className="empty-state" style={{ margin: "auto" }}>Select an account or OU to view details</div>
+          )}
+
+          {selectedOu && (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+                <span style={{ fontSize: 24 }}>{selectedOu.parentId === null ? "🏛" : "📁"}</span>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text)" }}>{selectedOu.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-faint)", fontFamily: "var(--font-mono, monospace)" }}>{selectedOu.id}</div>
+                </div>
+              </div>
+              <div className="org-detail-grid">
+                <div className="org-detail-cell"><div className="org-detail-label">Accounts</div><div className="org-detail-value">{acctCount(selectedOu.id)}</div></div>
+                <div className="org-detail-cell"><div className="org-detail-label">SCPs Attached</div><div className="org-detail-value">{scps.filter((s) => s.attachedTo.includes(selectedOu.id)).length}</div></div>
+              </div>
+              <div className="section-header" style={{ marginTop: 24, marginBottom: 12 }}>MEMBER ACCOUNTS</div>
+              {ouChildren(selectedOu.id).map((a) => (
+                <div key={a.id} className="org-acct-row" onClick={() => { setSelectedAccount(a); setSelectedOu(null); }}>
+                  <span className="acct-dot" style={{ background: a.color }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{a.name}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-faint)", fontFamily: "var(--font-mono, monospace)" }}>{a.id}</div>
+                  </div>
+                  <span className={`pill ${a.status === "ACTIVE" ? "pill--green" : "pill--red"}`}>{a.status}</span>
+                </div>
+              ))}
+              {ouChildren(selectedOu.id).length === 0 && <div style={{ fontSize: 13, color: "var(--text-faint)", padding: "12px 0" }}>No accounts in this OU</div>}
+            </div>
+          )}
+
+          {selectedAccount && (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+                <div style={{ width: 40, height: 40, borderRadius: "50%", background: selectedAccount.color + "20", border: `2px solid ${selectedAccount.color}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <span className="acct-dot" style={{ background: selectedAccount.color, width: 14, height: 14 }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text)" }}>{selectedAccount.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-faint)", fontFamily: "var(--font-mono, monospace)" }}>ID: {selectedAccount.id}</div>
+                </div>
+                <span className={`pill ${selectedAccount.status === "ACTIVE" ? "pill--green" : "pill--red"}`}>{selectedAccount.status}</span>
+              </div>
+
+              <div className="org-detail-grid">
+                <div className="org-detail-cell"><div className="org-detail-label">Region</div><div className="org-detail-value" style={{ fontSize: 13 }}>{selectedAccount.region}</div></div>
+                <div className="org-detail-cell"><div className="org-detail-label">Type</div><div className="org-detail-value" style={{ fontSize: 13 }}>{selectedAccount.type}</div></div>
+                <div className="org-detail-cell"><div className="org-detail-label">Email</div><div className="org-detail-value" style={{ fontSize: 11, fontFamily: "var(--font-mono, monospace)" }}>{selectedAccount.email}</div></div>
+                <div className="org-detail-cell"><div className="org-detail-label">OU</div><div className="org-detail-value" style={{ fontSize: 13 }}>{MOCK_OUS.find((o) => o.id === selectedAccount.ouId)?.name ?? "Root"}</div></div>
+              </div>
+
+              {/* STS snippet */}
+              <div className="section-header" style={{ marginTop: 24, marginBottom: 10 }}>CROSS-ACCOUNT ACCESS</div>
+              <pre style={{ background: "var(--bg-card)", border: "1px solid var(--border)", padding: "12px 16px", fontSize: 11, color: "var(--text-dim)", overflowX: "auto", borderRadius: "var(--radius-sm)", lineHeight: 1.6 }}>{`awslocal sts assume-role \\
+  --role-arn arn:aws:iam::${selectedAccount.id}:role/CrossAccountRole \\
+  --role-session-name MySession`}</pre>
+
+              <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+                {selectedAccount.id !== activeAccount.id && (
+                  <button className="btn-primary" onClick={() => setActiveAccount(selectedAccount)} style={{ flex: 1 }}>
+                    Switch to this account
+                  </button>
+                )}
+                {selectedAccount.id === activeAccount.id && (
+                  <div style={{ flex: 1, textAlign: "center", fontSize: 12, color: "var(--accent)", fontWeight: 600, padding: "8px 0" }}>✓ Currently active</div>
+                )}
+                <button
+                  className="pill-btn"
+                  onClick={() => setAccounts(accounts.map((a) => a.id === selectedAccount.id ? { ...a, status: a.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE" } : a))}
+                  style={selectedAccount.status === "ACTIVE" ? { color: "#ef4444", borderColor: "#ef444440" } : { color: "var(--accent)", borderColor: "var(--accent-dim)" }}
+                >
+                  {selectedAccount.status === "ACTIVE" ? "Suspend" : "Reactivate"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Service Control Policies */}
+      <div className="section-header" style={{ marginTop: 40, marginBottom: 16 }}>SERVICE CONTROL POLICIES</div>
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--border)" }}>
+              {["Policy", "Description", "Attached To", "Services", "Effect", "Status"].map((h) => (
+                <th key={h} style={{ padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {scps.map((s) => (
+              <tr key={s.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>{s.name}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)", maxWidth: 220 }}>{s.description}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{attachedLabel(s.attachedTo)}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{s.services.join(", ")}</td>
+                <td style={{ padding: "12px 16px" }}>
+                  <span className={`pill ${s.effect === "DENY" ? "pill--red" : "pill--green"}`}>{s.effect}</span>
+                </td>
+                <td style={{ padding: "12px 16px" }}>
+                  <button
+                    onClick={() => toggleScpStatus(s.id)}
+                    className={`pill ${s.status === "ENABLED" ? "pill--green" : "pill--dim"}`}
+                    style={{ cursor: "pointer", border: "none", fontWeight: 700, fontSize: 11 }}
+                  >
+                    {s.status}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Cross-account access log */}
+      <div className="section-header" style={{ marginTop: 40, marginBottom: 16 }}>CROSS-ACCOUNT ACCESS LOG</div>
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
+        {[
+          { time: "just now",   src: "dev-team",   dst: "staging",    role: "DeployRole",       action: "sts:AssumeRole" },
+          { time: "2 min ago",  src: "management", dst: "production", role: "ReadOnlyRole",     action: "sts:AssumeRole" },
+          { time: "5 min ago",  src: "dev-team",   dst: "management", role: "BillingRole",      action: "sts:AssumeRole" },
+          { time: "12 min ago", src: "staging",    dst: "production", role: "CrossAccountRole", action: "sts:AssumeRole" },
+        ].map((e, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", borderBottom: i < 3 ? "1px solid var(--border)" : "none", fontSize: 12 }}>
+            <span style={{ color: "var(--text-faint)", minWidth: 70 }}>{e.time}</span>
+            <span style={{ fontWeight: 600, color: "var(--text)" }}>{e.src}</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            <span style={{ fontWeight: 600, color: "var(--text)" }}>{e.dst}</span>
+            <span style={{ color: "var(--text-dim)", flex: 1, fontFamily: "var(--font-mono, monospace)" }}>{e.role}</span>
+            <span className="pill pill--green" style={{ fontSize: 10 }}>{e.action}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -1631,6 +2026,7 @@ export default function Dashboard() {
   const [collapsed, setCollapsed]         = useState(false);
   const [resourceCounts, setResourceCounts] = useState<ResourceCounts>({});
   const [totalResources, setTotalResources] = useState(0);
+  const [activeAccount, setActiveAccount] = useState<Account>(MOCK_ACCOUNTS[1]);
 
   useEffect(() => {
     const poll = () => {
@@ -1665,18 +2061,21 @@ export default function Dashboard() {
         version={version}
         collapsed={collapsed}
         setCollapsed={setCollapsed}
+        activeAccount={activeAccount}
+        setActiveAccount={setActiveAccount}
       />
       <main className={`app-main${["Stackport","Diagrams"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
-        {activeTab === "Overview"      && <OverviewTab connected={connected} serviceStatus={serviceStatus} version={version} resourceCounts={resourceCounts} totalResources={totalResources} />}
-        {activeTab === "Stackport"     && <StackportTab />}
-        {activeTab === "Diagrams"      && <DiagramsTab />}
-        {activeTab === "Tutorials"     && <TutorialsTab />}
-        {activeTab === "Status"        && <StatusTab connected={connected} serviceStatus={serviceStatus} />}
-        {activeTab === "State"         && <StateTab connected={connected} />}
-        {activeTab === "App Inspector" && <AppInspectorTab connected={connected} />}
-        {activeTab === "Logs"          && <LogsTab connected={connected} />}
-        {activeTab === "Extensions"    && <ExtensionsTab />}
-        {activeTab === "Architecture"  && <ArchitectureTab connected={connected} />}
+        {activeTab === "Overview"       && <OverviewTab connected={connected} serviceStatus={serviceStatus} version={version} resourceCounts={resourceCounts} totalResources={totalResources} />}
+        {activeTab === "Organizations"  && <OrganizationsTab activeAccount={activeAccount} setActiveAccount={setActiveAccount} />}
+        {activeTab === "Stackport"      && <StackportTab />}
+        {activeTab === "Diagrams"       && <DiagramsTab />}
+        {activeTab === "Tutorials"      && <TutorialsTab />}
+        {activeTab === "Status"         && <StatusTab connected={connected} serviceStatus={serviceStatus} />}
+        {activeTab === "State"          && <StateTab connected={connected} />}
+        {activeTab === "App Inspector"  && <AppInspectorTab connected={connected} />}
+        {activeTab === "Logs"           && <LogsTab connected={connected} />}
+        {activeTab === "Extensions"     && <ExtensionsTab />}
+        {activeTab === "Architecture"   && <ArchitectureTab connected={connected} />}
       </main>
     </div>
   );
