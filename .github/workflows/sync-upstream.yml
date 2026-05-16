@@ -1,0 +1,38 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Every 6 hours
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for all branches and tags
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with upstream
+        run: |
+          # Add upstream remote
+          git remote add upstream https://github.com/ministackorg/ministack.git
+          git fetch upstream
+
+          # Switch to main branch
+          git checkout main
+
+          # Merge upstream main into local main
+          # --no-edit skips the editor for the commit message
+          # --ff-only ensures we only fast-forward, failing if there are conflicts
+          # If conflicts occur, the action will fail, alerting the owner to manual intervention
+          git merge upstream/main --ff-only
+
+          # Push changes back to the fork's origin
+          git push origin main
