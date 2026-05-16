@@ -799,20 +799,12 @@ function Sidebar({ activeTab, setTab, connected, version, collapsed, setCollapse
       <div className="sidebar-logo">
         {!collapsed && (
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <svg width="26" height="26" viewBox="0 0 40 40" fill="none">
-              <rect width="40" height="40" rx="8" fill="rgba(16,185,129,0.15)" />
-              <path d="M8 28 L20 12 L32 28Z" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinejoin="round" />
-              <rect x="14" y="22" width="12" height="8" rx="1" fill="#10b981" opacity="0.6" />
-            </svg>
+            <img src="/Kumostack_logo.png" alt="KumoStack" width="26" height="26" />
             <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em" }}>KumoStack</span>
           </div>
         )}
         {collapsed && (
-          <svg width="26" height="26" viewBox="0 0 40 40" fill="none">
-            <rect width="40" height="40" rx="8" fill="rgba(16,185,129,0.15)" />
-            <path d="M8 28 L20 12 L32 28Z" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinejoin="round" />
-            <rect x="14" y="22" width="12" height="8" rx="1" fill="#10b981" opacity="0.6" />
-          </svg>
+          <img src="/Kumostack_logo.png" alt="KumoStack" width="26" height="26" />
         )}
         <button className="sidebar-collapse-btn" onClick={() => setCollapsed(!collapsed)} title={collapsed ? "Expand" : "Collapse"}>
           <IconChevron open={!collapsed} />
