@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="kumostack_logo.png" alt="KumoStack — Free Open-Source AWS Emulator" width="400"/>
+  <img src="Kumostack_logo.png" alt="KumoStack — Free Open-Source AWS Emulator" width="400"/>
 </p>
 
 <h1 align="center">KumoStack</h1>
