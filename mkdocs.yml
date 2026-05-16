@@ -90,10 +90,12 @@ nav:
       - DynamoDB — NoSQL: tutorials/dynamodb.md
       - SQS & SNS — Messaging: tutorials/sqs-sns.md
       - API Gateway: tutorials/api-gateway.md
+      - Terraform & tfstack: tutorials/terraform.md
   - Guides:
       - Overview: guides/index.md
       - Grafana Monitoring: guides/grafana.md
       - Vector.dev Log Archiving: guides/vector-logging.md
+      - Garage — Durable Local S3: guides/garage.md
       - draw.io Architecture Diagrams: guides/drawio.md
       - Using awslocal TUI: guides/awslocal-tui.md
       - Stackport Resource Browser: guides/stackport.md

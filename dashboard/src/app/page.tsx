@@ -417,6 +417,24 @@ const TUTORIALS: Tutorial[] = [
     time: "10 min",
     tags: ["UI", "CRUD", "Browse"],
   },
+  {
+    title: "Terraform & tfstack",
+    url: `${DOCS_BASE}/tutorials/terraform/`,
+    description: "Provision KumoStack resources with Terraform using tfstack — no config needed. State stored durably in Garage S3.",
+    services: ["S3", "SQS", "Lambda", "DynamoDB"],
+    difficulty: "Intermediate",
+    time: "20 min",
+    tags: ["Terraform", "IaC", "Garage", "State"],
+  },
+  {
+    title: "Garage — Durable Local S3",
+    url: `${DOCS_BASE}/guides/garage/`,
+    description: "Use Garage as a persistent S3-compatible store for Terraform state, log archives, and any data that must survive KumoStack restarts.",
+    services: ["S3"],
+    difficulty: "Beginner",
+    time: "10 min",
+    tags: ["Garage", "S3", "Terraform", "Persistence"],
+  },
 ];
 
 const DIFFICULTY_COLOR: Record<string, string> = {
@@ -1734,7 +1752,7 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
   activeAccount: Account;
   setActiveAccount: (a: Account) => void;
 }) {
-  const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<Account | null>(MOCK_ACCOUNTS[0]);
   const [selectedOu, setSelectedOu]           = useState<OrgUnit | null>(null);
   const [showCreateAccount, setShowCreateAccount] = useState(false);
   const [newName, setNewName]   = useState("");
@@ -1778,10 +1796,29 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
       return ou?.name ?? ac?.name ?? id;
     }).join(", ");
 
+  const AccountRow = ({ a, indent }: { a: Account; indent: number }) => (
+    <div style={{ paddingLeft: indent }}>
+      <button
+        className={`org-tree-node${selectedAccount?.id === a.id ? " org-tree-node--selected" : ""}${a.id === activeAccount.id ? " org-tree-node--active-acct" : ""}`}
+        onClick={() => { setSelectedAccount(a); setSelectedOu(null); }}
+      >
+        <span className="acct-dot" style={{ background: a.color, width: 8, height: 8, flexShrink: 0 }} />
+        <span style={{ fontSize: 13, flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
+        {a.type === "MANAGEMENT" && <span className="org-badge org-badge--root">ROOT</span>}
+        {a.status === "SUSPENDED" && <span className="org-badge org-badge--suspended">SUSPENDED</span>}
+        {a.id === activeAccount.id && (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" style={{ flexShrink: 0 }}><polyline points="20 6 9 17 4 12"/></svg>
+        )}
+      </button>
+    </div>
+  );
+
   const OuNode = ({ ou, depth }: { ou: OrgUnit; depth: number }) => {
-    const children = ouDescendantOus(ou.id);
-    const members  = ouChildren(ou.id);
-    const isRoot   = ou.parentId === null;
+    const subOus      = ouDescendantOus(ou.id);
+    const allMembers  = ouChildren(ou.id);
+    const mgmt        = allMembers.filter((a) => a.type === "MANAGEMENT");
+    const members     = allMembers.filter((a) => a.type === "MEMBER");
+    const isRoot      = ou.parentId === null;
     return (
       <div style={{ paddingLeft: depth * 16 }}>
         <button
@@ -1792,21 +1829,10 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
           <span style={{ fontWeight: 600, fontSize: 13 }}>{ou.name}</span>
           <span className="org-badge">{acctCount(ou.id)}</span>
         </button>
-        {children.map((c) => <OuNode key={c.id} ou={c} depth={depth + 1} />)}
-        {members.map((a) => (
-          <div key={a.id} style={{ paddingLeft: 16 }}>
-            <button
-              className={`org-tree-node${selectedAccount?.id === a.id ? " org-tree-node--selected" : ""}${a.id === activeAccount.id ? " org-tree-node--active-acct" : ""}`}
-              onClick={() => { setSelectedAccount(a); setSelectedOu(null); }}
-            >
-              <span className="acct-dot" style={{ background: a.color, width: 8, height: 8, flexShrink: 0 }} />
-              <span style={{ fontSize: 13, flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
-              {a.type === "MANAGEMENT" && <span className="org-badge org-badge--root">ROOT</span>}
-              {a.id === activeAccount.id && <span className="org-badge org-badge--active">ACTIVE</span>}
-              {a.status === "SUSPENDED" && <span className="org-badge org-badge--suspended">SUSPENDED</span>}
-            </button>
-          </div>
-        ))}
+        {/* Management accounts first, then child OUs, then member accounts */}
+        {mgmt.map((a) => <AccountRow key={a.id} a={a} indent={16} />)}
+        {subOus.map((c) => <OuNode key={c.id} ou={c} depth={depth + 1} />)}
+        {members.map((a) => <AccountRow key={a.id} a={a} indent={16} />)}
       </div>
     );
   };

@@ -13,6 +13,7 @@ Step-by-step guides for using KumoStack with real AWS services — all running l
 | [DynamoDB — NoSQL](dynamodb.md) | DynamoDB | 15 min |
 | [SQS & SNS — Messaging](sqs-sns.md) | SQS, SNS | 20 min |
 | [API Gateway](api-gateway.md) | API Gateway, Lambda | 25 min |
+| [Terraform & tfstack](terraform.md) | S3, SQS, Lambda, DynamoDB + Garage state | 20 min |
 
 ## Before you begin
 
