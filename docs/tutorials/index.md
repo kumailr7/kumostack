@@ -1,6 +1,6 @@
 # Tutorials
 
-Step-by-step guides for using Ministack with real AWS services — all running locally, no AWS account needed.
+Step-by-step guides for using KumoStack with real AWS services — all running locally, no AWS account needed.
 
 ## Available tutorials
 
@@ -16,7 +16,7 @@ Step-by-step guides for using Ministack with real AWS services — all running l
 
 ## Before you begin
 
-All tutorials assume Ministack is running:
+All tutorials assume KumoStack is running:
 
 ```bash
 docker compose up -d

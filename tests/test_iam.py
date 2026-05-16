@@ -125,12 +125,12 @@ def test_iam_policy_description_roundtrip(iam):
     name = f"desc-policy-{_u.uuid4().hex[:8]}"
     created = iam.create_policy(
         PolicyName=name,
-        Description="managed by ministack regression test",
+        Description="managed by kumostack regression test",
         PolicyDocument='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}',
     )
-    assert created["Policy"].get("Description") == "managed by ministack regression test"
+    assert created["Policy"].get("Description") == "managed by kumostack regression test"
     fetched = iam.get_policy(PolicyArn=created["Policy"]["Arn"])
-    assert fetched["Policy"].get("Description") == "managed by ministack regression test"
+    assert fetched["Policy"].get("Description") == "managed by kumostack regression test"
     iam.delete_policy(PolicyArn=created["Policy"]["Arn"])
 
 
@@ -561,7 +561,7 @@ def test_iam_cannot_tag_aws_managed_policy(iam):
 def test_iam_unknown_aws_managed_policy_is_not_found_by_default(iam):
     """Real AWS returns NoSuchEntity for AWS-managed ARNs that don't
     exist (e.g. typos like ``AdminstratorAccess`` — missing ``i``).
-    Ministack defaults to the same behaviour so that typos surface
+    KumoStack defaults to the same behaviour so that typos surface
     locally the same way they would in real AWS, instead of silently
     autovivifying a permissive stub and masking the bug until apply
     against real AWS."""
@@ -616,7 +616,7 @@ def test_iam_aws_managed_attachment_count_persists_through_state_round_trip():
     added with the AWS-managed policy work (1.3.36) was missing from
     get_state/restore_state, so attachment counts on AWS-managed policies
     reset to zero on every warm-boot."""
-    from ministack.services import iam as _iam
+    from kumostack.services import iam as _iam
 
     arn = "arn:aws:iam::aws:policy/AdministratorAccess"
     _iam._aws_managed_attachment_counts.clear()

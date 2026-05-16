@@ -89,7 +89,7 @@ def test_acm_update_certificate_options(acm_client):
 
 def test_acm_renew_certificate(acm_client):
     arn = acm_client.request_certificate(DomainName="renew.example.com")["CertificateArn"]
-    # RenewCertificate is a no-op in ministack — just verify it doesn't error
+    # RenewCertificate is a no-op in kumostack — just verify it doesn't error
     acm_client.renew_certificate(CertificateArn=arn)
     desc = acm_client.describe_certificate(CertificateArn=arn)
     assert desc["Certificate"]["Status"] in ("ISSUED", "PENDING_VALIDATION")
@@ -267,9 +267,9 @@ def test_get_state_strips_private_key_from_persisted_snapshot():
     import importlib
     import json
 
-    from ministack.core.persistence import _json_default
-    from ministack.core.responses import _request_account_id
-    mod = importlib.import_module("ministack.services.acm")
+    from kumostack.core.persistence import _json_default
+    from kumostack.core.responses import _request_account_id
+    mod = importlib.import_module("kumostack.services.acm")
     mod._certificates._data.clear()  # belt-and-braces
 
     # Two tenants — the request-scoped iteration would only see one of
@@ -346,8 +346,8 @@ def test_get_state_preserves_certs_across_all_tenants():
     `_certificates._data` captures all (account_id, key) pairs."""
     import importlib
 
-    from ministack.core.responses import _request_account_id
-    mod = importlib.import_module("ministack.services.acm")
+    from kumostack.core.responses import _request_account_id
+    mod = importlib.import_module("kumostack.services.acm")
     mod.reset() if hasattr(mod, "reset") else None
     mod._certificates._data.clear()  # belt-and-braces
 
@@ -390,7 +390,7 @@ def test_restore_state_backfills_pem_body_for_pre_upgrade_snapshots():
     substring-check 'BEGIN CERTIFICATE' (Terraform / CDK) keep
     working."""
     import importlib
-    mod = importlib.import_module("ministack.services.acm")
+    mod = importlib.import_module("kumostack.services.acm")
     mod._certificates._data.clear()
 
     arn = "arn:aws:acm:us-east-1:000000000000:certificate/legacy-cert"
@@ -425,7 +425,7 @@ def test_synthetic_pem_body_is_valid_base64():
     cryptography) error before they reach ASN.1 parsing if it isn't."""
     import base64
     import importlib
-    mod = importlib.import_module("ministack.services.acm")
+    mod = importlib.import_module("kumostack.services.acm")
     pem = mod._synthetic_pem("anything.example.com")
     body_lines = [
         line for line in pem.splitlines()

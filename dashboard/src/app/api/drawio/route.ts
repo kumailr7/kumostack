@@ -1,4 +1,4 @@
-const DRAWIO = process.env.DRAWIO_ENDPOINT ?? "http://ministack-drawio:8080";
+const DRAWIO = process.env.DRAWIO_ENDPOINT ?? "http://kumostack-drawio:8080";
 
 export async function GET() {
   try {

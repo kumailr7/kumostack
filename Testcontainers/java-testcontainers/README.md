@@ -1,4 +1,4 @@
-# MiniStack — Java Testcontainers Example
+# KumoStack — Java Testcontainers Example
 
 Integration tests for S3, SQS, and DynamoDB using [Testcontainers](https://testcontainers.com/) and the AWS SDK v2.
 
@@ -14,7 +14,7 @@ Integration tests for S3, SQS, and DynamoDB using [Testcontainers](https://testc
 mvn test
 ```
 
-Testcontainers will pull `ministackorg/ministack:latest`, start it, run the tests, and tear it down automatically.
+Testcontainers will pull `kumostackorg/kumostack:latest`, start it, run the tests, and tear it down automatically.
 
 ## What's tested
 

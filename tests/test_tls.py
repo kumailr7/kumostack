@@ -17,7 +17,7 @@ import urllib.request
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HYPERCORN_CONF = "file:ministack/core/hypercorn_conf.py"
+HYPERCORN_CONF = "file:kumostack/core/hypercorn_conf.py"
 
 
 def _free_port() -> int:
@@ -62,7 +62,7 @@ def _byo_cert(tmp_path):
 def _spawn(env_extra: dict, port: int) -> subprocess.Popen:
     env = {**os.environ, "LOG_LEVEL": "WARNING", **env_extra}
     return subprocess.Popen(
-        [sys.executable, "-m", "hypercorn", "ministack.app:app",
+        [sys.executable, "-m", "hypercorn", "kumostack.app:app",
          "-c", HYPERCORN_CONF,
          "--bind", f"127.0.0.1:{port}",
          "--log-level", "warning",
@@ -92,7 +92,7 @@ def test_tls_use_ssl_with_byo_cert(tmp_path):
         port,
     )
     try:
-        _wait_health(f"https://127.0.0.1:{port}/_ministack/health", ctx=_ctx_no_verify())
+        _wait_health(f"https://127.0.0.1:{port}/_kumostack/health", ctx=_ctx_no_verify())
     finally:
         _terminate(proc)
 
@@ -102,7 +102,7 @@ def test_tls_use_ssl_auto_generated_cert():
     port = _free_port()
     proc = _spawn({"USE_SSL": "1"}, port)
     try:
-        _wait_health(f"https://127.0.0.1:{port}/_ministack/health", ctx=_ctx_no_verify())
+        _wait_health(f"https://127.0.0.1:{port}/_kumostack/health", ctx=_ctx_no_verify())
     finally:
         _terminate(proc)
 
@@ -116,7 +116,7 @@ def test_tls_use_ssl_accepts_true_value(tmp_path):
         port,
     )
     try:
-        _wait_health(f"https://127.0.0.1:{port}/_ministack/health", ctx=_ctx_no_verify())
+        _wait_health(f"https://127.0.0.1:{port}/_kumostack/health", ctx=_ctx_no_verify())
     finally:
         _terminate(proc)
 
@@ -127,7 +127,7 @@ def test_tls_disabled_by_default_serves_http():
     port = _free_port()
     proc = _spawn({}, port)
     try:
-        _wait_health(f"http://127.0.0.1:{port}/_ministack/health")
+        _wait_health(f"http://127.0.0.1:{port}/_kumostack/health")
     finally:
         _terminate(proc)
 

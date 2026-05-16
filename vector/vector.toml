@@ -1,5 +1,5 @@
 # =============================================================================
-# Vector.dev  ·  Ministack Observability Pipeline
+# Vector.dev  ·  KumoStack Observability Pipeline
 #
 # Flow:
 #   Docker containers
@@ -9,7 +9,7 @@
 #                       └─► aws_enrich  (remap: extract AWS action/service)
 #                             ├─► loki_all    (sink → Grafana Loki, all logs)
 #                             ├─► loki_errors (sink → Grafana Loki, errors only)
-#                             ├─► s3_archive  (sink → Ministack S3, archival)
+#                             ├─► s3_archive  (sink → KumoStack S3, archival)
 #                             └─► console_errors (sink → stderr, debug)
 # =============================================================================
 
@@ -25,7 +25,7 @@ playground = true
 [sources.docker_logs]
 type               = "docker_logs"
 # exclude the vector container itself to avoid log loops
-exclude_containers = ["ministack-vector"]
+exclude_containers = ["kumostack-vector"]
 
 # =============================================================================
 # TRANSFORMS
@@ -38,22 +38,22 @@ inputs = ["docker_logs"]
 source = '''
 .service = replace(string!(.container_name), r'^/', "")
 
-.category = if match(.service, r'^ministack-rds') {
+.category = if match(.service, r'^kumostack-rds') {
   "database"
-} else if match(.service, r'^ministack-redis') {
+} else if match(.service, r'^kumostack-redis') {
   "cache"
-} else if .service == "ministack" {
+} else if .service == "kumostack" {
   "aws-emulator"
-} else if match(.service, r'^ministack-grafana|^ministack-prometheus|^ministack-loki|^ministack-cadvisor') {
+} else if match(.service, r'^kumostack-grafana|^kumostack-prometheus|^kumostack-loki|^kumostack-cadvisor') {
   "observability"
-} else if .service == "ministack-dashboard" || .service == "ministack-stackport" {
+} else if .service == "kumostack-dashboard" || .service == "kumostack-stackport" {
   "frontend"
 } else {
   "infra"
 }
 
 .environment = "local-dev"
-.stack       = "ministack"
+.stack       = "kumostack"
 .message     = string!(.message)
 '''
 
@@ -110,7 +110,7 @@ encoding.codec = "json"
 
 [sinks.loki_all.labels]
 job         = "vector"
-stack       = "ministack"
+stack       = "kumostack"
 service     = "{{ service }}"
 category    = "{{ category }}"
 level       = "{{ level }}"
@@ -125,18 +125,18 @@ encoding.codec = "json"
 
 [sinks.loki_errors.labels]
 job      = "vector-errors"
-stack    = "ministack"
+stack    = "kumostack"
 service  = "{{ service }}"
 level    = "error"
 stream   = "errors"
 
-# ── S3: archive all logs to Ministack (log lifecycle demo) ────────────────────
+# ── S3: archive all logs to KumoStack (log lifecycle demo) ────────────────────
 [sinks.s3_archive]
 type                  = "aws_s3"
 inputs                = ["aws_enrich"]
-bucket                = "ministack-logs"
+bucket                = "kumostack-logs"
 region                = "us-east-1"
-endpoint              = "http://ministack:4566"
+endpoint              = "http://kumostack:4566"
 key_prefix            = "logs/{{ category }}/{{ service }}/%Y/%m/%d/"
 encoding.codec        = "json"
 compression           = "gzip"

@@ -375,14 +375,14 @@ def test_s3_control_list_tags_for_resource(s3):
     s3.create_bucket(Bucket=bkt)
     s3.put_bucket_tagging(
         Bucket=bkt,
-        Tagging={"TagSet": [{"Key": "name", "Value": "ministack-test"}]},
+        Tagging={"TagSet": [{"Key": "name", "Value": "kumostack-test"}]},
     )
 
     s3control = make_client("s3control")
     arn = f"arn:aws:s3:::{bkt}"
     resp = s3control.list_tags_for_resource(AccountId=account_id, ResourceArn=arn)
     tags = {t["Key"]: t["Value"] for t in resp.get("Tags", [])}
-    assert tags.get("name") == "ministack-test"
+    assert tags.get("name") == "kumostack-test"
 
 def test_s3_control_tag_resource_post_xml_stores_tags(s3):
     """Regression for #447: S3Control TagResource must accept POST with an XML
@@ -399,7 +399,7 @@ def test_s3_control_tag_resource_post_xml_stores_tags(s3):
         '<TagResourceRequest xmlns="http://awss3control.amazonaws.com/doc/2018-08-20/">'
         "<Tags>"
         "<Tag><Key>demo:environment</Key><Value>repro</Value></Tag>"
-        "<Tag><Key>demo:owner</Key><Value>ministack</Value></Tag>"
+        "<Tag><Key>demo:owner</Key><Value>kumostack</Value></Tag>"
         "</Tags>"
         "</TagResourceRequest>"
     ).encode()
@@ -419,7 +419,7 @@ def test_s3_control_tag_resource_post_xml_stores_tags(s3):
     got = s3.get_bucket_tagging(Bucket=bkt)
     tags = {t["Key"]: t["Value"] for t in got["TagSet"]}
     assert tags["demo:environment"] == "repro"
-    assert tags["demo:owner"] == "ministack"
+    assert tags["demo:owner"] == "kumostack"
 
     # And via S3 Control GET /v20180820/tags/{arn}
     get_req = urllib.request.Request(
@@ -509,17 +509,17 @@ class TestParseAbsoluteFormRequestTarget:
     absolute-form request target (e.g. AWS SDK for .NET v4 over HTTP/1.1)."""
 
     def _parse(self, path):
-        from ministack.services.s3 import _parse_bucket_key
+        from kumostack.services.s3 import _parse_bucket_key
         return _parse_bucket_key(path, {})
 
     def test_http_absolute_form(self):
-        assert self._parse("http://ministack:4566/mybucket/mykey") == ("mybucket", "mykey")
+        assert self._parse("http://kumostack:4566/mybucket/mykey") == ("mybucket", "mykey")
 
     def test_https_absolute_form(self):
-        assert self._parse("https://ministack:4566/mybucket/mykey") == ("mybucket", "mykey")
+        assert self._parse("https://kumostack:4566/mybucket/mykey") == ("mybucket", "mykey")
 
     def test_absolute_form_bucket_only(self):
-        assert self._parse("http://ministack:4566/mybucket") == ("mybucket", "")
+        assert self._parse("http://kumostack:4566/mybucket") == ("mybucket", "")
 
     def test_path_style_unaffected(self):
         assert self._parse("/mybucket/mykey") == ("mybucket", "mykey")
@@ -1673,7 +1673,7 @@ def test_s3_post_object_content_length_range_minimum(s3):
 
 def test_s3_storage_class_persisted_to_disk(tmp_path, monkeypatch):
     """storage_class survives _persist_object → _load_persisted_bucket round-trip (#534)."""
-    from ministack.services import s3 as s3mod
+    from kumostack.services import s3 as s3mod
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
 

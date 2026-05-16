@@ -1,5 +1,5 @@
 """
-Pytest fixtures for MiniStack integration tests.
+Pytest fixtures for KumoStack integration tests.
 """
 
 import contextlib
@@ -57,7 +57,7 @@ _SERIAL_TESTS = {
     "tests/test_eks.py::test_eks_cfn_cluster",
     "tests/test_eks.py::test_eks_create_describe_delete_cluster",
     "tests/test_lambda.py::test_lambda_reset_terminates_workers",
-    "tests/test_ministack.py::test_ministack_config_invalid_key_ignored",
+    "tests/test_kumostack.py::test_kumostack_config_invalid_key_ignored",
     "tests/test_ses.py::test_ses_messages_endpoint_reset",
     "tests/test_ses.py::test_ses_messages_endpoint_account_filter",
     "tests/test_stepfunctions.py::test_sfn_mock_config_return",
@@ -99,7 +99,7 @@ def pytest_collection_modifyitems(config, items):
 def reset_server():
     """Reset all server state once before the test session starts."""
     req = urllib.request.Request(
-        f"{ENDPOINT}/_ministack/reset",
+        f"{ENDPOINT}/_kumostack/reset",
         data=b"",
         method="POST",
     )
@@ -236,12 +236,12 @@ def athena():
     return make_client("athena")
 
 
-def _ministack_config(settings):
-    """Set runtime config on the running server via POST /_ministack/config."""
+def _kumostack_config(settings):
+    """Set runtime config on the running server via POST /_kumostack/config."""
     import json
 
     req = urllib.request.Request(
-        f"{ENDPOINT}/_ministack/config",
+        f"{ENDPOINT}/_kumostack/config",
         data=json.dumps(settings).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",

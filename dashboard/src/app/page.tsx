@@ -227,9 +227,9 @@ function DisconnectedNotice() {
     <div className="notice">
       <WarnIcon />
       <div>
-        MiniStack is not connected. Run{" "}
+        KumoStack is not connected. Run{" "}
         <span className="mono" style={{ background: "rgba(0,0,0,0.3)", padding: "1px 6px", borderRadius: 3 }}>
-          docker run -p 4566:4566 ministackorg/ministack
+          docker run -p 4566:4566 kumostackorg/kumostack
         </span>{" "}
         to start it.
       </div>
@@ -249,11 +249,11 @@ interface Tutorial {
   tags: string[];
 }
 
-const DOCS_BASE = "https://kumailr7.github.io/ministack";
+const DOCS_BASE = "https://kumailr7.github.io/kumostack";
 
 const TUTORIALS: Tutorial[] = [
   {
-    title: "Getting Started with Ministack",
+    title: "Getting Started with KumoStack",
     url: `${DOCS_BASE}/tutorials/getting-started/`,
     description: "Spin up the stack, create your first S3 bucket, deploy a Lambda, and send your first SQS message — all without an AWS account.",
     services: ["S3", "Lambda", "SQS"],
@@ -318,7 +318,7 @@ const TUTORIALS: Tutorial[] = [
   {
     title: "Grafana Monitoring",
     url: `${DOCS_BASE}/guides/grafana/`,
-    description: "Connect Grafana to Ministack's CloudWatch emulation, push custom metrics, and explore 20+ pre-built AWS dashboards.",
+    description: "Connect Grafana to KumoStack's CloudWatch emulation, push custom metrics, and explore 20+ pre-built AWS dashboards.",
     services: ["CloudWatch"],
     difficulty: "Intermediate",
     time: "20 min",
@@ -327,7 +327,7 @@ const TUTORIALS: Tutorial[] = [
   {
     title: "Vector.dev Log Archiving",
     url: `${DOCS_BASE}/guides/vector-logging/`,
-    description: "3-tier log pipeline: live queries in Loki, hot archive in Ministack S3, cold archive in Garage with lifecycle policies.",
+    description: "3-tier log pipeline: live queries in Loki, hot archive in KumoStack S3, cold archive in Garage with lifecycle policies.",
     services: ["S3"],
     difficulty: "Intermediate",
     time: "30 min",
@@ -403,10 +403,10 @@ function TutorialsTab() {
         <div>
           <h1 className="page-title">Tutorials</h1>
           <p className="page-subtitle">
-            {TUTORIALS.length} hands-on guides — built for Ministack ·{" "}
+            {TUTORIALS.length} hands-on guides — built for KumoStack ·{" "}
             <a href={DOCS_BASE} target="_blank" rel="noreferrer"
                style={{ color: "var(--accent)", textDecoration: "none" }}>
-              kumailr7.github.io/ministack ↗
+              kumailr7.github.io/kumostack ↗
             </a>
           </p>
         </div>
@@ -522,7 +522,7 @@ function TutorialsTab() {
 
       {/* Footer note */}
       <div style={{ marginTop: 40, padding: "16px 20px", background: "var(--bg-card)", border: "1px solid var(--border-strong)", borderRadius: "var(--radius)", fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
-        <strong style={{ color: "var(--text)" }}>Tip:</strong> All tutorials target Ministack at{" "}
+        <strong style={{ color: "var(--text)" }}>Tip:</strong> All tutorials target KumoStack at{" "}
         <code className="inline-code">localhost:4566</code>. Use{" "}
         <code className="inline-code">awslocal</code> or set{" "}
         <code className="inline-code">AWS_ENDPOINT_URL=http://localhost:4566</code> — no real AWS credentials needed.{" "}
@@ -536,7 +536,7 @@ function TutorialsTab() {
 
 // ─── Diagrams Tab (draw.io) ───────────────────────────────────────────────────
 
-// Starter Ministack architecture diagram encoded as draw.io XML
+// Starter KumoStack architecture diagram encoded as draw.io XML
 const MINISTACK_TEMPLATE_XML = encodeURIComponent(`
 <mxGraphModel>
   <root>
@@ -544,7 +544,7 @@ const MINISTACK_TEMPLATE_XML = encodeURIComponent(`
     <mxCell id="1" parent="0"/>
 
     <!-- Title -->
-    <mxCell id="t1" value="Ministack Local AWS Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#10b981;" vertex="1" parent="1">
+    <mxCell id="t1" value="KumoStack Local AWS Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#10b981;" vertex="1" parent="1">
       <mxGeometry x="200" y="20" width="500" height="40" as="geometry"/>
     </mxCell>
 
@@ -554,7 +554,7 @@ const MINISTACK_TEMPLATE_XML = encodeURIComponent(`
     </mxCell>
 
     <!-- Gateway -->
-    <mxCell id="g1" value="Ministack Gateway&#xa;localhost:4566" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#232F3E;strokeColor=#10b981;fontColor=#10b981;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+    <mxCell id="g1" value="KumoStack Gateway&#xa;localhost:4566" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#232F3E;strokeColor=#10b981;fontColor=#10b981;fontSize=11;fontStyle=1;" vertex="1" parent="1">
       <mxGeometry x="330" y="210" width="160" height="50" as="geometry"/>
     </mxCell>
 
@@ -650,7 +650,7 @@ function DiagramsTab() {
 
   // Build draw.io URL with template pre-loaded
   const editorUrl  = `${DRAWIO_URL}/?embed=1&ui=dark&spin=1&proto=json&libraries=1`;
-  const templateUrl = `${DRAWIO_URL}/?embed=1&ui=dark&spin=1&xml=${MINISTACK_TEMPLATE_XML}&title=Ministack%20Architecture`;
+  const templateUrl = `${DRAWIO_URL}/?embed=1&ui=dark&spin=1&xml=${MINISTACK_TEMPLATE_XML}&title=KumoStack%20Architecture`;
 
   return (
     <div className="fullscreen-tab">
@@ -671,7 +671,7 @@ function DiagramsTab() {
           <div className="filter-pills" style={{ marginLeft: 8 }}>
             <button className={`pill-btn ${mode === "editor" ? "active" : ""}`} onClick={() => setMode("editor")}>Blank Canvas</button>
             <button className={`pill-btn ${mode === "template" ? "active" : ""}`} onClick={() => { setMode("template"); setTemplateLoaded(true); }}>
-              Ministack Template
+              KumoStack Template
             </button>
           </div>
         )}
@@ -804,7 +804,7 @@ function Sidebar({ activeTab, setTab, connected, version, collapsed, setCollapse
               <path d="M8 28 L20 12 L32 28Z" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinejoin="round" />
               <rect x="14" y="22" width="12" height="8" rx="1" fill="#10b981" opacity="0.6" />
             </svg>
-            <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em" }}>MiniStack</span>
+            <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em" }}>KumoStack</span>
           </div>
         )}
         {collapsed && (
@@ -900,7 +900,7 @@ function OverviewTab({ connected, serviceStatus, version, resourceCounts, totalR
       <div className="page-header">
         <div>
           <h1 className="page-title">Overview</h1>
-          <p className="page-subtitle">All AWS services available in MiniStack</p>
+          <p className="page-subtitle">All AWS services available in KumoStack</p>
         </div>
         {version && <span className="version-badge">v{version}</span>}
       </div>
@@ -940,7 +940,7 @@ function OverviewTab({ connected, serviceStatus, version, resourceCounts, totalR
           </div>
           <div>
             <div className="stat-value" style={{ fontSize: 22 }}>{connected ? "Online" : "Offline"}</div>
-            <div className="stat-label">MiniStack</div>
+            <div className="stat-label">KumoStack</div>
           </div>
         </div>
       </div>
@@ -1028,7 +1028,7 @@ function OverviewTab({ connected, serviceStatus, version, resourceCounts, totalR
         {showGrafana ? (
           <iframe src={grafanaUrl} className="grafana-iframe" title="Grafana Dashboard" />
         ) : (
-          <p className="integration-desc">Embed any Grafana dashboard to monitor MiniStack resources. Configure your Grafana URL above and click &ldquo;Embed Dashboard&rdquo;, or open it in a new tab.</p>
+          <p className="integration-desc">Embed any Grafana dashboard to monitor KumoStack resources. Configure your Grafana URL above and click &ldquo;Embed Dashboard&rdquo;, or open it in a new tab.</p>
         )}
       </div>
 
@@ -1052,15 +1052,15 @@ function OverviewTab({ connected, serviceStatus, version, resourceCounts, totalR
             <button className="btn btn-sm" onClick={() => { setVectorUrl(vectorInput); localStorage.setItem("vectorUrl", vectorInput); }}>Apply</button>
           </div>
         </div>
-        <p className="integration-desc">Route MiniStack logs through Vector for filtering, enrichment, and forwarding to any sink. Start Vector with <code className="inline-code">vector --config vector.toml</code> — see the Logs tab for a sample config.</p>
+        <p className="integration-desc">Route KumoStack logs through Vector for filtering, enrichment, and forwarding to any sink. Start Vector with <code className="inline-code">vector --config vector.toml</code> — see the Logs tab for a sample config.</p>
       </div>
 
       <div className="footer" style={{ marginTop: 40 }}>
-        <div>MiniStack · MIT License · <span className="mono">port 4566</span></div>
+        <div>KumoStack · MIT License · <span className="mono">port 4566</span></div>
         <div>
-          <a href="https://github.com/kumailr7/ministack" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/kumailr7/kumostack" target="_blank" rel="noreferrer">GitHub</a>
           {" · "}
-          <a href="https://hub.docker.com/r/ministackorg/ministack" target="_blank" rel="noreferrer">Docker Hub</a>
+          <a href="https://hub.docker.com/r/kumostackorg/kumostack" target="_blank" rel="noreferrer">Docker Hub</a>
         </div>
       </div>
     </div>
@@ -1082,7 +1082,7 @@ function StatusTab({ connected, serviceStatus }: { connected: boolean; serviceSt
   return (
     <div>
       <div className="page-header">
-        <div><h1 className="page-title">Service Status</h1><p className="page-subtitle">Health of every MiniStack service</p></div>
+        <div><h1 className="page-title">Service Status</h1><p className="page-subtitle">Health of every KumoStack service</p></div>
         <div className="filter-pills">
           {(["all","running","error","idle"] as const).map((f) => (
             <button key={f} className={`pill-btn ${filter===f?"active":""}`} onClick={() => setFilter(f)}>
@@ -1126,7 +1126,7 @@ function ResourceBrowserTab({ connected, serviceStatus, query, setQuery, region,
   return (
     <>
       <div className="page-header">
-        <div><h1 className="page-title">Resource Browser</h1><p className="page-subtitle">Explore your MiniStack resources</p></div>
+        <div><h1 className="page-title">Resource Browser</h1><p className="page-subtitle">Explore your KumoStack resources</p></div>
         <div className="header-controls">
           <div className="control">
             <label htmlFor="region">Region</label>
@@ -1212,7 +1212,7 @@ function StateTab({ connected }: { connected: boolean }) {
   return (
     <div>
       <div className="page-header">
-        <div><h1 className="page-title">State</h1><p className="page-subtitle">Save and restore MiniStack snapshots</p></div>
+        <div><h1 className="page-title">State</h1><p className="page-subtitle">Save and restore KumoStack snapshots</p></div>
         <div className="tab-actions">
           <button className="btn btn-primary" onClick={save} disabled={!connected}>Save Snapshot</button>
           <button className="btn" onClick={load} disabled={!connected}>Refresh</button>
@@ -1223,7 +1223,7 @@ function StateTab({ connected }: { connected: boolean }) {
       {connected && (
         <div className="card-list">
           {loading && <div className="empty-state">Loading snapshots…</div>}
-          {!loading && snapshots.length === 0 && <div className="empty-state">No snapshots yet. Click <strong>Save Snapshot</strong> to persist the current MiniStack state.</div>}
+          {!loading && snapshots.length === 0 && <div className="empty-state">No snapshots yet. Click <strong>Save Snapshot</strong> to persist the current KumoStack state.</div>}
           {snapshots.map((s) => (
             <div key={s.name} className="list-item">
               <div><div className="item-title">{s.name}</div><div className="item-sub">{s.timestamp}</div></div>
@@ -1292,20 +1292,20 @@ function AppInspectorTab({ connected }: { connected: boolean }) {
 
 // ─── Logs Tab ─────────────────────────────────────────────────────────────────
 
-const GRAFANA_LOGS_URL    = "http://localhost:3002/d/96615abc-2831-4da6-9f69-97568618695c/ministack-e28094-log-pipeline-vector-2b-loki";
+const GRAFANA_LOGS_URL    = "http://localhost:3002/d/96615abc-2831-4da6-9f69-97568618695c/kumostack-e28094-log-pipeline-vector-2b-loki";
 const GRAFANA_ARCHIVE_URL = "http://localhost:3002/d/a9f75b19-eb51-4753-85e2-9a19c45773b1";
 const LOKI_URL            = "http://localhost:3100";
 const VECTOR_API_URL      = "http://localhost:8686";
 const GARAGE_ADMIN_URL    = "http://localhost:3903";
 
 function LogsTab({ connected }: { connected: boolean }) {
-  const [source, setSource]         = useState<"ministack" | "loki">("ministack");
+  const [source, setSource]         = useState<"kumostack" | "loki">("kumostack");
   const [logs, setLogs]             = useState<string[]>([]);
   const [live, setLive]             = useState(false);
   const [vectorHealth, setVectorHealth] = useState<"unknown" | "ok" | "error">("unknown");
   const [lokiHealth,  setLokiHealth]  = useState<"unknown" | "ok" | "error">("unknown");
   const [lokiServices, setLokiServices] = useState<string[]>([]);
-  const [lokiService,  setLokiService]  = useState("ministack");
+  const [lokiService,  setLokiService]  = useState("kumostack");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Check Vector + Loki health
@@ -1321,7 +1321,7 @@ function LogsTab({ connected }: { connected: boolean }) {
   }, []);
 
   const fetchLogs = useCallback(() => {
-    if (source === "ministack") {
+    if (source === "kumostack") {
       fetch("/api/logs").then((r) => r.text()).then((text) => {
         setLogs(text.split("\n").filter(Boolean).slice(-500));
       }).catch(() => {});
@@ -1372,7 +1372,7 @@ function LogsTab({ connected }: { connected: boolean }) {
         {[
           { label: "Vector.dev",    sub: "Log pipeline · port 8686",                   status: vectorHealth,                   href: `${VECTOR_API_URL}/playground` },
           { label: "Grafana Loki",  sub: `${lokiServices.length} services · port 3100`, status: lokiHealth,                     href: `${LOKI_URL}/metrics` },
-          { label: "Ministack S3",  sub: "s3://ministack-logs · 30d retention",         status: connected ? "ok" : "unknown",   href: "#" },
+          { label: "KumoStack S3",  sub: "s3://kumostack-logs · 30d retention",         status: connected ? "ok" : "unknown",   href: "#" },
           { label: "Garage",        sub: "Cold archive · port 3900 · 365d / 2yr",       status: "ok",                           href: `${GARAGE_ADMIN_URL}/health` },
         ].map(({ label, sub, status, href }) => (
           <a key={label} href={href} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
@@ -1403,7 +1403,7 @@ function LogsTab({ connected }: { connected: boolean }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
           {[
             { tier: "Tier 1 — Live", storage: "Grafana Loki", retention: "30 days (default)", badge: "#10b981", note: "Real-time search · LogQL · Alerting" },
-            { tier: "Tier 2 — Hot Archive", storage: "Ministack S3", retention: "7d → IA → GLACIER → 30d expire", badge: "#f59e0b", note: "Fast retrieval · recent incidents" },
+            { tier: "Tier 2 — Hot Archive", storage: "KumoStack S3", retention: "7d → IA → GLACIER → 30d expire", badge: "#f59e0b", note: "Fast retrieval · recent incidents" },
             { tier: "Tier 3 — Cold Archive", storage: "Garage", retention: "365d (logs) · 730d (RDS)", badge: "#60a5fa", note: "Compliance · audit trail · cost-efficient" },
           ].map(({ tier, storage, retention, badge, note }) => (
             <div key={tier} style={{ background: "var(--bg-elevated)", border: `1px solid ${badge}30`, borderRadius: "var(--radius)", padding: "12px 14px" }}>
@@ -1445,7 +1445,7 @@ function LogsTab({ connected }: { connected: boolean }) {
 
         <div style={{ marginTop: 12, padding: "8px 12px", background: "var(--bg)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", fontSize: 11, color: "var(--text-dim)", lineHeight: 1.7 }}>
           <strong style={{ color: "var(--text)" }}>Garage</strong> is a lightweight, self-hosted S3-compatible object store (<a href="https://garagehq.deuxfleurs.fr" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>garagehq.deuxfleurs.fr</a>).
-          Unlike Ministack&apos;s ephemeral S3 emulation, Garage persists data durably to disk and is designed for production use.
+          Unlike KumoStack&apos;s ephemeral S3 emulation, Garage persists data durably to disk and is designed for production use.
           Buckets: <code className="inline-code">logs-cold-archive</code> (365d) · <code className="inline-code">logs-rds-archive</code> (730d).
           Vector ships gzip-compressed JSON batches every 300s. Garage&apos;s built-in lifecycle worker runs daily to expire objects past their retention date.
         </div>
@@ -1454,8 +1454,8 @@ function LogsTab({ connected }: { connected: boolean }) {
       {/* Log viewer */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <div className="filter-pills">
-          <button className={`pill-btn ${source==="ministack"?"active":""}`} onClick={() => { setSource("ministack"); setLogs([]); }}>
-            MiniStack (Docker)
+          <button className={`pill-btn ${source==="kumostack"?"active":""}`} onClick={() => { setSource("kumostack"); setLogs([]); }}>
+            KumoStack (Docker)
           </button>
           <button className={`pill-btn ${source==="loki"?"active":""}`} onClick={() => { setSource("loki"); setLogs([]); }}>
             Loki <span className={`dot-indicator ${lokiHealth==="ok"?"dot--green":"dot--red"}`} />
@@ -1500,12 +1500,12 @@ interface DockerConfig { image: string; containerName: string; ports: { host: nu
 interface ExtensionDef { name: string; pkg: string; description: string; tags: string[]; repo: string; docker?: DockerConfig; }
 
 const EXTENSION_CATALOG: ExtensionDef[] = [
-  { name: "MailHog", pkg: "localstack-extension-mailhog", description: "Captures outgoing SMTP emails and shows them in a web UI. Connect your app's SES or SMTP client to port 1025.", tags: ["Email","Testing"], repo: "https://github.com/localstack/localstack-extensions/tree/main/mailhog", docker: { image: "mailhog/mailhog:latest", containerName: "ministack-mailhog", ports: [{ host: 1025, container: 1025 }, { host: 8025, container: 8025 }], uiUrl: "http://localhost:8025", healthPath: "/" } },
-  { name: "WireMock", pkg: "localstack-wiremock", description: "Stub any HTTP API with flexible request matching and response templating. Perfect for mocking third-party services.", tags: ["Mocking","HTTP"], repo: "https://github.com/localstack/localstack-extensions/tree/main/wiremock", docker: { image: "wiremock/wiremock:latest", containerName: "ministack-wiremock", ports: [{ host: 8088, container: 8080 }], uiUrl: "http://localhost:8088/__admin/", healthPath: "__admin/health" } },
-  { name: "Stripe Mock", pkg: "localstack-extension-stripe", description: "Full Stripe API mock — create charges, customers, subscriptions, and webhooks locally without touching the real Stripe sandbox.", tags: ["Payments","Mock"], repo: "https://github.com/localstack/localstack-extensions/tree/main/stripe", docker: { image: "stripe/stripe-mock:latest", containerName: "ministack-stripe", ports: [{ host: 12111, container: 12111 }], uiUrl: "http://localhost:12111" } },
-  { name: "httpbin", pkg: "localstack-extension-httpbin", description: "HTTP request & response testing service. Inspect headers, query params, redirects, and delays.", tags: ["HTTP","Testing"], repo: "https://github.com/localstack/localstack-extensions/tree/main/httpbin", docker: { image: "kennethreitz/httpbin:latest", containerName: "ministack-httpbin", ports: [{ host: 8083, container: 80 }], uiUrl: "http://localhost:8083", healthPath: "/get" } },
-  { name: "TypeDB", pkg: "localstack-extension-typedb", description: "Polymorphic database for complex domain modelling. Run knowledge-graph queries using TypeQL alongside your AWS services.", tags: ["Database","Graph"], repo: "https://github.com/localstack/localstack-extensions/tree/main/typedb", docker: { image: "vaticle/typedb:latest", containerName: "ministack-typedb", ports: [{ host: 1729, container: 1729 }] } },
-  { name: "ParadeDB", pkg: "localstack-extension-paradedb", description: "PostgreSQL with built-in full-text and vector search. Drop-in Elasticsearch replacement that speaks SQL.", tags: ["Database","Search"], repo: "https://github.com/localstack/localstack-extensions/tree/main/paradedb", docker: { image: "paradedb/paradedb:latest", containerName: "ministack-paradedb", ports: [{ host: 5435, container: 5432 }], env: { POSTGRESQL_PASSWORD: "ministack", POSTGRESQL_USERNAME: "ministack", POSTGRESQL_DATABASE: "ministack" } } },
+  { name: "MailHog", pkg: "localstack-extension-mailhog", description: "Captures outgoing SMTP emails and shows them in a web UI. Connect your app's SES or SMTP client to port 1025.", tags: ["Email","Testing"], repo: "https://github.com/localstack/localstack-extensions/tree/main/mailhog", docker: { image: "mailhog/mailhog:latest", containerName: "kumostack-mailhog", ports: [{ host: 1025, container: 1025 }, { host: 8025, container: 8025 }], uiUrl: "http://localhost:8025", healthPath: "/" } },
+  { name: "WireMock", pkg: "localstack-wiremock", description: "Stub any HTTP API with flexible request matching and response templating. Perfect for mocking third-party services.", tags: ["Mocking","HTTP"], repo: "https://github.com/localstack/localstack-extensions/tree/main/wiremock", docker: { image: "wiremock/wiremock:latest", containerName: "kumostack-wiremock", ports: [{ host: 8088, container: 8080 }], uiUrl: "http://localhost:8088/__admin/", healthPath: "__admin/health" } },
+  { name: "Stripe Mock", pkg: "localstack-extension-stripe", description: "Full Stripe API mock — create charges, customers, subscriptions, and webhooks locally without touching the real Stripe sandbox.", tags: ["Payments","Mock"], repo: "https://github.com/localstack/localstack-extensions/tree/main/stripe", docker: { image: "stripe/stripe-mock:latest", containerName: "kumostack-stripe", ports: [{ host: 12111, container: 12111 }], uiUrl: "http://localhost:12111" } },
+  { name: "httpbin", pkg: "localstack-extension-httpbin", description: "HTTP request & response testing service. Inspect headers, query params, redirects, and delays.", tags: ["HTTP","Testing"], repo: "https://github.com/localstack/localstack-extensions/tree/main/httpbin", docker: { image: "kennethreitz/httpbin:latest", containerName: "kumostack-httpbin", ports: [{ host: 8083, container: 80 }], uiUrl: "http://localhost:8083", healthPath: "/get" } },
+  { name: "TypeDB", pkg: "localstack-extension-typedb", description: "Polymorphic database for complex domain modelling. Run knowledge-graph queries using TypeQL alongside your AWS services.", tags: ["Database","Graph"], repo: "https://github.com/localstack/localstack-extensions/tree/main/typedb", docker: { image: "vaticle/typedb:latest", containerName: "kumostack-typedb", ports: [{ host: 1729, container: 1729 }] } },
+  { name: "ParadeDB", pkg: "localstack-extension-paradedb", description: "PostgreSQL with built-in full-text and vector search. Drop-in Elasticsearch replacement that speaks SQL.", tags: ["Database","Search"], repo: "https://github.com/localstack/localstack-extensions/tree/main/paradedb", docker: { image: "paradedb/paradedb:latest", containerName: "kumostack-paradedb", ports: [{ host: 5435, container: 5432 }], env: { POSTGRESQL_PASSWORD: "kumostack", POSTGRESQL_USERNAME: "kumostack", POSTGRESQL_DATABASE: "kumostack" } } },
   { name: "Miniflare", pkg: "localstack-extension-miniflare", description: "Emulate Cloudflare Workers locally alongside your AWS services. Useful for edge + cloud hybrid architectures.", tags: ["Cloudflare","Edge"], repo: "https://github.com/localstack/localstack-extensions/tree/main/miniflare" },
   { name: "AWS Proxy", pkg: "localstack-extension-aws-proxy", description: "Transparently proxies specific AWS service calls to real AWS while keeping the rest local.", tags: ["Proxy","AWS"], repo: "https://github.com/localstack/localstack-extensions/tree/main/aws-proxy" },
   { name: "Terraform Init", pkg: "localstack-extension-terraform-init", description: "Automatically initialises Terraform providers when LocalStack starts, reducing cold-start friction.", tags: ["IaC","Terraform"], repo: "https://github.com/localstack/localstack-extensions/tree/main/terraform-init" },
@@ -1605,7 +1605,7 @@ function ExtensionsTab() {
   return (
     <div>
       <div className="page-header">
-        <div><h1 className="page-title">Extensions</h1><p className="page-subtitle">Companion services for MiniStack</p></div>
+        <div><h1 className="page-title">Extensions</h1><p className="page-subtitle">Companion services for KumoStack</p></div>
         <a href="https://github.com/localstack/localstack-extensions" target="_blank" rel="noreferrer" className="btn btn-sm">GitHub ↗</a>
       </div>
       <div className="ext-legend">

@@ -66,9 +66,9 @@ def test_account_get_contact_information(acct):
 
 
 def test_account_module_exposes_no_op_reset():
-    """`/_ministack/reset` iterates every service module's `reset()`. Account
+    """`/_kumostack/reset` iterates every service module's `reset()`. Account
     is stateless, so this is a no-op stub — but it must exist or the central
     reset logs a warning per call."""
-    from ministack.services import account
+    from kumostack.services import account
     assert callable(getattr(account, "reset", None))
     account.reset()

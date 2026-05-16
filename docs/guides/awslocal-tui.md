@@ -8,7 +8,7 @@
 
 When you run a resource-creating command via `awslocal`, the TUI:
 
-1. Runs the actual AWS CLI command against Ministack (`localhost:4566`)
+1. Runs the actual AWS CLI command against KumoStack (`localhost:4566`)
 2. Detects the resource type (SQS, Lambda, DynamoDB, EC2, S3, ElastiCache)
 3. Prompts you in the terminal: **"Add this resource to Grafana?"**
 4. If you select **Yes**, creates a scoped Grafana dashboard with metrics pre-wired to that resource's dimensions
@@ -83,13 +83,13 @@ awslocal sqs create-queue --queue-name ci-queue
 `bin/awslocal` is already in the repo. Make it available on your `PATH`:
 
 ```bash
-export PATH="$PATH:/path/to/ministack/bin"
+export PATH="$PATH:/path/to/kumostack/bin"
 ```
 
 Or create a symlink:
 
 ```bash
-ln -s /path/to/ministack/bin/awslocal /usr/local/bin/awslocal
+ln -s /path/to/kumostack/bin/awslocal /usr/local/bin/awslocal
 ```
 
 Requires Python 3.8+ and the `rich` + `questionary` packages (installed via `pip install -r requirements.txt`).

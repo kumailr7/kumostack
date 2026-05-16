@@ -2,9 +2,9 @@
 
 ## ⚠️ Important: Local Development Only
 
-MiniStack is designed **exclusively for local development and CI/CD testing**.
+KumoStack is designed **exclusively for local development and CI/CD testing**.
 
-**Do not expose MiniStack to the internet or any untrusted network.**
+**Do not expose KumoStack to the internet or any untrusted network.**
 
 - It has no authentication — any request is accepted
 - Credentials (`aws_access_key_id`, `aws_secret_access_key`) are ignored
@@ -13,7 +13,7 @@ MiniStack is designed **exclusively for local development and CI/CD testing**.
 
 ## Reporting a Vulnerability
 
-If you find a security issue that could affect users running MiniStack in a way that exposes their host system or data, please open a GitHub issue tagged `security`.
+If you find a security issue that could affect users running KumoStack in a way that exposes their host system or data, please open a GitHub issue tagged `security`.
 
 Since this is a local dev tool with no auth by design, most "vulnerabilities" are intentional trade-offs for simplicity. But if you find something that could cause unintended host compromise (e.g. path traversal in S3 persistence, command injection in Lambda execution), please report it.
 

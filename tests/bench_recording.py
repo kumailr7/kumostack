@@ -6,7 +6,7 @@ Measures req/s and per-request latency across three service protocols
 and on, so the delta can be included in the PR description.
 
 Usage:
-    # Start ministack first, then run:
+    # Start kumostack first, then run:
     python tests/bench_recording.py                   # recording off
     CLOUDTRAIL_RECORDING=1 python tests/bench_recording.py   # recording on
 
@@ -14,9 +14,9 @@ Usage:
     python tests/bench_recording.py --compare
 
 Options:
-    --endpoint  Ministack URL (default: http://localhost:4566)
+    --endpoint  KumoStack URL (default: http://localhost:4566)
     --n         Requests per scenario (default: 300)
-    --compare   Run off then on by toggling via /_ministack/config (no restart needed)
+    --compare   Run off then on by toggling via /_kumostack/config (no restart needed)
 """
 
 import argparse
@@ -47,7 +47,7 @@ def _uid():
 
 def _set_recording(enabled: bool, endpoint=ENDPOINT):
     resp = requests.post(
-        f"{endpoint}/_ministack/config",
+        f"{endpoint}/_kumostack/config",
         json={"cloudtrail._recording_enabled": "true" if enabled else "false"},
     )
     if resp.status_code != 200:
@@ -55,7 +55,7 @@ def _set_recording(enabled: bool, endpoint=ENDPOINT):
 
 
 def _reset(endpoint=ENDPOINT):
-    requests.post(f"{endpoint}/_ministack/reset")
+    requests.post(f"{endpoint}/_kumostack/reset")
 
 
 def _percentile(data, pct):

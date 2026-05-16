@@ -2,7 +2,7 @@ const MINISTACK = process.env.MINISTACK_ENDPOINT ?? "http://localhost:4566";
 
 export async function GET() {
   try {
-    const res = await fetch(`${MINISTACK}/_ministack/health`, {
+    const res = await fetch(`${MINISTACK}/_kumostack/health`, {
       cache: "no-store",
     });
     const data = await res.json();

@@ -1,4 +1,4 @@
-# Garage single-node configuration for Ministack log archiving
+# Garage single-node configuration for KumoStack log archiving
 # Docs: https://garagehq.deuxfleurs.fr/documentation/reference-manual/configuration/
 
 metadata_dir = "/var/lib/garage/meta"
@@ -13,7 +13,7 @@ rpc_bind_addr = "[::]:3901"
 
 [s3_api]
 api_bind_addr = "[::]:3900"
-s3_region     = "us-east-1"    # use same region as Ministack for Vector compatibility
+s3_region     = "us-east-1"    # use same region as KumoStack for Vector compatibility
 root_domain   = ".s3.garage"
 
 [admin]

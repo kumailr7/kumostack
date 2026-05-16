@@ -389,7 +389,7 @@ def test_emr_cancel_steps(emr):
     step_ids = step_resp["StepIds"]
     assert len(step_ids) == 2
 
-    # Steps are already COMPLETED in ministack, so cancel returns FAILED_TO_CANCEL
+    # Steps are already COMPLETED in kumostack, so cancel returns FAILED_TO_CANCEL
     cancel_resp = emr.cancel_steps(ClusterId=cluster_id, StepIds=step_ids)
     info_list = cancel_resp["CancelStepsInfoList"]
     assert len(info_list) == 2

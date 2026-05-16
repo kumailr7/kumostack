@@ -152,7 +152,7 @@ def test_sts_get_web_identity_token():
 
 
 def test_sts_get_web_identity_token_json_protocol():
-    """JSON protocol returns int-epoch Expiration per ministack convention."""
+    """JSON protocol returns int-epoch Expiration per kumostack convention."""
     import urllib.error
     import urllib.request
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")

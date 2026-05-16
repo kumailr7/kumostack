@@ -2,7 +2,7 @@
 """
 create_aws_dashboards.py
 Creates a Grafana folder "AWS Resources" and one dashboard per AWS service
-supported by Ministack.  Dashboards follow the monitoringartist reference style:
+supported by KumoStack.  Dashboards follow the monitoringartist reference style:
   https://github.com/monitoringartist/grafana-aws-cloudwatch-dashboards
 """
 
@@ -102,7 +102,7 @@ def dash(title, service_tag, panels):
     global _pid; _pid = 1
     return {
         "title": title,
-        "tags": ["ministack", "aws", service_tag],
+        "tags": ["kumostack", "aws", service_tag],
         "timezone": "browser", "refresh": "30s", "schemaVersion": 38,
         "panels": panels,
     }
@@ -651,7 +651,7 @@ ALL_DASHBOARDS = [
 
 
 def main():
-    console.print("\n[bold cyan]Ministack → Grafana: AWS Resources Dashboards[/bold cyan]\n")
+    console.print("\n[bold cyan]KumoStack → Grafana: AWS Resources Dashboards[/bold cyan]\n")
 
     with console.status("[cyan]Creating folder 'AWS Resources'…[/cyan]"):
         folder_uid = get_or_create_folder("AWS Resources")

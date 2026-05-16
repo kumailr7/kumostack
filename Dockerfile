@@ -20,7 +20,7 @@ RUN rm -rf /usr/local/lib/python3.12/site-packages/awscli/examples \
 
 FROM python:3.12-alpine
 
-LABEL maintainer="MiniStack" \
+LABEL maintainer="KumoStack" \
       description="Local AWS Service Emulator — drop-in LocalStack replacement"
 
 # Upgrade base packages to pick up latest security patches.
@@ -28,7 +28,7 @@ RUN apk upgrade --no-cache && apk add --no-cache nodejs bash openssl && rm -f /u
     && rm -rf /usr/local/lib/python3.12/site-packages/pip* \
               /usr/local/bin/pip*
 
-WORKDIR /opt/ministack
+WORKDIR /opt/kumostack
 
 # Copy cleaned Python packages and CLI entrypoints from builder.
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
@@ -39,14 +39,14 @@ COPY --from=builder /usr/local/bin/hypercorn /usr/local/bin/hypercorn
 COPY bin/awslocal /usr/local/bin/awslocal
 RUN chmod +x /usr/local/bin/awslocal
 
-COPY ministack/ ministack/
+COPY kumostack/ kumostack/
 
-RUN addgroup -S ministack && adduser -S ministack -G ministack
-RUN mkdir -p /tmp/ministack-data/s3 && chown -R ministack:ministack /tmp/ministack-data
+RUN addgroup -S kumostack && adduser -S kumostack -G kumostack
+RUN mkdir -p /tmp/kumostack-data/s3 && chown -R kumostack:kumostack /tmp/kumostack-data
 RUN mkdir -p /docker-entrypoint-initaws.d/ready.d \
              /etc/localstack/init/boot.d \
              /etc/localstack/init/ready.d && \
-    chown -R ministack:ministack /docker-entrypoint-initaws.d /etc/localstack
+    chown -R kumostack:kumostack /docker-entrypoint-initaws.d /etc/localstack
 VOLUME /docker-entrypoint-initaws.d
 VOLUME /etc/localstack/init
 
@@ -55,7 +55,7 @@ ENV MINISTACK_VERSION=${MINISTACK_VERSION} \
     GATEWAY_PORT=4566 \
     LOG_LEVEL=INFO \
     S3_PERSIST=0 \
-    S3_DATA_DIR=/tmp/ministack-data/s3 \
+    S3_DATA_DIR=/tmp/kumostack-data/s3 \
     REDIS_HOST=redis \
     REDIS_PORT=6379 \
     RDS_BASE_PORT=15432 \
@@ -71,6 +71,6 @@ EXPOSE 4566 2222
 
 # Pure Python healthcheck — no curl dependency; USE_SSL for HTTP/HTTPS.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import os,ssl,urllib.request as r; t=os.environ.get('USE_SSL','').strip().lower() in ('1','true','yes'); r.urlopen(('https' if t else 'http')+'://localhost:4566/_ministack/health',context=ssl._create_unverified_context() if t else None)" || exit 1
+    CMD python -c "import os,ssl,urllib.request as r; t=os.environ.get('USE_SSL','').strip().lower() in ('1','true','yes'); r.urlopen(('https' if t else 'http')+'://localhost:4566/_kumostack/health',context=ssl._create_unverified_context() if t else None)" || exit 1
 
-ENTRYPOINT ["python", "-m", "ministack"]
+ENTRYPOINT ["python", "-m", "kumostack"]

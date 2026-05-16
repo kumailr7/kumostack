@@ -1,4 +1,4 @@
-"""Unit tests for ministack.core.router.detect_service.
+"""Unit tests for kumostack.core.router.detect_service.
 
 Pure routing-layer tests — no boto3, no live server. Covers the path-based
 fallback (i.e. when neither X-Amz-Target nor a SigV4 credential scope is
@@ -6,7 +6,7 @@ available to disambiguate the service).
 """
 import pytest
 
-from ministack.core.router import detect_service
+from kumostack.core.router import detect_service
 
 _HEADERS = {"host": "localhost:4566"}
 

@@ -1,6 +1,6 @@
 # Guides
 
-Deeper dives into Ministack's observability stack and developer tooling.
+Deeper dives into KumoStack's observability stack and developer tooling.
 
 | Guide | Description |
 |---|---|

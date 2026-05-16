@@ -10,7 +10,7 @@ and by Lambda event-source mappings.
 import pytest
 from botocore.exceptions import ClientError
 
-# MiniStack exposes a single synthetic shard per stream; its id matches this.
+# KumoStack exposes a single synthetic shard per stream; its id matches this.
 _DEFAULT_SHARD_ID = "shardId-00000000000000000000-00000000"
 
 

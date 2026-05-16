@@ -10,11 +10,11 @@ ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
 def test_imds_v1_role_listing():
     r = requests.get(f"{ENDPOINT}/latest/meta-data/iam/security-credentials/")
     assert r.status_code == 200
-    assert r.text.strip() == "ministack-instance-role"
+    assert r.text.strip() == "kumostack-instance-role"
 
 
 def test_imds_v1_credentials_doc_shape():
-    r = requests.get(f"{ENDPOINT}/latest/meta-data/iam/security-credentials/ministack-instance-role")
+    r = requests.get(f"{ENDPOINT}/latest/meta-data/iam/security-credentials/kumostack-instance-role")
     assert r.status_code == 200
     doc = r.json()
     assert doc["Code"] == "Success"

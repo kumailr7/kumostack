@@ -72,7 +72,7 @@ def test_apigwv1_get_account_defaults_and_update_roundtrip(apigw_v1):
 def test_apigwv1_rest_api_policy_terraform_roundtrip(apigw_v1):
     """GetRestApi must return `policy` JSON-string-escape-encoded, matching
     real AWS. Terraform-provider-aws's flattenAPIPolicy wraps the SDK-decoded
-    policy in outer quotes and re-parses as JSON; if ministack returns the
+    policy in outer quotes and re-parses as JSON; if kumostack returns the
     raw policy (unescaped) the provider fails with
     ``invalid character 'S' after top-level value``. Regression for #430."""
     import urllib.request
@@ -706,9 +706,9 @@ def test_apigwv1_execute_missing_resource_404(apigw_v1):
 def test_apigwv1_http_proxy_does_not_block_parallel_ddb(monkeypatch):
     import asyncio
 
-    from ministack.services import apigateway as apigw_mod
-    from ministack.services import apigateway_v1 as apigw_v1_mod
-    from ministack.services import dynamodb as ddb_mod
+    from kumostack.services import apigateway as apigw_mod
+    from kumostack.services import apigateway_v1 as apigw_v1_mod
+    from kumostack.services import dynamodb as ddb_mod
 
     def _slow_urlopen(_request_or_url, _timeout_seconds):
         time.sleep(0.4)
@@ -751,8 +751,8 @@ def test_apigwv1_http_proxy_substitutes_path_params_and_forwards_query(monkeypat
     """HTTP_PROXY uses the substituted integration URI as the upstream URL."""
     import asyncio
 
-    from ministack.services import apigateway as apigw_mod
-    from ministack.services import apigateway_v1 as apigw_v1_mod
+    from kumostack.services import apigateway as apigw_mod
+    from kumostack.services import apigateway_v1 as apigw_v1_mod
 
     captured = {}
 
@@ -837,7 +837,7 @@ def test_apigwv1_http_proxy_timeout_is_configurable(monkeypatch):
     """`_timeout_from_env` honours the env var and falls back on bad input.
     Tested directly instead of via importlib.reload so the suite-wide
     apigateway_v1 module state is not rebuilt mid-run."""
-    from ministack.services.apigateway import _timeout_from_env
+    from kumostack.services.apigateway import _timeout_from_env
 
     monkeypatch.setenv("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", "55")
     assert _timeout_from_env("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 55.0

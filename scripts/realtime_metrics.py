@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-realtime_metrics.py  —  Continuously push live CloudWatch metrics to Ministack.
+realtime_metrics.py  —  Continuously push live CloudWatch metrics to KumoStack.
 
 Simulates realistic AWS resource activity every INTERVAL seconds so Grafana
 dashboards show a live, moving time series without needing real traffic.
@@ -105,7 +105,7 @@ def push_batch():
 
 
 def make_table(avg_cpu, inv, err, depth, rcu, interval):
-    t = Table(title="[bold cyan]Ministack — Live Metrics[/bold cyan]",
+    t = Table(title="[bold cyan]KumoStack — Live Metrics[/bold cyan]",
               show_header=True, header_style="bold magenta")
     t.add_column("Namespace",  style="cyan",  width=16)
     t.add_column("Metric",     style="white", width=28)
@@ -122,7 +122,7 @@ def make_table(avg_cpu, inv, err, depth, rcu, interval):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Push real-time metrics to Ministack CloudWatch")
+    parser = argparse.ArgumentParser(description="Push real-time metrics to KumoStack CloudWatch")
     parser.add_argument("--interval", type=int, default=10, help="Push interval in seconds (default 10)")
     parser.add_argument("--once",     action="store_true",  help="Push one batch and exit")
     args = parser.parse_args()

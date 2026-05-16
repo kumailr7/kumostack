@@ -1,18 +1,18 @@
 # Configuration Reference
 
-Environment variables and volume mounts for tuning the Ministack stack.
+Environment variables and volume mounts for tuning the KumoStack stack.
 
 ---
 
-## Ministack (core)
+## KumoStack (core)
 
-Set in `docker-compose.yml` under the `ministack` service.
+Set in `docker-compose.yml` under the `kumostack` service.
 
 | Variable | Default | Description |
 |---|---|---|
 | `AWS_DEFAULT_REGION` | `us-east-1` | Default region for all services |
 | `S3_PERSIST` | `0` | Persist S3 data across restarts (`1` to enable) |
-| `LOG_LEVEL` | `INFO` | Ministack log verbosity (`DEBUG`, `INFO`, `WARN`, `ERROR`) |
+| `LOG_LEVEL` | `INFO` | KumoStack log verbosity (`DEBUG`, `INFO`, `WARN`, `ERROR`) |
 | `DOCKER_NETWORK` | _(unset)_ | Docker network name for RDS containers (must be set for RDS to work) |
 | `LAMBDA_EXECUTOR` | `local` | Lambda execution backend (`local` or `docker`) |
 | `PERSISTENCE` | `0` | Persist all service state (`1` to enable) |
@@ -112,6 +112,6 @@ Access key and secret are pre-set in `docker-compose.yml` via `GARAGE_ACCESS_KEY
 
 | Variable | Default | Description |
 |---|---|---|
-| `MINISTACK_CONTAINER` | `ministack` | Container name to read logs from |
-| `DRAWIO_ENDPOINT` | `http://ministack-drawio:8080` | draw.io service URL (internal) |
+| `MINISTACK_CONTAINER` | `kumostack` | Container name to read logs from |
+| `DRAWIO_ENDPOINT` | `http://kumostack-drawio:8080` | draw.io service URL (internal) |
 | `NEXT_PUBLIC_GRAFANA_URL` | `http://localhost:3002` | Grafana base URL (client-side) |

@@ -2,7 +2,7 @@
 CloudTrail integration tests.
 
 Recording must be enabled for event-recording tests. The module-scoped
-`enable_recording` fixture toggles it on via /_ministack/config before any
+`enable_recording` fixture toggles it on via /_kumostack/config before any
 test runs and resets state after the module completes, so these tests are
 safe to run alongside the rest of the suite.
 
@@ -57,14 +57,14 @@ def ddb():
 def enable_recording():
     """Enable CloudTrail recording for this test module via the runtime config endpoint."""
     resp = requests.post(
-        f"{ENDPOINT}/_ministack/config",
+        f"{ENDPOINT}/_kumostack/config",
         json={"cloudtrail._recording_enabled": "true"},
     )
     assert resp.status_code == 200, f"Failed to enable recording: {resp.text}"
     yield
     # Disable recording after module; reset clears events
     requests.post(
-        f"{ENDPOINT}/_ministack/config",
+        f"{ENDPOINT}/_kumostack/config",
         json={"cloudtrail._recording_enabled": "false"},
     )
 
@@ -496,7 +496,7 @@ def test_cloudtrail_calls_not_self_recorded(ct):
 def test_recording_disabled_no_new_events(ct, s3):
     """Disabling recording stops new events from being appended."""
     requests.post(
-        f"{ENDPOINT}/_ministack/config",
+        f"{ENDPOINT}/_kumostack/config",
         json={"cloudtrail._recording_enabled": "false"},
     )
     try:
@@ -509,6 +509,6 @@ def test_recording_disabled_no_new_events(ct, s3):
     finally:
         # Re-enable so subsequent tests in this module still work
         requests.post(
-            f"{ENDPOINT}/_ministack/config",
+            f"{ENDPOINT}/_kumostack/config",
             json={"cloudtrail._recording_enabled": "true"},
         )

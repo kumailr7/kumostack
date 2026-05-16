@@ -83,7 +83,7 @@ def test_elasticache_user_group_crud(ec):
 
 def test_elasticache_reset_clears_param_groups():
     """ElastiCache reset clears _param_group_params and resets port counter."""
-    from ministack.services import elasticache as _ec
+    from kumostack.services import elasticache as _ec
     _ec._param_group_params["test-group"] = {"param1": "val1"}
     _ec._port_counter[0] = 99999
     _ec.reset()
@@ -635,7 +635,7 @@ def test_describe_events_filter_source_id(ec):
 
 
 # ---------------------------------------------------------------------------
-# 11. Serverless cache operations — not implemented in MiniStack
+# 11. Serverless cache operations — not implemented in KumoStack
 # ---------------------------------------------------------------------------
 
 def test_serverless_cache_not_implemented(ec):

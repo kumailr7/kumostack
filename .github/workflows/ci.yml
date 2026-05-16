@@ -33,11 +33,11 @@ jobs:
       - name: Install dependencies
         run: pip install -e . && pip install -r requirements.txt boto3 pytest pytest-xdist duckdb docker cbor2 pyyaml cryptography
 
-      - name: Start MiniStack
+      - name: Start KumoStack
         run: |
-          REDIS_HOST=localhost python -m hypercorn ministack.app:app --bind 0.0.0.0:4566 --keep-alive 75 &
+          REDIS_HOST=localhost python -m hypercorn kumostack.app:app --bind 0.0.0.0:4566 --keep-alive 75 &
           sleep 3
-          curl -sf http://localhost:4566/_ministack/health
+          curl -sf http://localhost:4566/_kumostack/health
 
       - name: Run tests (parallel safe set)
         run: pytest tests/ -v -n 3 --dist=loadfile -m "not serial"

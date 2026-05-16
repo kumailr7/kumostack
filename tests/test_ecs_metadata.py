@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from ministack.services import ecs_metadata
+from kumostack.services import ecs_metadata
 
 
 def _call(method, path):

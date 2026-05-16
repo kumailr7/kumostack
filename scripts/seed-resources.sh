@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates a realistic AWS architecture in MiniStack for testing the Architecture diagram.
+# Creates a realistic AWS architecture in KumoStack for testing the Architecture diagram.
 #
 # Topology:
 #   WAF ──────────────────► ALB ──► EC2 ──► RDS ──► Secrets Manager

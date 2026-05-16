@@ -265,13 +265,13 @@ def test_athena_data_catalog_crud(athena):
     assert not any(c["CatalogName"] == "qa-athena-catalog" for c in catalogs2)
 
 def test_athena_engine_mock_via_config(athena):
-    """Switching ATHENA_ENGINE to 'mock' via /_ministack/config returns mock results."""
+    """Switching ATHENA_ENGINE to 'mock' via /_kumostack/config returns mock results."""
     import json as _json
     import urllib.request
 
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
-        f"{endpoint}/_ministack/config",
+        f"{endpoint}/_kumostack/config",
         data=_json.dumps({"athena.ATHENA_ENGINE": "mock"}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -295,7 +295,7 @@ def test_athena_engine_mock_via_config(athena):
 
     # Reset back to auto
     req2 = urllib.request.Request(
-        f"{endpoint}/_ministack/config",
+        f"{endpoint}/_kumostack/config",
         data=_json.dumps({"athena.ATHENA_ENGINE": "auto"}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",

@@ -1,22 +1,22 @@
 # RDS — Managed Databases
 
-Spin up a real PostgreSQL or MySQL database inside Ministack, connect to it, run migrations, and monitor it in Grafana.
+Spin up a real PostgreSQL or MySQL database inside KumoStack, connect to it, run migrations, and monitor it in Grafana.
 
 **Time:** ~20 minutes  
 **Services:** RDS, Secrets Manager
 
 !!! info "Real Docker"
-    Ministack's RDS emulation spins up an actual Docker container running PostgreSQL or MySQL — not a mock. You get a real database engine.
+    KumoStack's RDS emulation spins up an actual Docker container running PostgreSQL or MySQL — not a mock. You get a real database engine.
 
 ---
 
 ## Prerequisites
 
-Make sure `DOCKER_NETWORK=ministack_default` is set in your `docker-compose.yml` (already configured in the default Ministack stack):
+Make sure `DOCKER_NETWORK=kumostack_default` is set in your `docker-compose.yml` (already configured in the default KumoStack stack):
 
 ```yaml
 environment:
-  - DOCKER_NETWORK=ministack_default
+  - DOCKER_NETWORK=kumostack_default
 ```
 
 ---
@@ -65,7 +65,7 @@ The port is mapped to `localhost:15432` by default.
 PGPASSWORD=secret123 psql -h localhost -p 15432 -U admin -d appdb
 
 # Or connect directly from the container
-docker exec ministack-rds-my-postgres \
+docker exec kumostack-rds-my-postgres \
   psql -U admin -d appdb -c "SELECT version();"
 ```
 

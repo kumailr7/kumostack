@@ -1205,7 +1205,7 @@ def test_eventbridge_log_config_round_trip(eb):
 # ---------------------------------------------------------------------------
 
 import pytest as _pytest
-from ministack.services import eventbridge as _eb
+from kumostack.services import eventbridge as _eb
 
 
 @_pytest.mark.parametrize("expr,expected", [

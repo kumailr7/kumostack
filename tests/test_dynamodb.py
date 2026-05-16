@@ -1852,7 +1852,7 @@ def _make_stream(kin, name):
     except ClientError:
         pass
     kin.create_stream(StreamName=name, ShardCount=1)
-    # Streams are ACTIVE immediately in MiniStack, but the DescribeStream call
+    # Streams are ACTIVE immediately in KumoStack, but the DescribeStream call
     # is cheap and keeps the test robust if that ever changes.
     kin.describe_stream(StreamName=name)
     return kin.describe_stream(StreamName=name)["StreamDescription"]["StreamARN"]
@@ -1883,7 +1883,7 @@ def _drain_kinesis(kin, stream_name):
 
 def test_enable_returns_active_and_describe_lists_it(ddb, kin):
     _make_table(ddb, "KdsLifecycle")
-    arn = _make_stream(kin, "ministack-kds-lifecycle")
+    arn = _make_stream(kin, "kumostack-kds-lifecycle")
 
     resp = ddb.enable_kinesis_streaming_destination(
         TableName="KdsLifecycle", StreamArn=arn,
@@ -1904,7 +1904,7 @@ def test_enable_returns_active_and_describe_lists_it(ddb, kin):
 
 def test_enable_twice_same_table_and_arn_raises(ddb, kin):
     _make_table(ddb, "KdsDup")
-    arn = _make_stream(kin, "ministack-kds-dup")
+    arn = _make_stream(kin, "kumostack-kds-dup")
     ddb.enable_kinesis_streaming_destination(TableName="KdsDup", StreamArn=arn)
 
     with pytest.raises(ClientError) as ei:
@@ -1913,7 +1913,7 @@ def test_enable_twice_same_table_and_arn_raises(ddb, kin):
 
 
 def test_enable_requires_existing_table(ddb, kin):
-    arn = _make_stream(kin, "ministack-kds-missing")
+    arn = _make_stream(kin, "kumostack-kds-missing")
     with pytest.raises(ClientError) as ei:
         ddb.enable_kinesis_streaming_destination(TableName="ThisTableDoesNotExist", StreamArn=arn)
     assert ei.value.response["Error"]["Code"] == "ResourceNotFoundException"
@@ -1925,7 +1925,7 @@ def test_enable_requires_existing_table(ddb, kin):
 
 def test_item_mutations_land_in_kinesis_stream(ddb, kin):
     _make_table(ddb, "KdsDeliver")
-    arn = _make_stream(kin, "ministack-kds-deliver")
+    arn = _make_stream(kin, "kumostack-kds-deliver")
     ddb.enable_kinesis_streaming_destination(TableName="KdsDeliver", StreamArn=arn)
 
     ddb.put_item(TableName="KdsDeliver", Item={"pk": {"S": "a"}, "val": {"N": "1"}})
@@ -1937,7 +1937,7 @@ def test_item_mutations_land_in_kinesis_stream(ddb, kin):
     )
     ddb.delete_item(TableName="KdsDeliver", Key={"pk": {"S": "a"}})
 
-    records = _drain_kinesis(kin, "ministack-kds-deliver")
+    records = _drain_kinesis(kin, "kumostack-kds-deliver")
     assert len(records) == 3
 
     decoded = []
@@ -1957,7 +1957,7 @@ def test_item_mutations_land_in_kinesis_stream(ddb, kin):
 
 def test_disable_stops_delivery(ddb, kin):
     _make_table(ddb, "KdsDisable")
-    arn = _make_stream(kin, "ministack-kds-disable")
+    arn = _make_stream(kin, "kumostack-kds-disable")
     ddb.enable_kinesis_streaming_destination(TableName="KdsDisable", StreamArn=arn)
 
     ddb.put_item(TableName="KdsDisable", Item={"pk": {"S": "before"}})
@@ -1976,13 +1976,13 @@ def test_disable_stops_delivery(ddb, kin):
 
     ddb.put_item(TableName="KdsDisable", Item={"pk": {"S": "after"}})
 
-    records = _drain_kinesis(kin, "ministack-kds-disable")
+    records = _drain_kinesis(kin, "kumostack-kds-disable")
     assert len(records) == 1  # only the pre-disable INSERT
 
 
 def test_disable_without_active_raises(ddb, kin):
     _make_table(ddb, "KdsNoActive")
-    arn = _make_stream(kin, "ministack-kds-no-active")
+    arn = _make_stream(kin, "kumostack-kds-no-active")
     with pytest.raises(ClientError) as ei:
         ddb.disable_kinesis_streaming_destination(TableName="KdsNoActive", StreamArn=arn)
     assert ei.value.response["Error"]["Code"] == "ResourceNotFoundException"
@@ -1994,7 +1994,7 @@ def test_disable_without_active_raises(ddb, kin):
 
 def test_update_precision(ddb, kin):
     _make_table(ddb, "KdsUpdate")
-    arn = _make_stream(kin, "ministack-kds-update")
+    arn = _make_stream(kin, "kumostack-kds-update")
     ddb.enable_kinesis_streaming_destination(TableName="KdsUpdate", StreamArn=arn)
 
     resp = ddb.update_kinesis_streaming_destination(
@@ -2025,7 +2025,7 @@ def test_update_rejects_invalid_precision(ddb, kin):
     import urllib.request
 
     _make_table(ddb, "KdsUpdateInvalid")
-    arn = _make_stream(kin, "ministack-kds-update-invalid")
+    arn = _make_stream(kin, "kumostack-kds-update-invalid")
     ddb.enable_kinesis_streaming_destination(TableName="KdsUpdateInvalid", StreamArn=arn)
 
     body = json.dumps({
@@ -2057,7 +2057,7 @@ def test_update_rejects_invalid_precision(ddb, kin):
 
 def test_delete_table_removes_destinations(ddb, kin):
     _make_table(ddb, "KdsAutoclean")
-    arn = _make_stream(kin, "ministack-kds-autoclean")
+    arn = _make_stream(kin, "kumostack-kds-autoclean")
     ddb.enable_kinesis_streaming_destination(TableName="KdsAutoclean", StreamArn=arn)
 
     ddb.delete_table(TableName="KdsAutoclean")
@@ -2075,7 +2075,7 @@ def test_delete_table_removes_destinations(ddb, kin):
 
 def test_multiple_puts_land_in_order(ddb, kin):
     _make_table(ddb, "KdsOrder")
-    arn = _make_stream(kin, "ministack-kds-order")
+    arn = _make_stream(kin, "kumostack-kds-order")
     ddb.enable_kinesis_streaming_destination(TableName="KdsOrder", StreamArn=arn)
 
     for i in range(5):
@@ -2083,7 +2083,7 @@ def test_multiple_puts_land_in_order(ddb, kin):
 
     # Short sleep to make sure arrival timestamps settle (not strictly needed).
     time.sleep(0.05)
-    records = _drain_kinesis(kin, "ministack-kds-order")
+    records = _drain_kinesis(kin, "kumostack-kds-order")
     assert len(records) == 5
     decoded = [
         json.loads(

@@ -8,9 +8,9 @@ from testcontainers.core.waiting_utils import wait_for_logs
 
 
 @pytest.fixture(scope="module")
-def ministack():
-    """Start a MiniStack container and wait for it to be healthy."""
-    container = DockerContainer("ministackorg/ministack:latest").with_exposed_ports(4566)
+def kumostack():
+    """Start a KumoStack container and wait for it to be healthy."""
+    container = DockerContainer("kumostackorg/kumostack:latest").with_exposed_ports(4566)
     container.start()
 
     host = container.get_container_host_ip()
@@ -21,14 +21,14 @@ def ministack():
     deadline = time.time() + 30
     while time.time() < deadline:
         try:
-            resp = requests.get(f"{endpoint}/_ministack/health", timeout=2)
+            resp = requests.get(f"{endpoint}/_kumostack/health", timeout=2)
             if resp.status_code == 200:
                 break
         except Exception:
             pass
         time.sleep(0.5)
     else:
-        raise RuntimeError("MiniStack container did not become healthy within 30s")
+        raise RuntimeError("KumoStack container did not become healthy within 30s")
 
     yield endpoint
 
@@ -36,7 +36,7 @@ def ministack():
 
 
 def _client(service: str, endpoint: str):
-    """Create a boto3 client pointing at the MiniStack container."""
+    """Create a boto3 client pointing at the KumoStack container."""
     return boto3.client(
         service,
         endpoint_url=endpoint,
@@ -51,8 +51,8 @@ def _client(service: str, endpoint: str):
 # ---------------------------------------------------------------------------
 
 class TestS3:
-    def test_create_bucket_put_get_object(self, ministack):
-        s3 = _client("s3", ministack)
+    def test_create_bucket_put_get_object(self, kumostack):
+        s3 = _client("s3", kumostack)
 
         bucket = "test-bucket"
         s3.create_bucket(Bucket=bucket)
@@ -69,8 +69,8 @@ class TestS3:
 # ---------------------------------------------------------------------------
 
 class TestSQS:
-    def test_create_queue_send_receive(self, ministack):
-        sqs = _client("sqs", ministack)
+    def test_create_queue_send_receive(self, kumostack):
+        sqs = _client("sqs", kumostack)
 
         queue = sqs.create_queue(QueueName="test-queue")
         queue_url = queue["QueueUrl"]
@@ -87,8 +87,8 @@ class TestSQS:
 # ---------------------------------------------------------------------------
 
 class TestDynamoDB:
-    def test_create_table_put_get_item(self, ministack):
-        ddb = _client("dynamodb", ministack)
+    def test_create_table_put_get_item(self, kumostack):
+        ddb = _client("dynamodb", kumostack)
 
         table_name = "test-table"
         ddb.create_table(

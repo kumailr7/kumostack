@@ -172,8 +172,8 @@ async def _invoke_asgi_http(
     *,
     extra_headers: dict[str, str] | None = None,
 ):
-    """Drive MiniStack's ASGI ``app`` in-process (no TCP server)."""
-    from ministack.app import app as asgi_app
+    """Drive KumoStack's ASGI ``app`` in-process (no TCP server)."""
+    from kumostack.app import app as asgi_app
 
     messages: list[dict] = []
 
@@ -231,7 +231,7 @@ def _create_namespace(appsync, api_id, name):
 def _minimal_sigv4_appsync_authorization() -> str:
     """SigV4-shaped header with credential scope ``.../appsync/aws4_request`` (unsigned).
 
-    MiniStack's router only inspects the ``Credential=`` segment — real Lambdas
+    KumoStack's router only inspects the ``Credential=`` segment — real Lambdas
     sign with the same ``appsync`` service name as AppSync GraphQL.
     """
     return (
@@ -341,7 +341,7 @@ def test_asgi_get_v2_apis_appsync_api_vhost_discovers_api():
     Regression: path-only ``/v2/apis`` routing must not send this to ``apigateway``
     (404). It must reach ``appsync_events`` and return CORS headers from dispatch.
     """
-    from ministack.services import appsync_events as ae
+    from kumostack.services import appsync_events as ae
 
     ae.reset()
     host = "example.appsync-api.us-east-1.localhost:4566"
@@ -474,7 +474,7 @@ def test_publish_unknown_api_404():
 
 
 def test_detect_service_post_event_appsync_api_vhost_returns_appsync_events():
-    from ministack.core.router import detect_service
+    from kumostack.core.router import detect_service
 
     auth = _minimal_sigv4_appsync_authorization()
     host = "abc123dead.appsync-api.us-east-1.amazonaws.com"
@@ -483,7 +483,7 @@ def test_detect_service_post_event_appsync_api_vhost_returns_appsync_events():
 
 def test_detect_service_post_graphql_appsync_api_vhost_stays_appsync():
     """GraphQL data plane shares the ``appsync`` SigV4 scope and the same vhost."""
-    from ministack.core.router import detect_service
+    from kumostack.core.router import detect_service
 
     auth = _minimal_sigv4_appsync_authorization()
     host = "abc123dead.appsync-api.us-east-1.amazonaws.com"
@@ -492,7 +492,7 @@ def test_detect_service_post_graphql_appsync_api_vhost_stays_appsync():
 
 def test_detect_service_post_event_localhost_stays_appsync():
     """Without ``.appsync-api.`` in Host, step 2 credential scope still routes to GraphQL service."""
-    from ministack.core.router import detect_service
+    from kumostack.core.router import detect_service
 
     auth = _minimal_sigv4_appsync_authorization()
     host = f"localhost:{_PORT}"
@@ -502,9 +502,9 @@ def test_detect_service_post_event_localhost_stays_appsync():
 def test_publish_with_appsync_sigv4_scope_on_events_vhost():
     """Regression: signed ``POST /event`` must reach ``appsync_events`` (not GraphQL 404).
 
-    Uses in-process ASGI (no TCP MiniStack) so CI and local runs stay green.
+    Uses in-process ASGI (no TCP KumoStack) so CI and local runs stay green.
     """
-    from ministack.services import appsync_events as ae
+    from kumostack.services import appsync_events as ae
 
     ae.reset()
     mgmt_host = "example.appsync-api.us-east-1.localhost:4566"
@@ -685,7 +685,7 @@ def test_websocket_server_sends_keepalive():
 
     If the environment hasn't been configured for a short interval, skip —
     the real 60s default is too slow for unit tests. Set the env var on the
-    MiniStack container (e.g. APPSYNC_EVENTS_KA_INTERVAL_SECS=1) to enable.
+    KumoStack container (e.g. APPSYNC_EVENTS_KA_INTERVAL_SECS=1) to enable.
     """
     ka_interval = os.environ.get("APPSYNC_EVENTS_KA_INTERVAL_SECS")
     if not ka_interval:
@@ -718,7 +718,7 @@ def test_websocket_server_sends_keepalive():
 # ---------------------------------------------------------------------------
 
 def test_websocket_accepts_without_header_subprotocol_in_lax_mode(api):
-    """Default MiniStack config is lax — missing header-<b64> still accepts."""
+    """Default KumoStack config is lax — missing header-<b64> still accepts."""
     host_header = f"{api}.appsync-realtime-api.us-east-1.amazonaws.com"
     ws = _WSClient(host_header=host_header, path="/event/realtime",
                    subprotocol="aws-appsync-event-ws")
@@ -866,7 +866,7 @@ def test_terraform_aws_appsync_api_key_on_event_api_uses_v1_path(appsync, api):
 
 def test_http_publish_invokes_lambda_authorizer(monkeypatch):
     """HTTP publish must enforce the same Lambda authorizer as WebSocket publish."""
-    from ministack.services import appsync_events as ae
+    from kumostack.services import appsync_events as ae
 
     ae.reset()
     create_body = json.dumps({
@@ -914,7 +914,7 @@ def test_http_publish_invokes_lambda_authorizer(monkeypatch):
 # ---------------------------------------------------------------------------
 # DNS defaults — unit tests for the {api_id}.appsync-(api|realtime-api) hosts
 # ---------------------------------------------------------------------------
-from ministack.core.responses import set_request_region
+from kumostack.core.responses import set_request_region
 
 
 def test_default_dns_localhost_with_region(monkeypatch):
@@ -924,7 +924,7 @@ def test_default_dns_localhost_with_region(monkeypatch):
     monkeypatch.setenv("GATEWAY_PORT", "4566")
     set_request_region("us-east-1")
 
-    from ministack.services.appsync_events import _default_dns_for_api
+    from kumostack.services.appsync_events import _default_dns_for_api
 
     d = _default_dns_for_api("abc123")
     assert d["HTTP"] == "abc123.appsync-api.us-east-1.localhost:4566"
@@ -943,7 +943,7 @@ def test_dns_templates_override_when_both_set(monkeypatch):
     monkeypatch.setenv("GATEWAY_PORT", "8080")
     set_request_region("eu-west-2")
 
-    from ministack.services.appsync_events import _default_dns_for_api
+    from kumostack.services.appsync_events import _default_dns_for_api
 
     d = _default_dns_for_api("x")
     assert d["HTTP"] == "x.appsync-api.custom:8080"
@@ -951,7 +951,7 @@ def test_dns_templates_override_when_both_set(monkeypatch):
 
 
 def test_appsync_events_service_hosts_are_not_s3_virtual_hosts():
-    from ministack.app import _handle_s3_vhost_request
+    from kumostack.app import _handle_s3_vhost_request
 
     for host in (
         "appsync-api.eu-west-2.localhost:4566",

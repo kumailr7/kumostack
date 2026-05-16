@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
-from ministack.core import persistence
+from kumostack.core import persistence
 
 # ========== from test_cognito.py ==========
 
@@ -319,9 +319,9 @@ def test_cognito_tags(cognito_idp):
     pid = resp["UserPool"]["Id"]
     arn = resp["UserPool"]["Arn"]
 
-    cognito_idp.tag_resource(ResourceArn=arn, Tags={"project": "ministack"})
+    cognito_idp.tag_resource(ResourceArn=arn, Tags={"project": "kumostack"})
     tags = cognito_idp.list_tags_for_resource(ResourceArn=arn)["Tags"]
-    assert tags["project"] == "ministack"
+    assert tags["project"] == "kumostack"
 
     cognito_idp.untag_resource(ResourceArn=arn, TagKeys=["project"])
     tags = cognito_idp.list_tags_for_resource(ResourceArn=arn)["Tags"]
@@ -1485,7 +1485,7 @@ def _b64url(data: bytes) -> str:
 
 def _unsigned_id_token(claims: dict) -> str:
     """Build a JWS-Compact id_token with header.payload.signature.
-    Signature is a dummy `notsigned` string — MiniStack doesn't verify."""
+    Signature is a dummy `notsigned` string — KumoStack doesn't verify."""
     header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
     payload = _b64url(json.dumps(claims).encode())
     return f"{header}.{payload}.notsigned"
@@ -1496,7 +1496,7 @@ def _start_fake_oidc_idp(claims):
 
     Returns (token_url, recorded_request, stop_fn). recorded_request is mutated
     in place when the IdP receives the token exchange POST so tests can assert
-    on what MiniStack actually sent on the wire.
+    on what KumoStack actually sent on the wire.
     """
     import http.server
     import threading
@@ -1571,7 +1571,7 @@ def _setup_oidc_pool(cognito_idp, token_url):
 
 def test_cognito_oauth2_authorize_oidc_redirect(cognito_idp):
     """GET /oauth2/authorize with an OIDC identity_provider 302s to the IdP
-    with redirect_uri pointing at MiniStack's /oauth2/idpresponse."""
+    with redirect_uri pointing at KumoStack's /oauth2/idpresponse."""
     token_url, _recorded, stop = _start_fake_oidc_idp({"sub": "ignored"})
     try:
         _pid, cid = _setup_oidc_pool(cognito_idp, token_url)
@@ -2489,7 +2489,7 @@ def test_oauth2_full_flow():
 
 
 def _cognito_module():
-    return importlib.import_module("ministack.services.cognito")
+    return importlib.import_module("kumostack.services.cognito")
 
 
 def _decode_jwt_claims(jwt: str) -> dict:
@@ -2549,7 +2549,7 @@ def test_cognito_pretoken_v2_adds_custom_claim_to_access_token(cognito_idp, lam)
         "    }\n"
         "    return event\n"
     )
-    fn_name = "ministack-pretoken-v2"
+    fn_name = "kumostack-pretoken-v2"
     lam.create_function(
         FunctionName=fn_name, Runtime="python3.12",
         Role="arn:aws:iam::000000000000:role/test-role",
@@ -2596,7 +2596,7 @@ def test_cognito_pretoken_v2_id_token_section(cognito_idp, lam):
         "    }\n"
         "    return event\n"
     )
-    fn_name = "ministack-pretoken-v2-split"
+    fn_name = "kumostack-pretoken-v2-split"
     lam.create_function(
         FunctionName=fn_name, Runtime="python3.12",
         Role="arn:aws:iam::000000000000:role/test-role",
@@ -2637,7 +2637,7 @@ def test_cognito_pretoken_v2_id_token_section(cognito_idp, lam):
 def test_cognito_pretoken_lambda_failure_fail_open(cognito_idp, lam):
     """A broken PreTokenGeneration Lambda fails open: token issued without overrides (#533)."""
     handler = "def handler(event, ctx):\n    raise RuntimeError('boom')\n"
-    fn_name = "ministack-pretoken-broken"
+    fn_name = "kumostack-pretoken-broken"
     lam.create_function(
         FunctionName=fn_name, Runtime="python3.12",
         Role="arn:aws:iam::000000000000:role/test-role",
@@ -2856,7 +2856,7 @@ def test_auth_codes_dict_types_are_plain_builtin_dict():
 def _fetch_ses_messages():
     """Pull SES outbox via the public inspection endpoint (account 000000000000)."""
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    url = f"{endpoint}/_ministack/ses/messages"
+    url = f"{endpoint}/_kumostack/ses/messages"
     with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=5) as r:
         data = json.loads(r.read().decode())
     return data.get("messages", {}).get("000000000000", [])
@@ -2942,7 +2942,7 @@ def test_cognito_admin_create_user_resend_sends_again(cognito_idp):
 
 
 def test_cognito_admin_create_user_sms_only_no_email(cognito_idp):
-    """If only SMS is requested, MiniStack must not push an EMAIL invitation."""
+    """If only SMS is requested, KumoStack must not push an EMAIL invitation."""
     pid = cognito_idp.create_user_pool(PoolName="SmsOnlyPool")["UserPool"]["Id"]
 
     email = f"smsonly-{_uuid_mod.uuid4().hex[:8]}@example.com"
@@ -3047,7 +3047,7 @@ def test_cognito_resend_confirmation_code_sends_email(cognito_idp):
 def test_cognito_email_disabled_env_skips_send(cognito_idp, monkeypatch):
     """COGNITO_EMAIL_ENABLED=false must short-circuit delivery in-process."""
     mod = _cognito_module()
-    ses_mod = importlib.import_module("ministack.services.ses")
+    ses_mod = importlib.import_module("kumostack.services.ses")
     monkeypatch.setenv("COGNITO_EMAIL_ENABLED", "false")
     before = len(ses_mod._sent_emails_list())
 

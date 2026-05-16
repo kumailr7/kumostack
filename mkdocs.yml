@@ -1,9 +1,9 @@
-site_name: Ministack Docs
-site_url: https://kumailr7.github.io/ministack/
-site_description: Tutorials, guides, and reference for Ministack — the free, open-source local AWS emulator.
+site_name: KumoStack Docs
+site_url: https://kumailr7.github.io/kumostack/
+site_description: Tutorials, guides, and reference for KumoStack — the free, open-source local AWS emulator.
 site_author: kumailr7
-repo_name: kumailr7/ministack
-repo_url: https://github.com/kumailr7/ministack
+repo_name: kumailr7/kumostack
+repo_url: https://github.com/kumailr7/kumostack
 edit_uri: edit/main/docs/
 
 theme:
@@ -71,9 +71,9 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/kumailr7/ministack
+      link: https://github.com/kumailr7/kumostack
     - icon: fontawesome/brands/docker
-      link: https://hub.docker.com/r/ministackorg/ministack
+      link: https://hub.docker.com/r/kumostackorg/kumostack
   generator: false
 
 nav:

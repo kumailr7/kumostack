@@ -1,8 +1,8 @@
 # Stackport Resource Browser
 
-Stackport is a full CRUD resource browser for every AWS service running in Ministack. Browse, create, update, and delete resources from a clean web UI.
+Stackport is a full CRUD resource browser for every AWS service running in KumoStack. Browse, create, update, and delete resources from a clean web UI.
 
-Stackport runs at `http://localhost:8082` and is also embedded as the **Stackport** tab in the Ministack dashboard.
+Stackport runs at `http://localhost:8082` and is also embedded as the **Stackport** tab in the KumoStack dashboard.
 
 ---
 
@@ -36,9 +36,9 @@ Stackport runs at `http://localhost:8082` and is also embedded as the **Stackpor
 
 ---
 
-## Connecting to Ministack
+## Connecting to KumoStack
 
-Stackport is pre-configured to point at `http://ministack:4566` (Docker internal network) with credentials `test`/`test` and region `us-east-1`.
+Stackport is pre-configured to point at `http://kumostack:4566` (Docker internal network) with credentials `test`/`test` and region `us-east-1`.
 
 If you need to reconfigure:
 

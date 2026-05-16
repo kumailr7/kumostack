@@ -622,7 +622,7 @@ def test_elbv2_dataplane_host_header_routing(elbv2, lam):
     )
     lb_arn, tg_arn, l_arn, fn_arn = _alb_setup(elbv2, lam, "dp-alb-host", "dp-alb-host-fn", fn_code)
     try:
-        # Send to the plain ministack port but with the ALB host header
+        # Send to the plain kumostack port but with the ALB host header
         req = _req.Request(f"{_endpoint}/hello", method="GET")
         req.add_header("Host", f"dp-alb-host.alb.localhost:{_EXECUTE_PORT}")
         resp = _req.urlopen(req)

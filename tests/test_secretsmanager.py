@@ -389,7 +389,7 @@ def _sm_invoke_action(mod, action, params):
 
 
 def test_secretsmanager_force_delete_removes_resource_policy():
-    sm = _sm_importlib.import_module("ministack.services.secretsmanager")
+    sm = _sm_importlib.import_module("kumostack.services.secretsmanager")
     sm.reset()
 
     create_resp = _sm_json.loads(_sm_invoke_action(

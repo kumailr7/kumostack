@@ -1,6 +1,6 @@
 # Grafana Monitoring
 
-Connect Grafana to Ministack's CloudWatch emulation, Prometheus, and Loki for a complete local observability stack.
+Connect Grafana to KumoStack's CloudWatch emulation, Prometheus, and Loki for a complete local observability stack.
 
 Grafana runs at `http://localhost:3002` — login: `admin` / `admin`.
 
@@ -18,13 +18,13 @@ Grafana runs at `http://localhost:3002` — login: `admin` / `admin`.
 
 ## CloudWatch datasource
 
-The CloudWatch datasource points to Ministack's emulated CloudWatch API at `http://ministack:4566`.
+The CloudWatch datasource points to KumoStack's emulated CloudWatch API at `http://kumostack:4566`.
 
 !!! important "Key settings"
     - **Auth type:** Keys (`test` / `test`)
     - **Default region:** `us-east-1`
-    - **Endpoint:** `http://ministack:4566`
-    - **`matchExact: true`** — required for `GetMetricData` (Ministack doesn't support `SEARCH()`)
+    - **Endpoint:** `http://kumostack:4566`
+    - **`matchExact: true`** — required for `GetMetricData` (KumoStack doesn't support `SEARCH()`)
 
 ### Push metrics to CloudWatch
 
@@ -76,9 +76,9 @@ Navigate to `http://localhost:3002/dashboards` → **AWS Resources** folder:
 
 Other folders:
 
-- **Ministack — CloudWatch Overview** — cross-service overview
-- **Ministack — Redis Overview** — Redis stats (via Prometheus)
-- **Ministack — Container Monitoring** — Docker container CPU/memory/network
+- **KumoStack — CloudWatch Overview** — cross-service overview
+- **KumoStack — Redis Overview** — Redis stats (via Prometheus)
+- **KumoStack — Container Monitoring** — Docker container CPU/memory/network
 - **Log Archiving — Vector + Loki + S3 + Garage**
 
 ---

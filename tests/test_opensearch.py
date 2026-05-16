@@ -284,20 +284,20 @@ def test_opensearch_tag_lifecycle(os_client):
     try:
         os_client.add_tags(ARN=arn, TagList=[
             {"Key": "Env", "Value": "Test"},
-            {"Key": "Owner", "Value": "ministack"},
+            {"Key": "Owner", "Value": "kumostack"},
         ])
         tags = {t["Key"]: t["Value"] for t in os_client.list_tags(ARN=arn)["TagList"]}
-        assert tags == {"Env": "Test", "Owner": "ministack"}
+        assert tags == {"Env": "Test", "Owner": "kumostack"}
 
         os_client.add_tags(ARN=arn, TagList=[{"Key": "Env", "Value": "Prod"}])
         tags = {t["Key"]: t["Value"] for t in os_client.list_tags(ARN=arn)["TagList"]}
         assert tags["Env"] == "Prod"
-        assert tags["Owner"] == "ministack"
+        assert tags["Owner"] == "kumostack"
 
         os_client.remove_tags(ARN=arn, TagKeys=["Env"])
         tags = {t["Key"]: t["Value"] for t in os_client.list_tags(ARN=arn)["TagList"]}
         assert "Env" not in tags
-        assert tags["Owner"] == "ministack"
+        assert tags["Owner"] == "kumostack"
     finally:
         os_client.delete_domain(DomainName=name)
 
@@ -345,7 +345,7 @@ def test_opensearch_account_isolation():
     reason="set OPENSEARCH_DATAPLANE=1 to run the real-cluster smoke",
 )
 def test_opensearch_dataplane_cluster_health():
-    """When OPENSEARCH_DATAPLANE=1 is set on the ministack server, CreateDomain
+    """When OPENSEARCH_DATAPLANE=1 is set on the kumostack server, CreateDomain
     spawns a real opensearchproject/opensearch container and DescribeDomain
     returns its endpoint. Verify cluster health responds."""
     import urllib.request
@@ -356,7 +356,7 @@ def test_opensearch_dataplane_cluster_health():
     rec = o.create_domain(DomainName=name)["DomainStatus"]
     try:
         endpoint = rec["Endpoint"]
-        if "ministack.local" in endpoint:
+        if "kumostack.local" in endpoint:
             pytest.skip("dataplane returned stub endpoint — Docker not available on test host")
         url = f"http://{endpoint}/_cluster/health"
         last_err = None

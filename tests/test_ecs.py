@@ -72,9 +72,9 @@ def test_ecs_run_task_stops_after_exit(ecs):
     assert stopped, "Task should transition to STOPPED after container exits"
 
 def test_ecs_run_task_network_connectivity(ecs):
-    """ECS container can reach Ministack (proves network detection works)."""
+    """ECS container can reach KumoStack (proves network detection works)."""
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    # Determine how a container can reach the host where Ministack runs.
+    # Determine how a container can reach the host where KumoStack runs.
     # Docker Desktop (macOS/Windows): host.docker.internal works.
     # Linux: use the Docker bridge gateway IP (typically 172.17.0.1).
     host = os.environ.get("MINISTACK_HOST_FROM_CONTAINER", "")
@@ -95,7 +95,7 @@ def test_ecs_run_task_network_connectivity(ecs):
             {
                 "name": "probe",
                 "image": "alpine:latest",
-                "command": ["sh", "-c", f"wget -q -O /dev/null {container_endpoint}/_ministack/health"],
+                "command": ["sh", "-c", f"wget -q -O /dev/null {container_endpoint}/_kumostack/health"],
                 "essential": True,
             }
         ],
@@ -113,7 +113,7 @@ def test_ecs_run_task_network_connectivity(ecs):
         if task["lastStatus"] == "STOPPED":
             exit_code = task["containers"][0].get("exitCode")
             assert exit_code == 0, (
-                f"Container could not reach Ministack at {container_endpoint} "
+                f"Container could not reach KumoStack at {container_endpoint} "
                 f"(exit code {exit_code}) — network detection may be broken"
             )
             success = True

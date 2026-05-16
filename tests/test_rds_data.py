@@ -23,7 +23,7 @@ FAKE_SECRET_ARN = f"arn:aws:secretsmanager:{REGION}:{ACCOUNT_ID}:secret:nonexist
 
 
 def _raw_post(path, body):
-    """Send a raw POST to the MiniStack endpoint (bypassing boto3 since
+    """Send a raw POST to the KumoStack endpoint (bypassing boto3 since
     rds-data uses REST paths like /Execute)."""
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -33,7 +33,7 @@ def _raw_post(path, body):
         method="POST",
     )
     # 30s instead of 10s: under CI xdist contention the server's first
-    # call into _resolve_cluster triggers a lazy `from ministack.services
+    # call into _resolve_cluster triggers a lazy `from kumostack.services
     # import rds` whose import-time block can exceed 10s on the shared
     # 2-core Linux runner. Handler itself is sub-ms once rds is loaded,
     # so 30s leaves a wide margin without making real failures slow.
@@ -204,7 +204,7 @@ def test_execute_invalid_json():
 
 def test_convert_parameters_all_types():
     """_convert_parameters handles all RDS Data API value types."""
-    from ministack.services.rds_data import _convert_parameters
+    from kumostack.services.rds_data import _convert_parameters
 
     params = [
         {"name": "s", "value": {"stringValue": "hello"}},
@@ -225,7 +225,7 @@ def test_convert_parameters_all_types():
 
 def test_convert_parameters_empty():
     """_convert_parameters returns empty dict for empty/None input."""
-    from ministack.services.rds_data import _convert_parameters
+    from kumostack.services.rds_data import _convert_parameters
 
     assert _convert_parameters([]) == {}
     assert _convert_parameters(None) == {}
@@ -233,7 +233,7 @@ def test_convert_parameters_empty():
 
 def test_convert_parameters_missing_name_skipped():
     """Parameters without a name are skipped."""
-    from ministack.services.rds_data import _convert_parameters
+    from kumostack.services.rds_data import _convert_parameters
 
     params = [
         {"value": {"stringValue": "no-name"}},
@@ -246,7 +246,7 @@ def test_convert_parameters_missing_name_skipped():
 
 def test_convert_parameters_empty_value():
     """Parameter with empty value object returns None."""
-    from ministack.services.rds_data import _convert_parameters
+    from kumostack.services.rds_data import _convert_parameters
 
     result = _convert_parameters([{"name": "x", "value": {}}])
     assert result["x"] is None
@@ -366,8 +366,8 @@ def test_rds_data_stub_drop_user(rds, sm):
 
 def test_rds_data_secret_credentials_parsing():
     """_get_secret_credentials extracts username and password from secret."""
-    from ministack.core.responses import set_request_account_id
-    from ministack.services import rds_data, secretsmanager
+    from kumostack.core.responses import set_request_account_id
+    from kumostack.services import rds_data, secretsmanager
     set_request_account_id("test")
     # Create a secret with JSON credentials
     secretsmanager._secrets["test-cred-secret"] = {
@@ -390,8 +390,8 @@ def test_rds_data_secret_credentials_parsing():
 
 def test_rds_data_secret_credentials_no_username():
     """_get_secret_credentials returns None username for password-only secret."""
-    from ministack.core.responses import set_request_account_id
-    from ministack.services import rds_data, secretsmanager
+    from kumostack.core.responses import set_request_account_id
+    from kumostack.services import rds_data, secretsmanager
     set_request_account_id("test")
     secretsmanager._secrets["pw-only-secret"] = {
         "ARN": "arn:aws:secretsmanager:us-east-1:000000000000:secret:pw-only",

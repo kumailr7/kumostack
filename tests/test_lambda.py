@@ -67,7 +67,7 @@ def test_lambda_create_invoke(lam):
 def test_lambda_python_nested_handler_slash_form(lam):
     """AWS Python Lambda accepts both dot and slash separators in nested
     handler paths (``pkg/sub/mod.fn`` equivalent to ``pkg.sub.mod.fn``);
-    real AWS resolves either form via the underlying file path. MiniStack
+    real AWS resolves either form via the underlying file path. KumoStack
     previously imported the pre-rsplit string literally, so slash form
     failed with ``ModuleNotFoundError: No module named 'pkg/sub/mod'``.
     """
@@ -588,13 +588,13 @@ def test_lambda_nodejs_create_and_invoke(lam):
     )
     resp = lam.invoke(
         FunctionName="lam-node-basic",
-        Payload=json.dumps({"name": "ministack"}),
+        Payload=json.dumps({"name": "kumostack"}),
     )
     assert resp["StatusCode"] == 200
     payload = json.loads(resp["Payload"].read())
     assert payload["statusCode"] == 200
     body = json.loads(payload["body"])
-    assert body["hello"] == "ministack"
+    assert body["hello"] == "kumostack"
 
 def test_lambda_nodejs22_runtime(lam):
     lam.create_function(
@@ -832,7 +832,7 @@ def test_lambda_standard_runtime_env_vars_injected(lam):
 
     # AWS_SESSION_TOKEN must be PRESENT (set in the env) but may be empty
     # when no session creds are configured.  Real AWS sets it to the role
-    # session token; Ministack mirrors what the host process has, defaulting
+    # session token; KumoStack mirrors what the host process has, defaulting
     # to "".  The key matters because boto3's credential chain checks for
     # its presence.
     assert payload.get("AWS_SESSION_TOKEN", "<UNSET>") != "<UNSET>", (
@@ -856,9 +856,9 @@ def test_lambda_function_env_overrides_endpoint_url(lam):
 
     Real AWS does not inject ``AWS_ENDPOINT_URL`` — it is an SDK/testing
     convention — so a function-level value is the user's authoritative
-    configuration and must not be silently overridden by MiniStack.
+    configuration and must not be silently overridden by KumoStack.
     Precedence is: function Environment.Variables → host AWS_ENDPOINT_URL
-    → MiniStack's internal default.
+    → KumoStack's internal default.
     """
     code = (
         "import os\n"
@@ -990,7 +990,7 @@ def test_lambda_unknown_path_returns_404(lam):
         assert e.code == 404
 
 def test_lambda_reset_terminates_workers(lam):
-    """/_ministack/reset must cleanly terminate warm Lambda workers."""
+    """/_kumostack/reset must cleanly terminate warm Lambda workers."""
     import urllib.request
 
     fn = f"intg-reset-worker-{__import__('uuid').uuid4().hex[:8]}"
@@ -1008,7 +1008,7 @@ def test_lambda_reset_terminates_workers(lam):
 
     # Reset — must terminate worker without error
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    req = urllib.request.Request(f"{endpoint}/_ministack/reset", data=b"", method="POST")
+    req = urllib.request.Request(f"{endpoint}/_kumostack/reset", data=b"", method="POST")
     for _attempt in range(3):
         try:
             urllib.request.urlopen(req, timeout=15)
@@ -1062,7 +1062,7 @@ def test_lambda_alias_crud(lam):
 def test_lambda_alias_no_phantom_routing_config(lam):
     """Regression for #440: when Terraform sends RoutingConfig with an empty
     AdditionalVersionWeights map (its default payload when no weighted routing
-    is declared), ministack must NOT echo RoutingConfig back — real AWS omits
+    is declared), kumostack must NOT echo RoutingConfig back — real AWS omits
     the field. Otherwise Terraform plans to remove the block on every apply."""
     code = _zip_lambda("def handler(e,c): return 'v1'")
     fn = "qa-lam-alias-rc"
@@ -1895,14 +1895,14 @@ def test_lambda_nodejs_esm_mjs_handler(lam):
     try:
         resp = lam.invoke(
             FunctionName=fname,
-            Payload=json.dumps({"name": "MiniStack"}),
+            Payload=json.dumps({"name": "KumoStack"}),
         )
         assert resp["StatusCode"] == 200
         assert "FunctionError" not in resp, f"Lambda error: {resp['Payload'].read().decode()}"
         payload = json.loads(resp["Payload"].read())
         assert payload["statusCode"] == 200
         body = json.loads(payload["body"])
-        assert body["message"] == "Hello, MiniStack from ESM!"
+        assert body["message"] == "Hello, KumoStack from ESM!"
         assert body["version"] == "1.0.0"
         assert body["esm"] is True
     finally:
@@ -2324,7 +2324,7 @@ def test_lambda_update_function_configuration_layers(lam):
 # ============================================================================
 # Unit tests — Lambda warm-container pool, ESM filter, CW Logs emitter,
 # event-stream framing, throttle response shape. These mock containers and
-# don't hit the live ministack server, so they run even without Docker.
+# don't hit the live kumostack server, so they run even without Docker.
 # Originally lived in tests/test_lambda_pool.py — merged here for one-file-per-service.
 # ============================================================================
 
@@ -2333,8 +2333,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import ministack.services.lambda_svc as lsvc
-from ministack.core.responses import set_request_account_id
+import kumostack.services.lambda_svc as lsvc
+from kumostack.core.responses import set_request_account_id
 
 
 @pytest.fixture(autouse=True)
@@ -2566,7 +2566,7 @@ def test_throttle_response_shape_matches_aws():
 
 def test_route_async_failure_to_sqs_dlq():
     """Async invoke final failure routes an AWS-shaped envelope to the SQS DLQ."""
-    import ministack.services.sqs as _sqs
+    import kumostack.services.sqs as _sqs
     set_request_account_id("000000000000")
     # Create a queue directly in the internal state
     url = "http://localhost:4566/000000000000/dlq-test"
@@ -2596,7 +2596,7 @@ def test_route_async_failure_to_sqs_dlq():
 
 def test_route_async_failure_to_sns_topic():
     """Async invoke final failure can target an SNS topic (OnFailure destination)."""
-    import ministack.services.sns as _sns
+    import kumostack.services.sns as _sns
     set_request_account_id("000000000000")
     arn = "arn:aws:sns:us-east-1:000000000000:async-fail"
     _sns._topics[arn] = {
@@ -2680,7 +2680,7 @@ def test_lambda_permissive_falls_back_to_warm_without_docker(monkeypatch):
 
 def test_emit_lambda_logs_writes_start_end_report_to_cw_logs():
     """Lambda → CW Logs emits AWS-shaped START / body / END / REPORT lines."""
-    import ministack.services.cloudwatch_logs as _cwl
+    import kumostack.services.cloudwatch_logs as _cwl
     set_request_account_id("000000000000")
     _cwl._log_groups.clear()
 
@@ -2707,7 +2707,7 @@ def test_emit_lambda_logs_writes_start_end_report_to_cw_logs():
 
 def test_emit_lambda_logs_autocreate_is_per_function():
     """Each function gets its own /aws/lambda/{name} group."""
-    import ministack.services.cloudwatch_logs as _cwl
+    import kumostack.services.cloudwatch_logs as _cwl
     set_request_account_id("000000000000")
     _cwl._log_groups.clear()
 
@@ -2725,7 +2725,7 @@ def test_emit_lambda_logs_autocreate_is_per_function():
 
 def test_emit_lambda_logs_failure_is_best_effort(monkeypatch):
     """A broken CW Logs module must not bubble into the Lambda invocation."""
-    import ministack.services.cloudwatch_logs as _cwl
+    import kumostack.services.cloudwatch_logs as _cwl
     # Nuke the target to force a write failure
     monkeypatch.setattr(_cwl, "_log_groups", None)
     # Must not raise
@@ -3103,7 +3103,7 @@ import os
 import urllib.request
 
 def handler(event, context):
-    # Call STS GetCallerIdentity via the ministack endpoint
+    # Call STS GetCallerIdentity via the kumostack endpoint
     endpoint = os.environ.get("AWS_ENDPOINT_URL", "http://127.0.0.1:4566")
     access_key = os.environ.get("AWS_ACCESS_KEY_ID", "unknown")
     secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "test")
@@ -3291,7 +3291,7 @@ def test_account_context_other_env_vars_unchanged():
 
 def test_account_from_arn_valid_arn_extracts_account():
     """Valid ARN returns the 12-digit account ID."""
-    from ministack.services.lambda_svc import _account_from_arn
+    from kumostack.services.lambda_svc import _account_from_arn
 
     result = _account_from_arn("arn:aws:lambda:us-east-1:123456789012:function:myFunc")
     assert result == "123456789012"
@@ -3299,7 +3299,7 @@ def test_account_from_arn_valid_arn_extracts_account():
 
 def test_account_from_arn_various_valid_accounts():
     """Various valid 12-digit account IDs are extracted correctly."""
-    from ministack.services.lambda_svc import _account_from_arn
+    from kumostack.services.lambda_svc import _account_from_arn
 
     assert _account_from_arn("arn:aws:lambda:us-east-1:000000000000:function:f") == "000000000000"
     assert _account_from_arn("arn:aws:lambda:eu-west-1:000000000001:function:f") == "000000000001"
@@ -3308,7 +3308,7 @@ def test_account_from_arn_various_valid_accounts():
 
 def test_account_from_arn_empty_string_falls_back():
     """Empty string falls back to host env var."""
-    from ministack.services.lambda_svc import _account_from_arn
+    from kumostack.services.lambda_svc import _account_from_arn
 
     with patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "fallback_key"}):
         result = _account_from_arn("")
@@ -3317,7 +3317,7 @@ def test_account_from_arn_empty_string_falls_back():
 
 def test_account_from_arn_too_few_segments_falls_back():
     """ARN with too few segments falls back to host env var."""
-    from ministack.services.lambda_svc import _account_from_arn
+    from kumostack.services.lambda_svc import _account_from_arn
 
     with patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "fallback_key"}):
         result = _account_from_arn("arn:aws:lambda")
@@ -3326,7 +3326,7 @@ def test_account_from_arn_too_few_segments_falls_back():
 
 def test_account_from_arn_non_numeric_falls_back():
     """ARN with non-numeric account segment falls back to host env var."""
-    from ministack.services.lambda_svc import _account_from_arn
+    from kumostack.services.lambda_svc import _account_from_arn
 
     with patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "fallback_key"}):
         result = _account_from_arn("arn:aws:lambda:us-east-1:not-a-number:function:f")
@@ -3335,7 +3335,7 @@ def test_account_from_arn_non_numeric_falls_back():
 
 def test_account_from_arn_none_input_falls_back():
     """None input falls back to host env var without crashing."""
-    from ministack.services.lambda_svc import _account_from_arn
+    from kumostack.services.lambda_svc import _account_from_arn
 
     with patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "fallback_key"}):
         result = _account_from_arn(None)
@@ -3344,7 +3344,7 @@ def test_account_from_arn_none_input_falls_back():
 
 def test_account_from_arn_no_env_var_falls_back_to_test():
     """When AWS_ACCESS_KEY_ID is not set, falls back to 'test'."""
-    from ministack.services.lambda_svc import _account_from_arn
+    from kumostack.services.lambda_svc import _account_from_arn
 
     with patch.dict(os.environ, {}, clear=True):
         result = _account_from_arn("")
@@ -3353,7 +3353,7 @@ def test_account_from_arn_no_env_var_falls_back_to_test():
 
 def test_account_from_arn_lambda_runtime_helper_matches():
     """The lambda_runtime.py local helper produces the same results."""
-    from ministack.core.lambda_runtime import _account_from_arn as runtime_helper
+    from kumostack.core.lambda_runtime import _account_from_arn as runtime_helper
 
     assert runtime_helper("arn:aws:lambda:us-east-1:123456789012:function:f") == "123456789012"
     assert runtime_helper("arn:aws:lambda:us-east-1:000000000001:function:f") == "000000000001"
@@ -3374,7 +3374,7 @@ def _run_nodejs_worker(handler_js, event_payload=None, env_extra=None):
     import tempfile
     import zipfile
 
-    from ministack.core.lambda_runtime import _NODEJS_WORKER_SCRIPT
+    from kumostack.core.lambda_runtime import _NODEJS_WORKER_SCRIPT
 
     node = shutil.which("node")
     if not node:
@@ -3444,9 +3444,9 @@ def _run_nodejs_worker(handler_js, event_payload=None, env_extra=None):
 def test_nodejs_worker_aws_sdk_v3_stub_resolves():
     """@aws-sdk/client-lambda, @aws-sdk/client-sfn, @aws-sdk/client-ssm resolve.
 
-    Real AWS Lambda (Node.js 18+) ships these built-in. Ministack injects
+    Real AWS Lambda (Node.js 18+) ships these built-in. KumoStack injects
     stubs: Lambda uses a dedicated REST stub; sfn/ssm use the generic JSON-RPC
-    stub backed by Ministack's own service implementations.
+    stub backed by KumoStack's own service implementations.
     """
     handler_js = """\
 const { Lambda, LambdaClient, InvokeCommand, waitUntilFunctionActiveV2 } = require("@aws-sdk/client-lambda");
@@ -3566,7 +3566,7 @@ def test_nodejs_worker_https_localhost_downgraded_to_http():
 
     The CDK Provider Framework's cfn-response.js calls https.request
     unconditionally for the ResponseURL PUT and drops the port from the URL.
-    patchAwsSdk() intercepts this and redirects to HTTP on the Ministack port.
+    patchAwsSdk() intercepts this and redirects to HTTP on the KumoStack port.
     """
     import http.server
     import threading
@@ -3620,7 +3620,7 @@ exports.handler = (event, ctx, cb) => {{
 
 def test_nodejs_worker_aws_sdk_v3_stub_wire_roundtrip(lam, ssm):
     """End-to-end: a Node.js Lambda using @aws-sdk/client-ssm's
-    PutParameterCommand actually creates a parameter on MiniStack's SSM
+    PutParameterCommand actually creates a parameter on KumoStack's SSM
     service. Guards against the JSON-RPC stub silently 404'ing or routing
     to the wrong target prefix (the per-service hardcoded map can drift from
     router.py undetected by the resolution-only tests).
@@ -3632,7 +3632,7 @@ def test_nodejs_worker_aws_sdk_v3_stub_wire_roundtrip(lam, ssm):
         pytest.skip("node not found on PATH")
 
     fname = f"sdk-roundtrip-{_uuid.uuid4().hex[:8]}"
-    param_name = f"/ministack-test/{_uuid.uuid4().hex[:8]}"
+    param_name = f"/kumostack-test/{_uuid.uuid4().hex[:8]}"
     param_value = f"value-{_uuid.uuid4().hex[:8]}"
     code = (
         "const { SSMClient, PutParameterCommand } = require('@aws-sdk/client-ssm');\n"
@@ -3680,6 +3680,6 @@ def test_nodejs_worker_aws_sdk_v3_stub_wire_roundtrip(lam, ssm):
 def test_lambda_ruby_4_0_runtime_maps_to_official_image():
     """Lambda Ruby 4.0 runtime support (botocore 1.42.94 added the runtime).
     Maps to AWS's official Lambda Ruby 4.0 base image."""
-    from ministack.services.lambda_svc import _RUNTIME_IMAGE_MAP
+    from kumostack.services.lambda_svc import _RUNTIME_IMAGE_MAP
 
     assert _RUNTIME_IMAGE_MAP.get("ruby4.0") == "public.ecr.aws/lambda/ruby:4.0"

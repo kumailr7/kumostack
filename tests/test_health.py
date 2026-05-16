@@ -13,16 +13,16 @@ from botocore.exceptions import ClientError
 def test_health_endpoint():
     import urllib.request
 
-    resp = urllib.request.urlopen("http://localhost:4566/_ministack/health")
+    resp = urllib.request.urlopen("http://localhost:4566/_kumostack/health")
     assert resp.status == 200
     data = json.loads(resp.read())
     assert "services" in data
     assert "s3" in data["services"]
 
-def test_health_endpoint_ministack():
+def test_health_endpoint_kumostack():
     import urllib.request
 
-    resp = urllib.request.urlopen("http://localhost:4566/_ministack/health")
+    resp = urllib.request.urlopen("http://localhost:4566/_kumostack/health")
     assert resp.status == 200
     data = json.loads(resp.read())
     assert data["edition"] == "light"

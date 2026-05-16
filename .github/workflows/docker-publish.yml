@@ -6,8 +6,8 @@ on:
       - "v*.*.*"
 
 env:
-  DOCKERHUB_IMAGE: nahuelnucera/ministack
-  DOCKERHUB_IMAGE_ORG: ministackorg/ministack
+  DOCKERHUB_IMAGE: nahuelnucera/kumostack
+  DOCKERHUB_IMAGE_ORG: kumostackorg/kumostack
 
 jobs:
   publish:

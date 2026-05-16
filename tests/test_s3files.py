@@ -297,14 +297,14 @@ def test_resource_tags_lifecycle_uses_resource_tags_path():
     fs_id = fs["fileSystemId"]
     try:
         s, _ = _req("POST", f"/resource-tags/{fs_id}", {
-            "tags": [{"key": "Env", "value": "test"}, {"key": "Owner", "value": "ministack"}],
+            "tags": [{"key": "Env", "value": "test"}, {"key": "Owner", "value": "kumostack"}],
         })
         assert s == 200
 
         s, listed = _req("GET", f"/resource-tags/{fs_id}")
         assert s == 200
         tags = {t["key"]: t["value"] for t in listed["tags"]}
-        assert tags == {"Env": "test", "Owner": "ministack"}
+        assert tags == {"Env": "test", "Owner": "kumostack"}
 
         s, _ = _req("DELETE", f"/resource-tags/{fs_id}", query={"tagKeys": ["Env"]})
         assert s == 200

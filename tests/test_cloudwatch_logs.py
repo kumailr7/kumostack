@@ -11,21 +11,21 @@ from botocore.exceptions import ClientError
 
 
 def test_logs_put_get(logs):
-    logs.create_log_group(logGroupName="/test/ministack")
-    logs.create_log_stream(logGroupName="/test/ministack", logStreamName="stream1")
+    logs.create_log_group(logGroupName="/test/kumostack")
+    logs.create_log_stream(logGroupName="/test/kumostack", logStreamName="stream1")
     logs.put_log_events(
-        logGroupName="/test/ministack",
+        logGroupName="/test/kumostack",
         logStreamName="stream1",
         logEvents=[
-            {"timestamp": int(time.time() * 1000), "message": "Hello from MiniStack"},
+            {"timestamp": int(time.time() * 1000), "message": "Hello from KumoStack"},
             {"timestamp": int(time.time() * 1000), "message": "Second log line"},
         ],
     )
-    resp = logs.get_log_events(logGroupName="/test/ministack", logStreamName="stream1")
+    resp = logs.get_log_events(logGroupName="/test/kumostack", logStreamName="stream1")
     assert len(resp["events"]) == 2
 
 def test_logs_filter(logs):
-    resp = logs.filter_log_events(logGroupName="/test/ministack", filterPattern="MiniStack")
+    resp = logs.filter_log_events(logGroupName="/test/kumostack", filterPattern="KumoStack")
     assert len(resp["events"]) >= 1
 
 def test_logs_create_group_v2(logs):
@@ -192,9 +192,9 @@ def test_logs_tag_log_group(logs):
 
     group = f"/intg/tagging/{_uuid.uuid4().hex[:8]}"
     logs.create_log_group(logGroupName=group)
-    logs.tag_log_group(logGroupName=group, tags={"project": "ministack", "env": "test"})
+    logs.tag_log_group(logGroupName=group, tags={"project": "kumostack", "env": "test"})
     resp = logs.list_tags_log_group(logGroupName=group)
-    assert resp["tags"].get("project") == "ministack"
+    assert resp["tags"].get("project") == "kumostack"
     logs.untag_log_group(logGroupName=group, tags=["project"])
     resp2 = logs.list_tags_log_group(logGroupName=group)
     assert "project" not in resp2["tags"]
@@ -685,11 +685,11 @@ import importlib
 
 import pytest
 
-from ministack.core import persistence
+from kumostack.core import persistence
 
 
 def _module():
-    return importlib.import_module("ministack.services.cloudwatch_logs")
+    return importlib.import_module("kumostack.services.cloudwatch_logs")
 
 
 @pytest.fixture(autouse=True)

@@ -16,4 +16,4 @@ SECURITY.md
 *.log
 docker-compose.yml
 Makefile
-ministack*.png
+kumostack*.png

@@ -1,4 +1,4 @@
-package ministacktest
+package kumostacktest
 
 import (
 	"context"
@@ -17,18 +17,18 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// newMiniStackContainer starts a MiniStack container and returns the endpoint URL.
-func newMiniStackContainer(ctx context.Context, t *testing.T) (string, func()) {
+// newKumoStackContainer starts a KumoStack container and returns the endpoint URL.
+func newKumoStackContainer(ctx context.Context, t *testing.T) (string, func()) {
 	t.Helper()
 
 	req := testcontainers.ContainerRequest{
-		Image:        "ministackorg/ministack:latest",
+		Image:        "kumostackorg/kumostack:latest",
 		ExposedPorts: []string{"4566/tcp"},
 		Env: map[string]string{
 			"GATEWAY_PORT": "4566",
 			"LOG_LEVEL":    "INFO",
 		},
-		WaitingFor: wait.ForHTTP("/_ministack/health").
+		WaitingFor: wait.ForHTTP("/_kumostack/health").
 			WithPort("4566/tcp").
 			WithStartupTimeout(60 * time.Second),
 	}
@@ -38,7 +38,7 @@ func newMiniStackContainer(ctx context.Context, t *testing.T) (string, func()) {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("failed to start MiniStack container: %v", err)
+		t.Fatalf("failed to start KumoStack container: %v", err)
 	}
 
 	host, err := container.Host(ctx)
@@ -77,7 +77,7 @@ func awsCfg(endpoint string) aws.Config {
 
 func TestS3_PutAndGetObject(t *testing.T) {
 	ctx := context.Background()
-	endpoint, cleanup := newMiniStackContainer(ctx, t)
+	endpoint, cleanup := newKumoStackContainer(ctx, t)
 	defer cleanup()
 
 	cfg := awsCfg(endpoint)
@@ -120,7 +120,7 @@ func TestS3_PutAndGetObject(t *testing.T) {
 
 func TestS3_ListBuckets(t *testing.T) {
 	ctx := context.Background()
-	endpoint, cleanup := newMiniStackContainer(ctx, t)
+	endpoint, cleanup := newKumoStackContainer(ctx, t)
 	defer cleanup()
 
 	cfg := awsCfg(endpoint)
@@ -151,7 +151,7 @@ func TestS3_ListBuckets(t *testing.T) {
 
 func TestSQS_SendAndReceive(t *testing.T) {
 	ctx := context.Background()
-	endpoint, cleanup := newMiniStackContainer(ctx, t)
+	endpoint, cleanup := newKumoStackContainer(ctx, t)
 	defer cleanup()
 
 	cfg := awsCfg(endpoint)
@@ -190,7 +190,7 @@ func TestSQS_SendAndReceive(t *testing.T) {
 
 func TestDynamoDB_PutAndGet(t *testing.T) {
 	ctx := context.Background()
-	endpoint, cleanup := newMiniStackContainer(ctx, t)
+	endpoint, cleanup := newKumoStackContainer(ctx, t)
 	defer cleanup()
 
 	cfg := awsCfg(endpoint)
@@ -242,7 +242,7 @@ func TestDynamoDB_PutAndGet(t *testing.T) {
 
 func TestDynamoDB_DeleteItem(t *testing.T) {
 	ctx := context.Background()
-	endpoint, cleanup := newMiniStackContainer(ctx, t)
+	endpoint, cleanup := newKumoStackContainer(ctx, t)
 	defer cleanup()
 
 	cfg := awsCfg(endpoint)

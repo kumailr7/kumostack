@@ -148,8 +148,8 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="1" style={{ margin: "0 auto 12px" }}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
-              <p style={{ color: "var(--text-dim)", fontWeight: 600, marginBottom: 6 }}>MiniStack is not connected</p>
-              <p style={{ color: "var(--text-faint)", fontSize: 12 }}>Start MiniStack and the diagram will load automatically.</p>
+              <p style={{ color: "var(--text-dim)", fontWeight: 600, marginBottom: 6 }}>KumoStack is not connected</p>
+              <p style={{ color: "var(--text-faint)", fontSize: 12 }}>Start KumoStack and the diagram will load automatically.</p>
             </div>
           </div>
         )}
@@ -158,7 +158,7 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
         {connected && error && (
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}>
             <div style={{ background: "var(--bg-card)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 12, padding: "32px 40px", textAlign: "center", maxWidth: 380 }}>
-              <p style={{ color: "#f87171", fontWeight: 600, marginBottom: 6 }}>Cannot reach Ministack API</p>
+              <p style={{ color: "#f87171", fontWeight: 600, marginBottom: 6 }}>Cannot reach KumoStack API</p>
               <p style={{ color: "var(--text-faint)", fontSize: 12, marginBottom: 16 }}>{error}</p>
               <button className="btn btn-sm" onClick={fetchArchitecture}>Retry</button>
             </div>
@@ -174,7 +174,7 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
               </svg>
               <p style={{ color: "var(--text)", fontWeight: 600, fontSize: 16, marginBottom: 8 }}>No resources found</p>
               <p style={{ color: "var(--text-faint)", fontSize: 13, lineHeight: 1.6 }}>
-                Create AWS resources in MiniStack and they&apos;ll appear here automatically.
+                Create AWS resources in KumoStack and they&apos;ll appear here automatically.
               </p>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 20, justifyContent: "center" }}>
                 {["S3 Bucket", "EC2 Instance", "RDS DB", "Lambda", "CloudFront", "ALB"].map((svc) => (

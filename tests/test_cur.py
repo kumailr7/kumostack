@@ -69,7 +69,7 @@ def test_cur_describe_report_definitions(cur):
         )
 
     # Retrieve all report definitions. This will include the {max} just created,
-    # plus, potentially, any leftovers in the MiniStack state.
+    # plus, potentially, any leftovers in the KumoStack state.
     resp = cur.describe_report_definitions()
     list = resp["ReportDefinitions"]
 
@@ -194,7 +194,7 @@ def test_cur_put_report_definition_missing_report_name(cur):
 
 def test_cur_put_report_definition_missing_definition_body(cur):
     # Note that we're checking ParamValidationError as opposed to the more
-    # typical ClientError. Boto3 is throwing this before the MiniStack client is
+    # typical ClientError. Boto3 is throwing this before the KumoStack client is
     # hit.
     with pytest.raises(ParamValidationError) as e:
         cur.put_report_definition(ReportDefinition={})
@@ -308,7 +308,7 @@ def test_cur_untag_resource_nonexistent_keys(cur):
 
 
 def test_cur_state_round_trips_through_get_and_restore():
-    from ministack.services import cur
+    from kumostack.services import cur
 
     cur.reset()
     cur._report_definitions["r1"] = {
@@ -332,6 +332,6 @@ def test_cur_module_calls_load_state_on_import():
     """The bug we fixed: load_state was never invoked at import time, so
     every warm-boot lost CUR state. Verify the module exposes _restored
     (set by the import-time block whether or not anything was found)."""
-    from ministack.services import cur
+    from kumostack.services import cur
 
     assert hasattr(cur, "_restored")

@@ -6,8 +6,8 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
-  title: "MiniStack — Resource Browser",
-  description: "MiniStack local AWS cloud emulator resource browser",
+  title: "KumoStack — Resource Browser",
+  description: "KumoStack local AWS cloud emulator resource browser",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

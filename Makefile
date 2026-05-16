@@ -1,7 +1,7 @@
 .PHONY: build run stop test logs health clean
 
-IMAGE_NAME := ministack
-CONTAINER_NAME := ministack
+IMAGE_NAME := kumostack
+CONTAINER_NAME := kumostack
 PORT := 4566
 
 # Override any shell AWS credentials so make test is self-contained
@@ -18,12 +18,12 @@ run: build
 		-e LOG_LEVEL=INFO \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		$(IMAGE_NAME)
-	@echo "MiniStack running on http://localhost:$(PORT)"
-	@echo "Health: http://localhost:$(PORT)/_ministack/health"
+	@echo "KumoStack running on http://localhost:$(PORT)"
+	@echo "Health: http://localhost:$(PORT)/_kumostack/health"
 
 run-compose:
 	docker compose up -d --build
-	@echo "MiniStack running on http://localhost:$(PORT)"
+	@echo "KumoStack running on http://localhost:$(PORT)"
 
 stop:
 	docker stop $(CONTAINER_NAME) 2>/dev/null || true
@@ -36,18 +36,18 @@ logs:
 	docker logs -f $(CONTAINER_NAME)
 
 health:
-	@curl -s http://localhost:$(PORT)/_ministack/health | python3 -m json.tool
+	@curl -s http://localhost:$(PORT)/_kumostack/health | python3 -m json.tool
 
 test: stop run
-	@echo "Waiting for ministack to be ready..."
+	@echo "Waiting for kumostack to be ready..."
 	@READY=0; \
 	for i in $$(seq 1 30); do \
-		if curl -sf http://localhost:$(PORT)/_ministack/health > /dev/null 2>&1; then \
+		if curl -sf http://localhost:$(PORT)/_kumostack/health > /dev/null 2>&1; then \
 			echo "Ready after $$i second(s)."; READY=1; break; \
 		fi; \
 		sleep 1; \
 	done; \
-	if [ "$$READY" = "0" ]; then echo "ERROR: ministack did not start within 30s" >&2; exit 1; fi
+	if [ "$$READY" = "0" ]; then echo "ERROR: kumostack did not start within 30s" >&2; exit 1; fi
 	@echo "=== S3 ==="
 	aws --endpoint-url=http://localhost:$(PORT) s3 mb s3://test-bucket
 	echo "hello" | aws --endpoint-url=http://localhost:$(PORT) s3 cp - s3://test-bucket/hello.txt
@@ -121,7 +121,7 @@ clean: stop
 	docker rmi $(IMAGE_NAME) 2>/dev/null || true
 
 purge: stop-compose
-	docker rm -f $$(docker ps -aq --filter "label=ministack") 2>/dev/null || true
+	docker rm -f $$(docker ps -aq --filter "label=kumostack") 2>/dev/null || true
 	docker volume prune -f
 	rm -rf ./data/s3/*
-	@echo "Orphaned ministack containers, dangling volumes, and S3 data cleared"
+	@echo "Orphaned kumostack containers, dangling volumes, and S3 data cleared"

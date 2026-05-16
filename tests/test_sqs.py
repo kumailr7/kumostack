@@ -354,7 +354,7 @@ def test_sqs_message_system_attributes(sqs):
 
 def test_sqs_message_system_attribute_names_modern_field(sqs):
     """Regression: AWS SDK v2 / Java sends MessageSystemAttributeNames, not the
-    deprecated AttributeNames. Ministack must honor the modern field name."""
+    deprecated AttributeNames. KumoStack must honor the modern field name."""
     url = sqs.create_queue(QueueName="intg-sqs-msa-modern")["QueueUrl"]
     sqs.send_message(QueueUrl=url, MessageBody="msa-modern")
 
@@ -817,7 +817,7 @@ def test_sqs_dlq_sweep_survives_legacy_double_encoded_policy():
     process with its own `_queues` instance, so we can't inject the bad state
     that way.
     """
-    from ministack.services.sqs import _dlq_sweep
+    from kumostack.services.sqs import _dlq_sweep
 
     bad_rp = '"' + json.dumps(
         {"deadLetterTargetArn": "arn:x", "maxReceiveCount": "2"}

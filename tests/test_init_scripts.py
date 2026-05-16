@@ -3,7 +3,7 @@
 import os
 import sys
 
-from ministack.app import _collect_scripts, _run_init_scripts
+from kumostack.app import _collect_scripts, _run_init_scripts
 
 
 def test_collect_scripts_single_dir(tmp_path):
@@ -119,7 +119,7 @@ def test_init_scripts_uses_correct_interpreter(tmp_path, monkeypatch):
     py_script.write_text("print('hi')")
 
     monkeypatch.setattr(
-        'ministack.app._collect_scripts',
+        'kumostack.app._collect_scripts',
         lambda *a: [str(sh_script), str(py_script)]
     )
 
@@ -148,7 +148,7 @@ def test_init_scripts_expose_script_dir_env(tmp_path, monkeypatch):
     script = tmp_path / "01-seed.sh"
     script.write_text("#!/bin/sh\necho seed")
 
-    monkeypatch.setattr('ministack.app._collect_scripts', lambda *a: [str(script)])
+    monkeypatch.setattr('kumostack.app._collect_scripts', lambda *a: [str(script)])
 
     captured = {}
 

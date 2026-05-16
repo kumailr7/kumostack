@@ -2279,7 +2279,7 @@ def test_sfn_activity_worker_failure(sfn):
 
 def test_sfn_mock_config_return(sfn):
     """SFN_MOCK_CONFIG Return — AWS SFN Local format with #TestCase ARN suffix."""
-    from conftest import _ministack_config
+    from conftest import _kumostack_config
 
     mock_cfg = {
         "StateMachines": {
@@ -2297,7 +2297,7 @@ def test_sfn_mock_config_return(sfn):
             }
         },
     }
-    _ministack_config({"stepfunctions._sfn_mock_config": mock_cfg})
+    _kumostack_config({"stepfunctions._sfn_mock_config": mock_cfg})
 
     definition = json.dumps({
         "StartAt": "CallService",
@@ -2329,11 +2329,11 @@ def test_sfn_mock_config_return(sfn):
     output = json.loads(desc["output"])
     assert output["status"] == "mocked"
     assert output["value"] == 42
-    _ministack_config({"stepfunctions._sfn_mock_config": {}})
+    _kumostack_config({"stepfunctions._sfn_mock_config": {}})
 
 def test_sfn_mock_config_throw(sfn):
     """SFN_MOCK_CONFIG Throw — AWS SFN Local format with invocation indexing."""
-    from conftest import _ministack_config
+    from conftest import _kumostack_config
 
     mock_cfg = {
         "StateMachines": {
@@ -2351,7 +2351,7 @@ def test_sfn_mock_config_throw(sfn):
             }
         },
     }
-    _ministack_config({"stepfunctions._sfn_mock_config": mock_cfg})
+    _kumostack_config({"stepfunctions._sfn_mock_config": mock_cfg})
 
     definition = json.dumps({
         "StartAt": "CallService",
@@ -2379,7 +2379,7 @@ def test_sfn_mock_config_throw(sfn):
             break
 
     assert desc["status"] == "FAILED"
-    _ministack_config({"stepfunctions._sfn_mock_config": {}})
+    _kumostack_config({"stepfunctions._sfn_mock_config": {}})
 
 def test_sfn_test_state_pass(sfn_sync):
     """TestState API — Pass state returns transformed output."""
@@ -2725,7 +2725,7 @@ def test_sfn_aws_sdk_query_acronym_param_mapping(sfn, sfn_sync, rds):
 
 def test_sfn_key_to_api_name_must_convert():
     """Verify _sfn_key_to_api_name expands known acronyms to uppercase."""
-    from ministack.services.stepfunctions import _sfn_key_to_api_name
+    from kumostack.services.stepfunctions import _sfn_key_to_api_name
 
     cases = [
         ("DbSubnetGroupName", "DBSubnetGroupName"),
@@ -2751,7 +2751,7 @@ def test_sfn_key_to_api_name_must_convert():
 
 def test_sfn_key_to_api_name_must_not_convert():
     """Verify _sfn_key_to_api_name leaves non-acronym names unchanged."""
-    from ministack.services.stepfunctions import _sfn_key_to_api_name
+    from kumostack.services.stepfunctions import _sfn_key_to_api_name
 
     cases = [
         "Engine", "MasterUsername", "Port", "SubnetIds",
@@ -2764,7 +2764,7 @@ def test_sfn_key_to_api_name_must_not_convert():
 
 def test_sfn_key_to_api_name_idempotent():
     """Verify _sfn_key_to_api_name is idempotent on wire-format names."""
-    from ministack.services.stepfunctions import _sfn_key_to_api_name
+    from kumostack.services.stepfunctions import _sfn_key_to_api_name
 
     wire_names = [
         "DBSubnetGroupName", "IAMDatabaseAuthenticationEnabled",
@@ -2776,7 +2776,7 @@ def test_sfn_key_to_api_name_idempotent():
 
 def test_sfn_key_to_api_name_round_trip():
     """Verify _sfn_key_to_api_name correctly reverses _api_name_to_sfn_key."""
-    from ministack.services.stepfunctions import _api_name_to_sfn_key, _sfn_key_to_api_name
+    from kumostack.services.stepfunctions import _api_name_to_sfn_key, _sfn_key_to_api_name
 
     wire_names = [
         "DBSubnetGroupName", "DBClusterIdentifier", "DBClusterArn",
@@ -2793,7 +2793,7 @@ def test_sfn_key_to_api_name_round_trip():
 
 def test_convert_params_to_api_names_nested():
     """Verify _convert_params_to_api_names handles nested dicts and lists."""
-    from ministack.services.stepfunctions import _convert_params_to_api_names
+    from kumostack.services.stepfunctions import _convert_params_to_api_names
 
     result = _convert_params_to_api_names({
         "DbClusterIdentifier": "my-cluster",
@@ -2955,7 +2955,7 @@ def test_sfn_aws_sdk_rdsdata_output_uses_sfn_key_convention(sfn, sfn_sync, rds, 
 
 def test_sfn_aws_sdk_rdsdata_path_mapping():
     """Verify REST-JSON action→path mappings are correct for rds-data."""
-    from ministack.services.stepfunctions import _REST_JSON_ACTION_PATHS
+    from kumostack.services.stepfunctions import _REST_JSON_ACTION_PATHS
 
     rds_data_paths = _REST_JSON_ACTION_PATHS["rds-data"]
     assert rds_data_paths["ExecuteStatement"] == "/Execute"
@@ -3148,7 +3148,7 @@ def test_sfn_aws_sdk_s3_unsupported_op_returns_helpful_error(sfn_sync):
 
 def test_sfn_aws_sdk_s3_op_specs_cover_issue_573_request():
     """The two ops the original bug report named must be in the Phase 1 spec table."""
-    from ministack.services.stepfunctions import _S3_OP_SPECS
+    from kumostack.services.stepfunctions import _S3_OP_SPECS
 
     assert "ListObjectsV2" in _S3_OP_SPECS
     assert "CopyObject" in _S3_OP_SPECS
@@ -3383,7 +3383,7 @@ def test_sfn_wait_scale_zero_does_not_timeout_lambda_tasks(sfn, lam):
 
     def _set_wait_scale(val):
         req = urllib.request.Request(
-            f"{endpoint}/_ministack/config",
+            f"{endpoint}/_kumostack/config",
             data=json.dumps({"stepfunctions._SFN_WAIT_SCALE": val}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -3442,7 +3442,7 @@ def test_sfn_wait_scale_zero_does_not_timeout_lambda_tasks(sfn, lam):
 def test_sfn_wait_scale_zero_skips_wait(sfn):
     """SFN_WAIT_SCALE=0 skips Wait state sleeps entirely.
 
-    Uses /_ministack/config to set the scale on the running server,
+    Uses /_kumostack/config to set the scale on the running server,
     then starts an async execution with a 60s Wait that should complete
     almost instantly. Marked serial via conftest._SERIAL_TESTS because
     it mutates server-global state.
@@ -3453,7 +3453,7 @@ def test_sfn_wait_scale_zero_skips_wait(sfn):
 
     def _set_wait_scale(val):
         req = urllib.request.Request(
-            f"{endpoint}/_ministack/config",
+            f"{endpoint}/_kumostack/config",
             data=json.dumps({"stepfunctions._SFN_WAIT_SCALE": val}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",

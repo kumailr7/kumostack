@@ -353,7 +353,7 @@ def test_kinesis_iterator_reuse_on_retry(kin):
 
 
 def test_kinesis_cbor_put_record(kin):
-    """Java SDK sends CBOR-encoded PutRecord; ministack must decode it."""
+    """Java SDK sends CBOR-encoded PutRecord; kumostack must decode it."""
     import urllib.request
 
     import cbor2

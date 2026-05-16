@@ -1,18 +1,18 @@
-# Ministack
+# KumoStack
 
 **Free, open-source local AWS cloud emulator — the drop-in alternative to LocalStack.**
 
 Run 60+ AWS services on your laptop with a single Docker command. No AWS account required. No cost. No cold starts.
 
 ```bash
-docker run -p 4566:4566 ministackorg/ministack
+docker run -p 4566:4566 kumostackorg/kumostack
 ```
 
 ---
 
-## What is Ministack?
+## What is KumoStack?
 
-Ministack emulates the AWS API surface locally so you can:
+KumoStack emulates the AWS API surface locally so you can:
 
 - Develop and test AWS-dependent code without a real AWS account
 - Run integration tests in CI with zero cloud cost
@@ -28,16 +28,16 @@ Ministack emulates the AWS API surface locally so you can:
     ```bash
     docker run -d \
       -p 4566:4566 \
-      --name ministack \
-      ministackorg/ministack
+      --name kumostack \
+      kumostackorg/kumostack
     ```
 
 === "Docker Compose"
 
     ```yaml
     services:
-      ministack:
-        image: ministackorg/ministack:latest
+      kumostack:
+        image: kumostackorg/kumostack:latest
         ports:
           - "4566:4566"
         environment:
@@ -59,11 +59,11 @@ Ministack emulates the AWS API surface locally so you can:
 
 ## Dashboard & Observability
 
-The full Ministack stack ships with a built-in dashboard, Grafana monitoring, and log archiving:
+The full KumoStack stack ships with a built-in dashboard, Grafana monitoring, and log archiving:
 
 | Service | URL | Purpose |
 |---|---|---|
-| Ministack API | `localhost:4566` | AWS endpoint |
+| KumoStack API | `localhost:4566` | AWS endpoint |
 | Dashboard | `localhost:3003` | Resource browser + tutorials |
 | Grafana | `localhost:3002` | CloudWatch, Prometheus, Loki dashboards |
 | Stackport | `localhost:8082` | Full AWS resource browser (CRUD) |
@@ -76,7 +76,7 @@ The full Ministack stack ships with a built-in dashboard, Grafana monitoring, an
 
 ## Next steps
 
-- **[Getting Started →](tutorials/getting-started.md)** — your first Ministack deployment
+- **[Getting Started →](tutorials/getting-started.md)** — your first KumoStack deployment
 - **[Tutorials →](tutorials/index.md)** — hands-on guides for every major AWS service
 - **[Grafana Monitoring →](guides/grafana.md)** — connect CloudWatch metrics to Grafana
 - **[Supported Services →](reference/services.md)** — full list of emulated AWS APIs

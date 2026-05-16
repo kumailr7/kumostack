@@ -1,8 +1,8 @@
 services:
-  ministack:
+  kumostack:
     build: .
-    image: ministackorg/ministack:latest
-    container_name: ministack
+    image: kumostackorg/kumostack:latest
+    container_name: kumostack
     ports:
       - "4566:4566"
     environment:
@@ -12,16 +12,16 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - RDS_BASE_PORT=15432
-      - DOCKER_NETWORK=ministack_default  # Docker network for RDS/EKS/ElastiCache/Lambda containers
+      - DOCKER_NETWORK=kumostack_default  # Docker network for RDS/EKS/ElastiCache/Lambda containers
       - ELASTICACHE_BASE_PORT=16379
     volumes:
-      - ./data/s3:/tmp/ministack-data/s3
+      - ./data/s3:/tmp/kumostack-data/s3
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_kumostack/health')"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -30,43 +30,43 @@ services:
 
   dashboard:
     build: ./dashboard
-    image: ministack-dashboard:latest
-    container_name: ministack-dashboard
+    image: kumostack-dashboard:latest
+    container_name: kumostack-dashboard
     ports:
       - "3003:3000"
     environment:
-      - MINISTACK_ENDPOINT=http://ministack:4566
+      - MINISTACK_ENDPOINT=http://kumostack:4566
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_REGION=us-east-1
-      - MINISTACK_CONTAINER=ministack
-      - DRAWIO_ENDPOINT=http://ministack-drawio:8080
+      - MINISTACK_CONTAINER=kumostack
+      - DRAWIO_ENDPOINT=http://kumostack-drawio:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
-      ministack:
+      kumostack:
         condition: service_healthy
     restart: unless-stopped
 
   stackport:
-    image: ministack-stackport:latest
-    container_name: ministack-stackport
+    image: kumostack-stackport:latest
+    container_name: kumostack-stackport
     ports:
       - "8082:8080"
     environment:
-      - AWS_ENDPOINT_URL=http://ministack:4566
+      - AWS_ENDPOINT_URL=http://kumostack:4566
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1
       - STACKPORT_ALLOW_WRITES=true
     depends_on:
-      ministack:
+      kumostack:
         condition: service_healthy
     restart: unless-stopped
 
   drawio:
     image: jgraph/drawio:latest
-    container_name: ministack-drawio
+    container_name: kumostack-drawio
     ports:
       - "8083:8080"
     environment:
@@ -75,7 +75,7 @@ services:
 
   garage:
     image: dxflrs/garage:v2.3.0
-    container_name: ministack-garage
+    container_name: kumostack-garage
     ports:
       - "3900:3900"   # S3 API
       - "3903:3903"   # Admin API
@@ -96,7 +96,7 @@ services:
 
   loki:
     image: grafana/loki:latest
-    container_name: ministack-loki
+    container_name: kumostack-loki
     ports:
       - "3100:3100"
     volumes:
@@ -113,7 +113,7 @@ services:
 
   vector:
     image: timberio/vector:0.41.1-alpine
-    container_name: ministack-vector
+    container_name: kumostack-vector
     command: ["--config", "/etc/vector/vector.toml"]
     ports:
       - "8686:8686"
@@ -121,23 +121,23 @@ services:
       - ./vector/vector.toml:/etc/vector/vector.toml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - MINISTACK_ENDPOINT=http://ministack:4566
+      - MINISTACK_ENDPOINT=http://kumostack:4566
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1
-      - GARAGE_S3_ENDPOINT=http://ministack-garage:3900
+      - GARAGE_S3_ENDPOINT=http://kumostack-garage:3900
       - GARAGE_ACCESS_KEY=GK9ef5917d6d47e3bc0daae850
       - GARAGE_SECRET_KEY=f536a78459fc476ea0a2defb7b02bb9cfdf7cd806cfcff8e9f1780cacc5dbffd
     depends_on:
       loki:
         condition: service_started
-      ministack:
+      kumostack:
         condition: service_healthy
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:latest
-    container_name: ministack-grafana
+    container_name: kumostack-grafana
     ports:
       - "3002:3000"
     environment:
@@ -154,7 +154,7 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: ministack-prometheus
+    container_name: kumostack-prometheus
     ports:
       - "9091:9090"
     volumes:
@@ -168,7 +168,7 @@ services:
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
-    container_name: ministack-cadvisor
+    container_name: kumostack-cadvisor
     ports:
       - "8081:8080"
     volumes:
@@ -184,7 +184,7 @@ services:
 
   redis-exporter:
     image: oliver006/redis_exporter:latest
-    container_name: ministack-redis-exporter
+    container_name: kumostack-redis-exporter
     ports:
       - "9121:9121"
     environment:
@@ -196,7 +196,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: ministack-redis
+    container_name: kumostack-redis
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -210,7 +210,7 @@ services:
   # Uncomment to have a persistent Postgres available at localhost:5432
   # postgres:
   #   image: postgres:15-alpine
-  #   container_name: ministack-postgres
+  #   container_name: kumostack-postgres
   #   ports:
   #     - "5432:5432"
   #   environment:

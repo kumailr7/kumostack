@@ -1,4 +1,4 @@
-const BASE = `${process.env.MINISTACK_ENDPOINT ?? "http://localhost:4566"}/_ministack`;
+const BASE = `${process.env.MINISTACK_ENDPOINT ?? "http://localhost:4566"}/_kumostack`;
 
 export async function GET() {
   try {

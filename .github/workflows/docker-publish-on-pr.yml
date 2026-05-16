@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, reopened, labeled]
 
 env:
-  DOCKERHUB_IMAGE_ORG: ministackorg/ministack-preview-build
+  DOCKERHUB_IMAGE_ORG: kumostackorg/kumostack-preview-build
 
 jobs:
   publish-pr:

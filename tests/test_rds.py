@@ -756,7 +756,7 @@ def test_rds_describe_engine_versions_family(rds):
 
 def test_rds_parse_member_list_both_formats():
     """_parse_member_list handles both Prefix.member.N and Prefix.MemberName.N formats."""
-    from ministack.services.rds import _parse_member_list
+    from kumostack.services.rds import _parse_member_list
 
     # Standard member.N format (direct API calls)
     params_standard = {
@@ -820,8 +820,8 @@ def test_rds_instance_inherits_cluster_username(rds):
 
 def test_rds_handle_request_describe_with_json_body():
     """DescribeDBInstances works when the request body is JSON (not form-encoded)."""
-    from ministack.core.responses import set_request_account_id
-    from ministack.services import rds as m
+    from kumostack.core.responses import set_request_account_id
+    from kumostack.services import rds as m
 
     set_request_account_id("111111111111")
     iid = f"inproc-json-{_uuid_mod.uuid4().hex[:12]}"
@@ -849,7 +849,7 @@ def test_rds_handle_request_describe_with_json_body():
 
 def test_rds_flatten_json_request_params():
     """JSON protocol bodies are merged into query-style params for existing handlers."""
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     params = {}
     m._flatten_json_request_params(
@@ -1197,7 +1197,7 @@ def test_rds_enable_http_endpoint_not_found(rds):
 
 def test_docker_image_for_engine_postgres_pre_18_uses_data_subdir():
     """Postgres < 18 keeps the pre-existing mount path /var/lib/postgresql/data."""
-    from ministack.services.rds import _docker_image_for_engine
+    from kumostack.services.rds import _docker_image_for_engine
 
     for version in ("12.15", "13.11", "14.8", "15.3", "16.4", "17.5"):
         image, env, port, data_path = _docker_image_for_engine(
@@ -1221,7 +1221,7 @@ def test_docker_image_for_engine_postgres_18_uses_new_layout():
     layout and refuses to start with the old pre-18 mount path. Regression
     test for fix/rds-postgres-18-mount-layout.
     """
-    from ministack.services.rds import _docker_image_for_engine
+    from kumostack.services.rds import _docker_image_for_engine
 
     for version in ("18.0", "18.3", "19.1"):
         image, env, port, data_path = _docker_image_for_engine(
@@ -1237,7 +1237,7 @@ def test_docker_image_for_engine_postgres_18_uses_new_layout():
 
 def test_docker_image_for_engine_aurora_postgres_18_uses_new_layout():
     """aurora-postgresql 18+ follows the same layout switch as vanilla postgres."""
-    from ministack.services.rds import _docker_image_for_engine
+    from kumostack.services.rds import _docker_image_for_engine
 
     _, _, _, data_path_17 = _docker_image_for_engine(
         "aurora-postgresql", "17.5", "admin", "pw", "mydb"
@@ -1252,7 +1252,7 @@ def test_docker_image_for_engine_aurora_postgres_18_uses_new_layout():
 def test_docker_image_for_engine_mysql_unchanged():
     """MySQL / MariaDB / Aurora MySQL keep /var/lib/mysql — the Postgres 18
     layout change does not touch them."""
-    from ministack.services.rds import _docker_image_for_engine
+    from kumostack.services.rds import _docker_image_for_engine
 
     for engine, version in [
         ("mysql", "8.0.33"),
@@ -1270,7 +1270,7 @@ def test_docker_image_for_engine_malformed_version_defaults_to_pre_18():
     """An unparseable major version falls back to the pre-18 layout rather
     than crashing. Real AWS RDS only accepts numeric majors, but defensive
     fallback keeps the emulator forgiving."""
-    from ministack.services.rds import _docker_image_for_engine
+    from kumostack.services.rds import _docker_image_for_engine
 
     _, _, _, data_path = _docker_image_for_engine(
         "postgres", "garbage.3", "admin", "pw", "mydb"
@@ -1281,7 +1281,7 @@ def test_docker_image_for_engine_malformed_version_defaults_to_pre_18():
 def test_docker_image_for_engine_unknown_engine_returns_nones():
     """Unknown engine returns (None, None, None, None) — the 4-arity tuple
     must be preserved so call sites can safely destructure."""
-    from ministack.services.rds import _docker_image_for_engine
+    from kumostack.services.rds import _docker_image_for_engine
 
     result = _docker_image_for_engine("oracle", "19.0", "admin", "pw", "mydb")
     assert result == (None, None, None, None)

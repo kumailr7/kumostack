@@ -703,8 +703,8 @@ def test_tagging_tag_resources_cross_account_isolation(s3):
 
 def test_tagging_module_exposes_no_op_reset():
     """Tag dispatcher is stateless (delegates to per-service tag stores), but
-    must expose `reset()` so the central `/_ministack/reset` doesn't log a
+    must expose `reset()` so the central `/_kumostack/reset` doesn't log a
     warning."""
-    from ministack.services import tagging
+    from kumostack.services import tagging
     assert callable(getattr(tagging, "reset", None))
     tagging.reset()

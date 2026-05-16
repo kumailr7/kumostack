@@ -1,30 +1,30 @@
 <p align="center">
-  <img src="ministack_logo.png" alt="MiniStack — Free Open-Source AWS Emulator" width="400"/>
+  <img src="kumostack_logo.png" alt="KumoStack — Free Open-Source AWS Emulator" width="400"/>
 </p>
 
-<h1 align="center">MiniStack</h1>
+<h1 align="center">KumoStack</h1>
 <p align="center"><strong>Free, open-source local AWS emulator. Free forever.</strong></p>
 <p align="center">40+ AWS services on a single port · Terraform compatible · Real databases · MIT licensed</p>
 
 <p align="center">
-  <a href="https://github.com/ministackorg/ministack/releases"><img src="https://img.shields.io/github/v/release/ministackorg/ministack" alt="GitHub release"></a>
-  <a href="https://github.com/ministackorg/ministack/actions"><img src="https://img.shields.io/github/actions/workflow/status/ministackorg/ministack/ci.yml?branch=master" alt="Build"></a>
-  <a href="https://hub.docker.com/r/ministackorg/ministack"><img src="https://img.shields.io/docker/pulls/ministackorg/ministack" alt="Docker Pulls"></a>
-  <a href="https://hub.docker.com/r/ministackorg/ministack"><img src="https://img.shields.io/docker/image-size/ministackorg/ministack/latest" alt="Docker Image Size"></a>
-  <a href="https://github.com/ministackorg/ministack/blob/master/LICENSE"><img src="https://img.shields.io/github/license/ministackorg/ministack" alt="License"></a>
+  <a href="https://github.com/kumostackorg/kumostack/releases"><img src="https://img.shields.io/github/v/release/kumostackorg/kumostack" alt="GitHub release"></a>
+  <a href="https://github.com/kumostackorg/kumostack/actions"><img src="https://img.shields.io/github/actions/workflow/status/kumostackorg/kumostack/ci.yml?branch=master" alt="Build"></a>
+  <a href="https://hub.docker.com/r/kumostackorg/kumostack"><img src="https://img.shields.io/docker/pulls/kumostackorg/kumostack" alt="Docker Pulls"></a>
+  <a href="https://hub.docker.com/r/kumostackorg/kumostack"><img src="https://img.shields.io/docker/image-size/kumostackorg/kumostack/latest" alt="Docker Image Size"></a>
+  <a href="https://github.com/kumostackorg/kumostack/blob/master/LICENSE"><img src="https://img.shields.io/github/license/kumostackorg/kumostack" alt="License"></a>
   <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
-  <a href="https://github.com/ministackorg/ministack/stargazers"><img src="https://img.shields.io/github/stars/ministackorg/ministack" alt="GitHub stars"></a>
+  <a href="https://github.com/kumostackorg/kumostack/stargazers"><img src="https://img.shields.io/github/stars/kumostackorg/kumostack" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
-  <a href="https://ministack.org">Website</a> · <a href="https://hub.docker.com/r/ministackorg/ministack">Docker Hub</a> · <a href="https://www.linkedin.com/company/ministackorg/">LinkedIn</a> · <a href="https://www.producthunt.com/products/ministack">Product Hunt</a>
+  <a href="https://kumostack.org">Website</a> · <a href="https://hub.docker.com/r/kumostackorg/kumostack">Docker Hub</a> · <a href="https://www.linkedin.com/company/kumostackorg/">LinkedIn</a> · <a href="https://www.producthunt.com/products/kumostack">Product Hunt</a>
 </p>
 
 ---
 
-## Why MiniStack?
+## Why KumoStack?
 
-LocalStack recently moved its core services behind a paid plan. If you relied on LocalStack Community for local development and CI/CD pipelines, MiniStack is your free alternative.
+LocalStack recently moved its core services behind a paid plan. If you relied on LocalStack Community for local development and CI/CD pipelines, KumoStack is your free alternative.
 
 - **40+ AWS services** emulated on a single port (4566)
 - **Drop-in compatible** — works with `boto3`, AWS CLI, Terraform, CDK, Pulumi, any SDK
@@ -39,28 +39,28 @@ LocalStack recently moved its core services behind a paid plan. If you relied on
 
 ```bash
 # Option 1: PyPI (simplest)
-pip install ministack
-ministack
+pip install kumostack
+kumostack
 # Runs on http://localhost:4566 — use GATEWAY_PORT=XXXX to change
 
 # Option 2: Docker Hub
-docker run -p 4566:4566 ministackorg/ministack
+docker run -p 4566:4566 kumostackorg/kumostack
 
 # Option 2b: Docker Hub with real infrastructure (RDS, ECS, Lambda containers)
-docker run -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock ministackorg/ministack
+docker run -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock kumostackorg/kumostack
 
 # Option 2c: Full image — Debian/glibc base with DuckDB (Athena), psycopg2, pymysql.
 # Larger (~360 MB vs ~110 MB) but enables Athena and native PostgreSQL/MySQL drivers
-# that don't ship musllinux wheels. Reports `edition: full` on /_ministack/health.
-docker run -p 4566:4566 ministackorg/ministack:full
+# that don't ship musllinux wheels. Reports `edition: full` on /_kumostack/health.
+docker run -p 4566:4566 kumostackorg/kumostack:full
 
 # Option 3: Clone and build
-git clone https://github.com/ministackorg/ministack
-cd ministack
+git clone https://github.com/kumostackorg/kumostack
+cd kumostack
 docker compose up -d
 
 # Verify (any option)
-curl http://localhost:4566/_ministack/health
+curl http://localhost:4566/_kumostack/health
 ```
 
 That's it. No account, no API key, no sign-up.
@@ -69,28 +69,28 @@ That's it. No account, no API key, no sign-up.
 
 ## Internal API
 
-MiniStack exposes internal endpoints for test automation:
+KumoStack exposes internal endpoints for test automation:
 
 ```bash
 # Health check — returns service status
-curl http://localhost:4566/_ministack/health
+curl http://localhost:4566/_kumostack/health
 
 # Reset all state — wipe every service back to empty (useful between test runs)
-curl -X POST http://localhost:4566/_ministack/reset
+curl -X POST http://localhost:4566/_kumostack/reset
 
 # Reset and re-run init scripts (boot.d + ready.d)
-curl -X POST http://localhost:4566/_ministack/reset?init=1
+curl -X POST http://localhost:4566/_kumostack/reset?init=1
 
 # Runtime config — change service-level settings without restart
-curl -X POST http://localhost:4566/_ministack/config \
+curl -X POST http://localhost:4566/_kumostack/config \
   -H "Content-Type: application/json" \
   -d '{"lambda_svc.LAMBDA_EXECUTOR": "docker"}'
 
 # Inspect emails sent via SES — returns every message grouped by account
-curl http://localhost:4566/_ministack/ses/messages
+curl http://localhost:4566/_kumostack/ses/messages
 
 # Filter by account (12-digit access-key ID used as the account ID)
-curl "http://localhost:4566/_ministack/ses/messages?account=000000000000"
+curl "http://localhost:4566/_kumostack/ses/messages?account=000000000000"
 ```
 
 The reset endpoint is especially useful in CI pipelines and test suites — call it in `setUp`/`beforeEach` to get a clean environment for every test without restarting the container. Add `?init=1` to re-run your init scripts after the reset, restoring any resources they create (VPCs, queues, seed data, etc.).
@@ -111,7 +111,7 @@ To set region or account ID, use environment variables at startup:
 docker run -p 4566:4566 \
   -e MINISTACK_REGION=eu-west-1 \
   -e MINISTACK_ACCOUNT_ID=123456789012 \
-  ministackorg/ministack
+  kumostackorg/kumostack
 ```
 
 Or use the multi-tenancy feature — a 12-digit access key automatically becomes the account ID (see [Multi-Tenancy](#multi-tenancy) below).
@@ -127,7 +127,7 @@ curl http://localhost:4566/health
 
 ## Multi-Tenancy
 
-MiniStack supports lightweight multi-tenancy without any configuration. If the `AWS_ACCESS_KEY_ID` is a **12-digit number**, it is used as the **Account ID** for all ARN generation. Non-numeric keys (like `test`) fall back to the `MINISTACK_ACCOUNT_ID` env var or `000000000000`.
+KumoStack supports lightweight multi-tenancy without any configuration. If the `AWS_ACCESS_KEY_ID` is a **12-digit number**, it is used as the **Account ID** for all ARN generation. Non-numeric keys (like `test`) fall back to the `MINISTACK_ACCOUNT_ID` env var or `000000000000`.
 
 ```bash
 # Team A — gets account 111111111111
@@ -143,7 +143,7 @@ aws --endpoint-url=http://localhost:4566 sts get-caller-identity
 # → { "Account": "222222222222", ... }
 ```
 
-All ARNs and resource state (SQS queues, Lambda functions, IAM roles, S3 buckets, DynamoDB tables, etc.) are fully isolated per account. Resources with the same name in different accounts never collide. This allows multiple developers or CI pipelines to share a single MiniStack endpoint with complete tenant isolation — no extra setup needed.
+All ARNs and resource state (SQS queues, Lambda functions, IAM roles, S3 buckets, DynamoDB tables, etc.) are fully isolated per account. Resources with the same name in different accounts never collide. This allows multiple developers or CI pipelines to share a single KumoStack endpoint with complete tenant isolation — no extra setup needed.
 
 | Access Key | Account ID Used |
 |---|---|
@@ -228,9 +228,9 @@ def client(service):
 # S3
 s3 = client("s3")
 s3.create_bucket(Bucket="my-bucket")
-s3.put_object(Bucket="my-bucket", Key="hello.txt", Body=b"Hello, MiniStack!")
+s3.put_object(Bucket="my-bucket", Key="hello.txt", Body=b"Hello, KumoStack!")
 obj = s3.get_object(Bucket="my-bucket", Key="hello.txt")
-print(obj["Body"].read())  # b'Hello, MiniStack!'
+print(obj["Body"].read())  # b'Hello, KumoStack!'
 
 # SQS
 sqs = client("sqs")
@@ -352,9 +352,9 @@ subnet = ec2.create_subnet(
 | **Lambda** | CreateFunction, DeleteFunction, GetFunction, GetFunctionConfiguration, ListFunctions, Invoke, UpdateFunctionCode, UpdateFunctionConfiguration, AddPermission, RemovePermission, GetPolicy, ListVersionsByFunction, PublishVersion, CreateAlias, GetAlias, UpdateAlias, DeleteAlias, ListAliases, TagResource, UntagResource, ListTags, CreateEventSourceMapping, DeleteEventSourceMapping, GetEventSourceMapping, ListEventSourceMappings, UpdateEventSourceMapping, CreateFunctionUrlConfig, GetFunctionUrlConfig, UpdateFunctionUrlConfig, DeleteFunctionUrlConfig, ListFunctionUrlConfigs, PutFunctionConcurrency, GetFunctionConcurrency, DeleteFunctionConcurrency, PutFunctionEventInvokeConfig, GetFunctionEventInvokeConfig, DeleteFunctionEventInvokeConfig, PublishLayerVersion, GetLayerVersion, GetLayerVersionByArn, ListLayerVersions, DeleteLayerVersion, ListLayers, AddLayerVersionPermission, RemoveLayerVersionPermission, GetLayerVersionPolicy | Python and Node.js runtimes execute with warm worker pool; `provided.al2023`/`provided.al2` runtimes execute via Docker RIE (Go, Rust, C++ support); `Publish=True` creates immutable numbered versions; Code via `ZipFile`, `S3Bucket`/`S3Key` (with optional `S3ObjectVersion`), or `ImageUri` (Docker image); `PackageType: Image` pulls and invokes user-provided Docker images via Lambda RIE; SQS, Kinesis, and DynamoDB Streams event source mappings; Function URL CRUD; Lambda Layers CRUD; Aliases; Concurrency; EventInvokeConfig |
 | **IAM** | CreateUser, GetUser, ListUsers, DeleteUser, CreateRole, GetRole, ListRoles, DeleteRole, CreatePolicy, GetPolicy, DeletePolicy, AttachRolePolicy, DetachRolePolicy, PutRolePolicy, GetRolePolicy, DeleteRolePolicy, ListRolePolicies, ListAttachedRolePolicies, CreateAccessKey, ListAccessKeys, DeleteAccessKey, CreateInstanceProfile, GetInstanceProfile, DeleteInstanceProfile, AddRoleToInstanceProfile, RemoveRoleFromInstanceProfile, ListInstanceProfiles, CreateGroup, GetGroup, AddUserToGroup, RemoveUserFromGroup, CreateServiceLinkedRole, DeleteServiceLinkedRole, GetServiceLinkedRoleDeletionStatus, CreateOpenIDConnectProvider, TagRole, UntagRole, TagUser, UntagUser, TagPolicy, UntagPolicy | |
 | **STS** | GetCallerIdentity, AssumeRole, GetSessionToken, AssumeRoleWithWebIdentity | |
-| **IMDS** (EC2 Instance Metadata) | `PUT /latest/api/token`, `GET /latest/meta-data/instance-id`, `GET /latest/meta-data/iam/security-credentials/`, `GET /latest/meta-data/iam/security-credentials/<role>`, `GET /latest/meta-data/iam/info`, `GET /latest/meta-data/placement/{region,availability-zone,...}`, `GET /latest/dynamic/instance-identity/document` | IMDSv1 + IMDSv2; default credential chain falls through to a `ministack-instance-role` document with `ASIA*` session creds. Point SDKs at ministack via `AWS_EC2_METADATA_SERVICE_ENDPOINT=http://localhost:4566` (or `ec2_metadata_service_endpoint` in `~/.aws/config`); set `MINISTACK_IMDS_V2_REQUIRED=1` to require the token PUT |
-| **ECS Task Metadata V4** | `GET /v4/<token>`, `GET /v4/<token>/task`, `GET /v4/<token>/stats`, `GET /v4/<token>/task/stats` | Per-container token injected as `ECS_CONTAINER_METADATA_URI_V4` on every container started by `RunTask`. `/task` returns sibling containers in the same task. Containers reach the gateway via `host.docker.internal` (mapped through `extra_hosts: host-gateway`, so it works on user-defined Docker networks); `networkMode: host` containers use loopback. Volatile by design (stripped on persistence, cleared by `/_ministack/reset`) |
-| **ECS Container Credentials** | `GET /v2/credentials/<uuid>` | The path real ECS exposes via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/v2/credentials/<uuid>` (resolved by SDKs against `169.254.170.2`). MiniStack serves the same path on the gateway and returns the AWS-strict 5-field credentials document (`AccessKeyId`, `SecretAccessKey`, `Token`, `Expiration`, `RoleArn`) — distinct from the IMDS shape served at `/latest/meta-data/iam/security-credentials/<role>`. `RunTask` injects `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN` (satisfies botocore's allow-list for non-loopback gateway hosts), and `AWS_ENDPOINT_URL` so unmodified SDKs inside the task fetch credentials and route service calls through MiniStack with no client config |
+| **IMDS** (EC2 Instance Metadata) | `PUT /latest/api/token`, `GET /latest/meta-data/instance-id`, `GET /latest/meta-data/iam/security-credentials/`, `GET /latest/meta-data/iam/security-credentials/<role>`, `GET /latest/meta-data/iam/info`, `GET /latest/meta-data/placement/{region,availability-zone,...}`, `GET /latest/dynamic/instance-identity/document` | IMDSv1 + IMDSv2; default credential chain falls through to a `kumostack-instance-role` document with `ASIA*` session creds. Point SDKs at kumostack via `AWS_EC2_METADATA_SERVICE_ENDPOINT=http://localhost:4566` (or `ec2_metadata_service_endpoint` in `~/.aws/config`); set `MINISTACK_IMDS_V2_REQUIRED=1` to require the token PUT |
+| **ECS Task Metadata V4** | `GET /v4/<token>`, `GET /v4/<token>/task`, `GET /v4/<token>/stats`, `GET /v4/<token>/task/stats` | Per-container token injected as `ECS_CONTAINER_METADATA_URI_V4` on every container started by `RunTask`. `/task` returns sibling containers in the same task. Containers reach the gateway via `host.docker.internal` (mapped through `extra_hosts: host-gateway`, so it works on user-defined Docker networks); `networkMode: host` containers use loopback. Volatile by design (stripped on persistence, cleared by `/_kumostack/reset`) |
+| **ECS Container Credentials** | `GET /v2/credentials/<uuid>` | The path real ECS exposes via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/v2/credentials/<uuid>` (resolved by SDKs against `169.254.170.2`). KumoStack serves the same path on the gateway and returns the AWS-strict 5-field credentials document (`AccessKeyId`, `SecretAccessKey`, `Token`, `Expiration`, `RoleArn`) — distinct from the IMDS shape served at `/latest/meta-data/iam/security-credentials/<role>`. `RunTask` injects `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN` (satisfies botocore's allow-list for non-loopback gateway hosts), and `AWS_ENDPOINT_URL` so unmodified SDKs inside the task fetch credentials and route service calls through KumoStack with no client config |
 | **SecretsManager** | CreateSecret, GetSecretValue, ListSecrets, DeleteSecret, UpdateSecret, DescribeSecret, PutSecretValue, UpdateSecretVersionStage, RestoreSecret, RotateSecret, GetRandomPassword, ListSecretVersionIds, ReplicateSecretToRegions, TagResource, UntagResource, PutResourcePolicy, GetResourcePolicy, DeleteResourcePolicy, ValidateResourcePolicy | |
 | **CloudWatch Logs** | CreateLogGroup, DeleteLogGroup, DescribeLogGroups, CreateLogStream, DeleteLogStream, DescribeLogStreams, PutLogEvents, GetLogEvents, FilterLogEvents, PutRetentionPolicy, DeleteRetentionPolicy, PutSubscriptionFilter, DeleteSubscriptionFilter, DescribeSubscriptionFilters, PutMetricFilter, DeleteMetricFilter, DescribeMetricFilters, TagLogGroup, UntagLogGroup, ListTagsLogGroup, TagResource, UntagResource, ListTagsForResource, StartQuery, GetQueryResults, StopQuery, PutDestination, DeleteDestination, DescribeDestinations, PutDestinationPolicy | `FilterLogEvents` supports `*`/`?` globs, multi-term AND, `-term` exclusion |
 
@@ -508,7 +508,7 @@ Unsupported resource types fail with `CREATE_FAILED` (or `ROLLBACK_COMPLETE` if 
 | **Transfer Family** | CreateServer, DescribeServer, DeleteServer, ListServers, StartServer, StopServer, CreateUser, DescribeUser, DeleteUser, ListUsers, ImportSshPublicKey, DeleteSshPublicKey | 12 operations; **real SFTP listener** on `:2222` (override with `SFTP_PORT`) backed by S3 — `ls`, `put`, `get`, `mkdir`, `rename` work end-to-end against the local S3 emulator; `SFTP_PORT_PER_SERVER=1` allocates one port per `CreateServer` from `SFTP_BASE_PORT` (default 2300); SSH key auth scans every user across every server and account; `LOGICAL` and `PATH` home-directory mappings; host key persists across restarts when `PERSIST_STATE=1` |
 | **EventBridge Scheduler** | CreateSchedule, GetSchedule, UpdateSchedule, DeleteSchedule, ListSchedules, CreateScheduleGroup, GetScheduleGroup, DeleteScheduleGroup, ListScheduleGroups, TagResource, UntagResource, ListTagsForResource | 12 actions; schedule groups with cascading deletes; `rate()`, `cron()`, `at()` expressions; group/prefix/state filters on list; default group auto-created; CFN `AWS::Scheduler::Schedule` and `AWS::Scheduler::ScheduleGroup` supported |
 | **EKS** | CreateCluster, DescribeCluster, ListClusters, DeleteCluster, CreateNodegroup, DescribeNodegroup, ListNodegroups, DeleteNodegroup, TagResource, UntagResource, ListTagsForResource | 11 operations; `CreateCluster` spawns a real **k3s** container (75 MB) with a full Kubernetes API server; `kubectl`, Helm, and any K8s tooling work out of the box; cascading delete removes nodegroups and k3s container; CFN `AWS::EKS::Cluster` and `AWS::EKS::Nodegroup` supported |
-| **OpenSearch Service** | CreateDomain, DescribeDomain, DescribeDomains, DeleteDomain, ListDomainNames, UpdateDomainConfig, DescribeDomainConfig, DescribeDomainChangeProgress, ListVersions, GetCompatibleVersions, AddTags, ListTags, RemoveTags | Management plane on `/2021-01-01/*` (`boto3.client("opensearch")`, SigV4 scope `es`). Default data plane is a stub endpoint (`<domain>.ministack.local:9200`) — set `OPENSEARCH_DATAPLANE=1` to spawn one real `opensearchproject/opensearch` container per `CreateDomain` (same pattern as ElastiCache/RDS); `DescribeDomain.Endpoint` then points at that container and `_cluster/health`/`/_search` work end-to-end. Add `OPENSEARCH_DASHBOARDS=1` (with dataplane on) to also spawn a per-domain `opensearch-dashboards` sidecar; `DescribeDomain.DashboardEndpoint` is populated. ARNs follow `arn:aws:es:<region>:<account>:domain/<name>`; Terraform `aws_opensearch_domain` resource compatible. |
+| **OpenSearch Service** | CreateDomain, DescribeDomain, DescribeDomains, DeleteDomain, ListDomainNames, UpdateDomainConfig, DescribeDomainConfig, DescribeDomainChangeProgress, ListVersions, GetCompatibleVersions, AddTags, ListTags, RemoveTags | Management plane on `/2021-01-01/*` (`boto3.client("opensearch")`, SigV4 scope `es`). Default data plane is a stub endpoint (`<domain>.kumostack.local:9200`) — set `OPENSEARCH_DATAPLANE=1` to spawn one real `opensearchproject/opensearch` container per `CreateDomain` (same pattern as ElastiCache/RDS); `DescribeDomain.Endpoint` then points at that container and `_cluster/health`/`/_search` work end-to-end. Add `OPENSEARCH_DASHBOARDS=1` (with dataplane on) to also spawn a per-domain `opensearch-dashboards` sidecar; `DescribeDomain.DashboardEndpoint` is populated. ARNs follow `arn:aws:es:<region>:<account>:domain/<name>`; Terraform `aws_opensearch_domain` resource compatible. |
 | **Organizations** | DescribeOrganization, ListRoots, ListAccounts, ListAccountsForParent, DescribeAccount, CreateOrganizationalUnit, DescribeOrganizationalUnit, DeleteOrganizationalUnit, ListOrganizationalUnitsForParent | Single-master-account org auto-initialised on first call; nested OUs with `Path` field (additive 2026-03 AWS change); `FeatureSet=ALL` |
 | **Account** | GetAccountInformation, GetContactInformation, ListRegions, GetRegionOptStatus | rest-json `/getAccountInformation`, etc.; returns `AccountState=ACTIVE` (additive 2026-04 AWS change); 31-region opt-in matrix |
 | **WAF (Classic + Regional)** | List* (17 ops), Get*, GetChangeToken, GetChangeTokenStatus, GetPermissionPolicy, Create*/Update*/Delete* (stubbed) | Minimal v1 stub — empty lists for all `List*`, valid ChangeToken on Create/Update/Delete; for full features use **wafv2** (also supported) |
@@ -518,7 +518,7 @@ Unsupported resource types fail with `CREATE_FAILED` (or `ROLLBACK_COMPLETE` if 
 
 ## Real Database Endpoints (RDS)
 
-When you create an RDS instance, MiniStack starts a real database container and returns the actual connection endpoint:
+When you create an RDS instance, KumoStack starts a real database container and returns the actual connection endpoint:
 
 ```python
 import boto3
@@ -580,7 +580,7 @@ A Redis sidecar is also always available at `localhost:6379` when using Docker C
 
 ## Athena with Real SQL
 
-> **Requires the full image** (`ministackorg/ministack:full`). The default light image ships without DuckDB and returns mocked results — `SELECT 1+1` will return `1`, not `2`.
+> **Requires the full image** (`kumostackorg/kumostack:full`). The default light image ships without DuckDB and returns mocked results — `SELECT 1+1` will return `1`, not `2`.
 
 Athena queries run via DuckDB and can query files in your local S3 data directory:
 
@@ -648,7 +648,7 @@ AWS SDK for ECS metadata (X-Ray, OpenTelemetry, application code calling
 `RunTask` injects `AWS_CONTAINER_CREDENTIALS_FULL_URI`,
 `AWS_CONTAINER_AUTHORIZATION_TOKEN`, and `AWS_ENDPOINT_URL` so unmodified AWS
 SDKs running inside the task fetch emulated credentials from the new
-`/v2/credentials/<uuid>` endpoint and route service calls through MiniStack
+`/v2/credentials/<uuid>` endpoint and route service calls through KumoStack
 end-to-end without any client config.
 
 ---
@@ -663,7 +663,7 @@ end-to-end without any client config.
 | `MINISTACK_REGION` | `us-east-1` | AWS region reported in ARNs and service responses across all services |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `S3_PERSIST` | `0` | Set `1` to persist S3 objects to disk |
-| `S3_DATA_DIR` | `/tmp/ministack-data/s3` | S3 persistence directory |
+| `S3_DATA_DIR` | `/tmp/kumostack-data/s3` | S3 persistence directory |
 | `REDIS_HOST` | `redis` | Redis host for ElastiCache fallback |
 | `REDIS_PORT` | `6379` | Redis port for ElastiCache fallback |
 | `RDS_BASE_PORT` | `15432` | Starting host port for RDS containers |
@@ -672,7 +672,7 @@ end-to-end without any client config.
 | `DOCKER_NETWORK` | _(unset)_ | Docker network for all container-backed services (RDS, EKS, ElastiCache, Lambda). Set to your Docker Compose network name so containers can reach each other. Replaces `LAMBDA_DOCKER_NETWORK` |
 | `ELASTICACHE_BASE_PORT` | `16379` | Starting host port for ElastiCache containers |
 | `ELASTICACHE_CLUSTER_MODE_REAL` | `0` | Set `1` (requires `DOCKER_NETWORK`) to provision real Redis Cluster replication groups: `NumNodeGroups × (1+ReplicasPerNodeGroup)` cluster-enabled nodes wired with `redis-cli --cluster create`, serving real `CLUSTER SLOTS` / `MOVED` redirects for cluster-aware clients |
-| `OPENSEARCH_DATAPLANE` | `0` | Set `1` to spawn a real `opensearchproject/opensearch` container per `CreateDomain`. Default `0` returns a stub endpoint (`<domain>.ministack.local:9200`) — management plane only |
+| `OPENSEARCH_DATAPLANE` | `0` | Set `1` to spawn a real `opensearchproject/opensearch` container per `CreateDomain`. Default `0` returns a stub endpoint (`<domain>.kumostack.local:9200`) — management plane only |
 | `OPENSEARCH_BASE_PORT` | `14571` | Starting host port for per-domain OpenSearch containers when `OPENSEARCH_DATAPLANE=1` |
 | `OPENSEARCH_IMAGE` | `opensearchproject/opensearch:2.15.0` | Image used when spawning per-domain OpenSearch containers |
 | `OPENSEARCH_DASHBOARDS` | `0` | Set `1` (together with `OPENSEARCH_DATAPLANE=1`) to also spawn a per-domain `opensearchproject/opensearch-dashboards` sidecar; `DescribeDomain.DashboardEndpoint` is populated |
@@ -680,7 +680,7 @@ end-to-end without any client config.
 | `OPENSEARCH_DASHBOARDS_IMAGE` | `opensearchproject/opensearch-dashboards:2.15.0` | Image used when spawning per-domain Dashboards containers |
 | `MINISTACK_OPENSEARCH_ENDPOINT` | _(unset)_ | If set (e.g. `localhost:9200`), every domain returns this endpoint instead of spawning a per-domain container — useful when you bring your own cluster |
 | `PERSIST_STATE` | `0` | Set `1` to persist service state across restarts |
-| `STATE_DIR` | `/tmp/ministack-state` | Directory for persisted state files |
+| `STATE_DIR` | `/tmp/kumostack-state` | Directory for persisted state files |
 | `LAMBDA_EXECUTOR` | `local` | Lambda execution mode: `local` (subprocess) or `docker` (container). `provided` runtimes and `PackageType: Image` always use Docker |
 | `LAMBDA_STRICT` | `0` | Set `1` for AWS-fidelity mode: every Lambda invocation runs in a Docker container via the AWS RIE image; in-process fallbacks are disabled. Missing Docker surfaces as `Runtime.DockerUnavailable` instead of degrading to a subprocess. Opt-in because the default install doesn't require Docker |
 | `LAMBDA_DOCKER_NETWORK` | _(unset)_ | Legacy alias for `DOCKER_NETWORK` (Lambda only). Prefer `DOCKER_NETWORK` which covers all services |
@@ -694,7 +694,7 @@ end-to-end without any client config.
 | `MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS` | `30` | API Gateway v1/v2 HTTP `HTTP_PROXY` / `HTTP` integration: upstream request timeout (seconds) |
 | `MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS` | `5` | API Gateway v2 JWT authorizer: JWKS document fetch timeout (seconds) |
 | `USE_SSL` | `0` | Enable HTTPS on the gateway listener. Accepts `1`, `true`, `yes`. LocalStack-compatible flag name |
-| `MINISTACK_SSL_CERT` | _(unset)_ | Optional PEM-encoded server certificate path; required together with `MINISTACK_SSL_KEY`. When unset, MiniStack auto-generates a self-signed cert under `${TMPDIR}/ministack-tls/` (cached across restarts) |
+| `MINISTACK_SSL_CERT` | _(unset)_ | Optional PEM-encoded server certificate path; required together with `MINISTACK_SSL_KEY`. When unset, KumoStack auto-generates a self-signed cert under `${TMPDIR}/kumostack-tls/` (cached across restarts) |
 | `MINISTACK_SSL_KEY` | _(unset)_ | Optional PEM-encoded private key path; required together with `MINISTACK_SSL_CERT` |
 | `MINISTACK_IMDS_V2_REQUIRED` | `0` | Reject token-less GETs on `/latest/meta-data/...`. When set, callers must first `PUT /latest/api/token` and pass the token as `X-aws-ec2-metadata-token`, matching real-AWS hop-limit-1 IMDSv2-only instances |
 
@@ -704,15 +704,15 @@ API Gateway v1/v2 HTTP proxy forwarding uses non-blocking event-loop semantics b
 
 ### Startup Scripts
 
-MiniStack supports two types of init scripts, with LocalStack-compatible paths:
+KumoStack supports two types of init scripts, with LocalStack-compatible paths:
 
-| Phase | MiniStack path | LocalStack-compatible path |
+| Phase | KumoStack path | LocalStack-compatible path |
 |-------|----------------|---------------------------|
 | Pre-start | `/docker-entrypoint-initaws.d/*.{sh,py}` | `/etc/localstack/init/boot.d/*.{sh,py}` |
 | Post-ready | `/docker-entrypoint-initaws.d/ready.d/*.{sh,py}` | `/etc/localstack/init/ready.d/*.{sh,py}` |
 
 Scripts from both paths are merged, deduplicated by filename, and run in alphabetical order.
-If the same filename exists in both paths, the MiniStack-native path takes priority.
+If the same filename exists in both paths, the KumoStack-native path takes priority.
 
 Init scripts automatically receive `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, and `AWS_ENDPOINT_URL` — no manual configuration needed. The `aws` CLI is bundled in the image.
 
@@ -744,7 +744,7 @@ s3.put_object(Bucket="my-bucket", Key="config.json", Body=b'{"env": "local"}')
 **Docker Compose** — mount scripts at either path:
 ```yaml
 volumes:
-  - ./init-scripts:/docker-entrypoint-initaws.d           # ministack-native
+  - ./init-scripts:/docker-entrypoint-initaws.d           # kumostack-native
   # OR
   - ./init-scripts:/etc/localstack/init                    # localstack-compatible
 ```
@@ -762,27 +762,27 @@ Set `ATHENA_ENGINE` to control Athena's SQL execution engine. In `auto` mode, Du
 | UNNEST, ARRAY, MAP functions | Yes | No |
 | APPROX\_DISTINCT, REGEXP\_EXTRACT | Yes | No |
 
-Install DuckDB for full Athena SQL compatibility: `pip install ministack[full]`.
+Install DuckDB for full Athena SQL compatibility: `pip install kumostack[full]`.
 
 ### State Persistence
 
-When `PERSIST_STATE=1`, MiniStack saves service state to `STATE_DIR` on shutdown and reloads it on startup. Writes are atomic (write-to-tmp then rename) to prevent corruption on crash.
+When `PERSIST_STATE=1`, KumoStack saves service state to `STATE_DIR` on shutdown and reloads it on startup. Writes are atomic (write-to-tmp then rename) to prevent corruption on crash.
 
 Services currently supporting persistence: **All services** — API Gateway v1/v2, ALB, ACM, AppConfig, AppSync, Athena, Cloud Map, CloudFront, CloudWatch, CloudWatch Logs, CodeBuild, Cognito, DynamoDB, EC2, ECR, ECS, EFS, EKS, ElastiCache, EMR, EventBridge, EventBridge Scheduler, Firehose, Glue, IAM/STS, Kinesis, KMS, Lambda, RDS, Route 53, S3, Secrets Manager, SES, SES v2, SNS, SQS, SSM, Step Functions, Transfer Family, WAF v2
 
 ```bash
 docker run -p 4566:4566 \
   -e PERSIST_STATE=1 \
-  -e STATE_DIR=/data/ministack-state \
-  -v /tmp/ministack-data:/data \
-  ministackorg/ministack
+  -e STATE_DIR=/data/kumostack-state \
+  -v /tmp/kumostack-data:/data \
+  kumostackorg/kumostack
 ```
 
 ### Lambda in Docker
 
 Set `LAMBDA_EXECUTOR=docker` to run every Lambda invocation inside an AWS-supplied runtime container instead of a local subprocess. `provided.*` runtimes and `PackageType: Image` always use Docker regardless of this setting.
 
-Supported runtimes and the AWS public ECR images MiniStack pulls for them:
+Supported runtimes and the AWS public ECR images KumoStack pulls for them:
 
 | Runtime | Image |
 |---------|-------|
@@ -792,19 +792,19 @@ Supported runtimes and the AWS public ECR images MiniStack pulls for them:
 | `provided.al2` | `public.ecr.aws/lambda/provided:al2` |
 | `provided` | `public.ecr.aws/lambda/provided:latest` |
 
-Containers are named `lambda-<random-hex-16>` and pooled across invocations. Idle containers are reaped after `LAMBDA_WARM_TTL_SECONDS` (default 300s) — no manual cleanup needed. The pool is also drained on `/_ministack/reset`.
+Containers are named `lambda-<random-hex-16>` and pooled across invocations. Idle containers are reaped after `LAMBDA_WARM_TTL_SECONDS` (default 300s) — no manual cleanup needed. The pool is also drained on `/_kumostack/reset`.
 
-**Docker-in-Docker:** when MiniStack itself runs inside a container, set `LAMBDA_REMOTE_DOCKER_VOLUME_MOUNT` to a Docker named volume that is also mounted at `/var/task` inside the MiniStack container. MiniStack writes the Lambda code into the volume so the sibling Lambda container (started via the host Docker socket) can read it. Not needed when MiniStack runs directly on the host.
+**Docker-in-Docker:** when KumoStack itself runs inside a container, set `LAMBDA_REMOTE_DOCKER_VOLUME_MOUNT` to a Docker named volume that is also mounted at `/var/task` inside the KumoStack container. KumoStack writes the Lambda code into the volume so the sibling Lambda container (started via the host Docker socket) can read it. Not needed when KumoStack runs directly on the host.
 
-**Networking:** when MiniStack runs in Docker Compose, set `DOCKER_NETWORK` to the Compose network name. All container-backed services (Lambda, RDS, EKS, ElastiCache) then attach to that network so Lambda code can reach MiniStack at `http://<ministack-service-name>:4566`. The legacy `LAMBDA_DOCKER_NETWORK` is still accepted (Lambda only) as a fallback.
+**Networking:** when KumoStack runs in Docker Compose, set `DOCKER_NETWORK` to the Compose network name. All container-backed services (Lambda, RDS, EKS, ElastiCache) then attach to that network so Lambda code can reach KumoStack at `http://<kumostack-service-name>:4566`. The legacy `LAMBDA_DOCKER_NETWORK` is still accepted (Lambda only) as a fallback.
 
 Example `docker-compose.yml`:
 
 ```yaml
 services:
-  ministack:
-    image: ministackorg/ministack:latest
-    container_name: infra_ministack
+  kumostack:
+    image: kumostackorg/kumostack:latest
+    container_name: infra_kumostack
     ports:
       - "4566:4566"
     environment:
@@ -825,17 +825,17 @@ networks:
   infra-network:
 ```
 
-Lambda code in this setup should point at the MiniStack service name, not `localhost`:
+Lambda code in this setup should point at the KumoStack service name, not `localhost`:
 
 ```python
-boto3.client("s3", endpoint_url="http://infra_ministack:4566", ...)
+boto3.client("s3", endpoint_url="http://infra_kumostack:4566", ...)
 ```
 
-If `/var/run/docker.sock` is root-owned on the host, add `privileged: true` to the `ministack` service so it can talk to the daemon.
+If `/var/run/docker.sock` is root-owned on the host, add `privileged: true` to the `kumostack` service so it can talk to the daemon.
 
 ### EKS with Real Kubernetes (k3s)
 
-MiniStack's EKS spawns a real [k3s](https://k3s.io) cluster (75 MB image) when you create a cluster. `kubectl`, Helm, and any Kubernetes tooling work out of the box.
+KumoStack's EKS spawns a real [k3s](https://k3s.io) cluster (75 MB image) when you create a cluster. `kubectl`, Helm, and any Kubernetes tooling work out of the box.
 
 ```bash
 # Create an EKS cluster — k3s starts automatically
@@ -843,13 +843,13 @@ aws --endpoint-url=http://localhost:4566 eks create-cluster \
   --name my-cluster --role-arn arn:aws:iam::000000000000:role/eks \
   --resources-vpc-config subnetIds=subnet-1
 
-# Get the k3s kubeconfig (container name follows ministack-eks-{name} pattern)
-docker exec ministack-eks-my-cluster cat /etc/rancher/k3s/k3s.yaml \
-  | sed "s/127.0.0.1:6443/localhost:$(docker port ministack-eks-my-cluster 6443/tcp | cut -d: -f2)/" \
-  > /tmp/ministack-kubeconfig.yaml
+# Get the k3s kubeconfig (container name follows kumostack-eks-{name} pattern)
+docker exec kumostack-eks-my-cluster cat /etc/rancher/k3s/k3s.yaml \
+  | sed "s/127.0.0.1:6443/localhost:$(docker port kumostack-eks-my-cluster 6443/tcp | cut -d: -f2)/" \
+  > /tmp/kumostack-kubeconfig.yaml
 
 # Use kubectl against real Kubernetes
-export KUBECONFIG=/tmp/ministack-kubeconfig.yaml
+export KUBECONFIG=/tmp/kumostack-kubeconfig.yaml
 kubectl get nodes          # Real k3s node, Ready status
 kubectl create deployment nginx --image=nginx:alpine
 kubectl get pods           # Real pod running
@@ -864,15 +864,15 @@ aws --endpoint-url=http://localhost:4566 eks delete-cluster --name my-cluster
 
 > **Note:** EKS requires Docker socket access (`-v /var/run/docker.sock:/var/run/docker.sock`) to spawn k3s containers. The k3s image is pulled on first `CreateCluster` call.
 
-> **Security trade-off:** the k3s container is launched with `--privileged`. k3s server mode needs to remount `/sys/fs/cgroup`, which no granular Linux capability set permits — running unprivileged fails with `failed to evacuate root cgroup`. This grants the k3s container significant access on the Docker host. The trade-off is acceptable for local development against an emulator but should be considered before running MiniStack EKS on shared infrastructure. Omitting the Docker socket mount cleanly disables k3s and falls back to a static EKS mock.
+> **Security trade-off:** the k3s container is launched with `--privileged`. k3s server mode needs to remount `/sys/fs/cgroup`, which no granular Linux capability set permits — running unprivileged fails with `failed to evacuate root cgroup`. This grants the k3s container significant access on the Docker host. The trade-off is acceptable for local development against an emulator but should be considered before running KumoStack EKS on shared infrastructure. Omitting the Docker socket mount cleanly disables k3s and falls back to a static EKS mock.
 
 ### Lambda Warm Starts
 
-MiniStack keeps Python and Node.js Lambda functions warm between invocations. After the first call (cold start), the handler module stays loaded in a persistent subprocess. Subsequent calls skip the import/require step, matching real AWS warm-start behaviour and making test suites significantly faster.
+KumoStack keeps Python and Node.js Lambda functions warm between invocations. After the first call (cold start), the handler module stays loaded in a persistent subprocess. Subsequent calls skip the import/require step, matching real AWS warm-start behaviour and making test suites significantly faster.
 
 ### Lambda Node.js Runtimes
 
-MiniStack supports Node.js Lambda runtimes (`nodejs14.x`, `nodejs16.x`, `nodejs18.x`, `nodejs20.x`, `nodejs22.x`). Functions execute via a local `node` subprocess (or Docker when `LAMBDA_EXECUTOR=docker`) — no mocking, real JS execution.
+KumoStack supports Node.js Lambda runtimes (`nodejs14.x`, `nodejs16.x`, `nodejs18.x`, `nodejs20.x`, `nodejs22.x`). Functions execute via a local `node` subprocess (or Docker when `LAMBDA_EXECUTOR=docker`) — no mocking, real JS execution.
 
 ```python
 import boto3, json, zipfile, io
@@ -897,15 +897,15 @@ resp = lam.invoke(FunctionName="my-node-fn", Payload=json.dumps({"hello": "world
 print(json.loads(resp["Payload"].read()))  # {'statusCode': 200, 'body': '{"hello": "world"}'}
 ```
 
-Layers that ship npm packages work too — MiniStack resolves the `nodejs/node_modules` subdirectory inside each layer zip and prepends it to the module search path.
+Layers that ship npm packages work too — KumoStack resolves the `nodejs/node_modules` subdirectory inside each layer zip and prepends it to the module search path.
 
-MiniStack also sets the standard Lambda runtime environment before the handler module is loaded, including `LAMBDA_TASK_ROOT`, `AWS_LAMBDA_FUNCTION_NAME`, `AWS_LAMBDA_FUNCTION_MEMORY_SIZE`, and `_LAMBDA_FUNCTION_ARN`. That keeps import-time Lambda detection and conditional handler setup aligned with AWS warm runtime behaviour.
+KumoStack also sets the standard Lambda runtime environment before the handler module is loaded, including `LAMBDA_TASK_ROOT`, `AWS_LAMBDA_FUNCTION_NAME`, `AWS_LAMBDA_FUNCTION_MEMORY_SIZE`, and `_LAMBDA_FUNCTION_ARN`. That keeps import-time Lambda detection and conditional handler setup aligned with AWS warm runtime behaviour.
 
 ### Lambda Proxy (BYO container)
 
-For languages AWS doesn't ship a runtime for (PHP, Deno, Bun, custom builds), point a function at your own running container instead of having MiniStack execute a deployment package. MiniStack forwards the Lambda event to that container as an HTTP POST and returns its JSON response as the function result.
+For languages AWS doesn't ship a runtime for (PHP, Deno, Bun, custom builds), point a function at your own running container instead of having KumoStack execute a deployment package. KumoStack forwards the Lambda event to that container as an HTTP POST and returns its JSON response as the function result.
 
-The function is a real Lambda in MiniStack's registry — it has an ARN, shows up in `list-functions`, and works as a target for API Gateway `AWS_PROXY` integrations, EventBridge rules, SQS event sources, Step Functions tasks, and any other Lambda trigger. Only the execute hop is redirected.
+The function is a real Lambda in KumoStack's registry — it has an ARN, shows up in `list-functions`, and works as a target for API Gateway `AWS_PROXY` integrations, EventBridge rules, SQS event sources, Step Functions tasks, and any other Lambda trigger. Only the execute hop is redirected.
 
 Configure it per-function via the standard `CreateFunction` API:
 
@@ -928,7 +928,7 @@ lam.create_function(
 
 Or globally via env var at startup: `MINISTACK_LAMBDA_PROXY_<func-name>=http://...`.
 
-Your container receives the Lambda event JSON as the request body. Reply with the function's response as JSON (or a Lambda Proxy response shape `{"statusCode", "headers", "body"}` if it sits behind API Gateway). MiniStack passes these context headers on every forward:
+Your container receives the Lambda event JSON as the request body. Reply with the function's response as JSON (or a Lambda Proxy response shape `{"statusCode", "headers", "body"}` if it sits behind API Gateway). KumoStack passes these context headers on every forward:
 
 | Header | Value |
 |---|---|
@@ -946,7 +946,7 @@ Errors map to Lambda's standard error shape so async-invoke retry, DLQ, destinat
 | Took longer than the function `Timeout` | `Sandbox.Timedout` | `Task timed out after N.00 seconds` |
 | Container returned non-2xx | `Runtime.HandlerError` | `Proxy target returned HTTP <code>: <body…>` |
 
-**What this is not:** AWS Lambda doesn't have a feature called "register an externally-running container as my function." If you want byte-for-byte parity in production, ship the same container as a Lambda container image (`PackageType=Image`) and use the AWS Lambda Runtime Interface inside it. Proxy mode is a local-dev shortcut for the inner-loop case; what your production code sees from MiniStack at the SDK boundary is identical to AWS, but the handler signature inside your container differs from a real Lambda runtime contract.
+**What this is not:** AWS Lambda doesn't have a feature called "register an externally-running container as my function." If you want byte-for-byte parity in production, ship the same container as a Lambda container image (`PackageType=Image`) and use the AWS Lambda Runtime Interface inside it. Proxy mode is a local-dev shortcut for the inner-loop case; what your production code sees from KumoStack at the SDK boundary is identical to AWS, but the handler signature inside your container differs from a real Lambda runtime contract.
 
 ---
 
@@ -1001,7 +1001,7 @@ Errors map to Lambda's standard error shape so async-invoke retry, DLQ, destinat
 # Install test dependencies
 pip install boto3 pytest duckdb docker cbor2
 
-# Start MiniStack
+# Start KumoStack
 docker compose up -d
 
 # Run the full test suite (2,200+ tests across all services)
@@ -1120,7 +1120,7 @@ Duplicates in the same account fail with `ConflictException`. The LocalStack `ls
 
 ### AWS CDK
 
-Set `AWS_ENDPOINT_URL` to route all CDK requests to MiniStack:
+Set `AWS_ENDPOINT_URL` to route all CDK requests to KumoStack:
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
@@ -1132,7 +1132,7 @@ cdk bootstrap aws://000000000000/us-east-1
 cdk deploy --require-approval never
 ```
 
-> **Important:** Running `cdk deploy` without `AWS_ENDPOINT_URL` will send requests to **real AWS**, not MiniStack. If you see "The security token included in the request is invalid", your requests are hitting AWS — set the endpoint.
+> **Important:** Running `cdk deploy` without `AWS_ENDPOINT_URL` will send requests to **real AWS**, not KumoStack. If you see "The security token included in the request is invalid", your requests are hitting AWS — set the endpoint.
 
 To reset the bootstrap stack or delete all state:
 
@@ -1140,8 +1140,8 @@ To reset the bootstrap stack or delete all state:
 # Delete a specific stack
 aws --endpoint-url=http://localhost:4566 cloudformation delete-stack --stack-name CDKToolkit
 
-# Or reset all MiniStack state
-curl -X POST http://localhost:4566/_ministack/reset
+# Or reset all KumoStack state
+curl -X POST http://localhost:4566/_kumostack/reset
 ```
 
 ### Pulumi
@@ -1157,7 +1157,7 @@ config:
 
 ### Amplify / CDK
 
-MiniStack supports Amplify Gen 2 and CDK deployments. The underlying services are fully emulated:
+KumoStack supports Amplify Gen 2 and CDK deployments. The underlying services are fully emulated:
 
 - **Auth** — Cognito User Pools with JWKS/OIDC endpoints (`/.well-known/jwks.json`) for real JWT validation
 - **Data** — AppSync GraphQL queries/mutations execute against DynamoDB resolvers (create/get/list/update/delete)
@@ -1179,7 +1179,7 @@ See [`Testcontainers/java-testcontainers`](Testcontainers/java-testcontainers), 
 
 ## Comparison
 
-| Feature | MiniStack | LocalStack Free | LocalStack Pro |
+| Feature | KumoStack | LocalStack Free | LocalStack Pro |
 |---------|-----------|-----------------|----------------|
 | S3, SQS, SNS, DynamoDB | ✅ | ✅ | ✅ |
 | **DynamoDB Streams** | ✅ | ✅ | ✅ |
@@ -1231,18 +1231,18 @@ See [`Testcontainers/java-testcontainers`](Testcontainers/java-testcontainers), 
 
 | Project | Description |
 |---------|-------------|
-| [**StackPort**](https://github.com/DaviReisVieira/stackport) | **Web UI** — visual dashboard to browse and inspect AWS resources in MiniStack. Available on [PyPI](https://pypi.org/project/stackport/) and [Docker Hub](https://hub.docker.com/r/davireis/stackport). |
-| [**McDoit.Aspire.Hosting.Ministack**](https://github.com/McDoit/aspire-hosting-ministack) | .NET Aspire hosting integration for MiniStack. |
+| [**StackPort**](https://github.com/DaviReisVieira/stackport) | **Web UI** — visual dashboard to browse and inspect AWS resources in KumoStack. Available on [PyPI](https://pypi.org/project/stackport/) and [Docker Hub](https://hub.docker.com/r/davireis/stackport). |
+| [**McDoit.Aspire.Hosting.KumoStack**](https://github.com/McDoit/aspire-hosting-kumostack) | .NET Aspire hosting integration for KumoStack. |
 
 ---
 
 ## Contributing
 
-PRs welcome. The codebase is intentionally simple — each service is a single self-contained Python file in `ministack/services/`. Adding a new service means:
+PRs welcome. The codebase is intentionally simple — each service is a single self-contained Python file in `kumostack/services/`. Adding a new service means:
 
-1. Create `ministack/services/myservice.py` with an `async def handle_request(...)` function and a `reset()` function
-2. Add it to `SERVICE_REGISTRY` in `ministack/app.py` so the handler, aliases, and service filter are generated automatically
-3. Add detection patterns to `ministack/core/router.py`
+1. Create `kumostack/services/myservice.py` with an `async def handle_request(...)` function and a `reset()` function
+2. Add it to `SERVICE_REGISTRY` in `kumostack/app.py` so the handler, aliases, and service filter are generated automatically
+3. Add detection patterns to `kumostack/core/router.py`
 4. Add a fixture to `tests/conftest.py` and tests to `tests/test_services.py`
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for a full walkthrough.
@@ -1254,7 +1254,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for a full walkthrough.
 MIT — free to use, modify, and distribute. No restrictions.
 
 ```
-Copyright (c) 2026 MiniStack Contributors
+Copyright (c) 2026 KumoStack Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

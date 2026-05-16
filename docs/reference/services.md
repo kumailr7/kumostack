@@ -1,6 +1,6 @@
 # Supported AWS Services
 
-Services emulated by Ministack and their implementation status.
+Services emulated by KumoStack and their implementation status.
 
 ## Compute
 

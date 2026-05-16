@@ -652,7 +652,7 @@ def test_cloudfront_function_duplicate_name(cloudfront):
 
 
 def test_cloudfront_function_describe_requires_stage(cloudfront):
-    """DescribeFunction without Stage query param — AWS requires Stage; MiniStack returns InvalidArgument."""
+    """DescribeFunction without Stage query param — AWS requires Stage; KumoStack returns InvalidArgument."""
     name = f"fn-nostage-{_uuid_mod.uuid4().hex[:8]}"
     cloudfront.create_function(
         Name=name,
@@ -669,7 +669,7 @@ def test_cloudfront_sdk_compat_injects_origin_groups():
     """terraform-provider-aws dereferences OriginGroups.Quantity without a nil check."""
     from xml.etree.ElementTree import Element, SubElement
 
-    import ministack.services.cloudfront as cf
+    import kumostack.services.cloudfront as cf
 
     el = Element("DistributionConfig")
     SubElement(el, "CallerReference").text = "unit-ref"
@@ -833,7 +833,7 @@ def test_kvs_delete_in_use(cloudfront):
 
 def test_kvs_create_with_import_source(cloudfront):
     """ImportSource (create-only optional input, AWS spec requires SourceType +
-    SourceARN) is accepted and round-tripped. Ministack records it but does not
+    SourceARN) is accepted and round-tripped. KumoStack records it but does not
     actually fetch from S3 — same stance as other side-effect creates."""
     name = f"kvs-imp-{_uuid_mod.uuid4().hex[:8]}"
     bucket_arn = "arn:aws:s3:::seed-bucket/initial.json"

@@ -2,7 +2,7 @@
 
 Design AWS architecture diagrams directly in your browser using the embedded draw.io editor.
 
-draw.io runs at `http://localhost:8083` and is also accessible as the **Diagrams** tab in the Ministack dashboard.
+draw.io runs at `http://localhost:8083` and is also accessible as the **Diagrams** tab in the KumoStack dashboard.
 
 ---
 
@@ -10,9 +10,9 @@ draw.io runs at `http://localhost:8083` and is also accessible as the **Diagrams
 
 Navigate to the **Diagrams** tab in the dashboard sidebar, or go directly to `http://localhost:8083`.
 
-The editor starts with a pre-built Ministack architecture template showing the full local stack:
+The editor starts with a pre-built KumoStack architecture template showing the full local stack:
 
-- Ministack (LocalStack-compatible API)
+- KumoStack (LocalStack-compatible API)
 - Grafana + Prometheus + Loki
 - Vector log pipeline
 - Garage cold storage

@@ -1,22 +1,22 @@
-# Getting Started with Ministack
+# Getting Started with KumoStack
 
-In this tutorial you will start Ministack, create an S3 bucket, upload a file, invoke a Lambda function, and send a message to SQS — all locally.
+In this tutorial you will start KumoStack, create an S3 bucket, upload a file, invoke a Lambda function, and send a message to SQS — all locally.
 
 **Time:** ~10 minutes  
 **Services:** S3, Lambda, SQS
 
 ---
 
-## 1. Start Ministack
+## 1. Start KumoStack
 
 ```bash
-docker run -d -p 4566:4566 --name ministack ministackorg/ministack
+docker run -d -p 4566:4566 --name kumostack kumostackorg/kumostack
 ```
 
 Verify it is healthy:
 
 ```bash
-curl http://localhost:4566/_ministack/health | python3 -m json.tool | head -10
+curl http://localhost:4566/_kumostack/health | python3 -m json.tool | head -10
 ```
 
 You should see `"s3": "available"`, `"lambda": "available"`, etc.
@@ -30,7 +30,7 @@ You should see `"s3": "available"`, `"lambda": "available"`, etc.
 awslocal s3 mb s3://my-first-bucket
 
 # Upload a file
-echo "Hello from Ministack!" > hello.txt
+echo "Hello from KumoStack!" > hello.txt
 awslocal s3 cp hello.txt s3://my-first-bucket/hello.txt
 
 # List objects
@@ -78,12 +78,12 @@ Invoke it:
 ```bash
 awslocal lambda invoke \
   --function-name hello \
-  --payload '{"name":"Ministack"}' \
+  --payload '{"name":"KumoStack"}' \
   --cli-binary-format raw-in-base64-out \
   response.json
 
 cat response.json
-# {"statusCode": 200, "body": "{\"message\": \"Hello, Ministack!\"}"}
+# {"statusCode": 200, "body": "{\"message\": \"Hello, KumoStack!\"}"}
 ```
 
 ---
@@ -100,7 +100,7 @@ QUEUE_URL=$(awslocal sqs get-queue-url --queue-name my-queue --query QueueUrl --
 # Send a message
 awslocal sqs send-message \
   --queue-url $QUEUE_URL \
-  --message-body "Hello from Ministack!"
+  --message-body "Hello from KumoStack!"
 
 # Receive the message
 awslocal sqs receive-message --queue-url $QUEUE_URL

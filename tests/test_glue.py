@@ -702,7 +702,7 @@ def test_glue_batch_stop_job_run(glue):
     )
     run1 = glue.start_job_run(JobName=name)["JobRunId"]
     run2 = glue.start_job_run(JobName=name)["JobRunId"]
-    # Ministack auto-completes runs (SUCCEEDED), so batch stop returns errors
+    # KumoStack auto-completes runs (SUCCEEDED), so batch stop returns errors
     # for completed runs + not-found run
     resp = glue.batch_stop_job_run(JobName=name, JobRunIds=[run1, run2, "no-such-run"])
     assert "SuccessfulSubmissions" in resp

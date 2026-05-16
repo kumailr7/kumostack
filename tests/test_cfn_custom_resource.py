@@ -1,6 +1,6 @@
 """
 CloudFormation Custom Resource integration tests.
-Requires a running Ministack server at MINISTACK_ENDPOINT (default http://localhost:4566).
+Requires a running KumoStack server at MINISTACK_ENDPOINT (default http://localhost:4566).
 """
 import io
 import json
@@ -63,12 +63,12 @@ def _cfn_template(func_name, resource_type="Custom::Tester", extra_props=None, o
 # ── token registry smoke test ──────────────────────────────────────────────
 
 def test_cfn_response_endpoint_accepts_put(cfn):
-    """PUT to /_ministack/cfn-response/{token} returns 200 even for unknown tokens."""
+    """PUT to /_kumostack/cfn-response/{token} returns 200 even for unknown tokens."""
     token = str(uuid.uuid4())
     payload = json.dumps({"Status": "SUCCESS", "PhysicalResourceId": "x",
                           "RequestId": "r", "StackId": "s", "LogicalResourceId": "l"}).encode()
     req = urllib.request.Request(
-        f"{ENDPOINT}/_ministack/cfn-response/{token}",
+        f"{ENDPOINT}/_kumostack/cfn-response/{token}",
         data=payload,
         method="PUT",
         headers={"content-type": "", "content-length": str(len(payload))},
@@ -380,7 +380,7 @@ _CR_HANDLER_NO_PID = """\
 import json, urllib.request
 
 def handler(event, context):
-    # Deliberately omit PhysicalResourceId — Ministack should use RequestId
+    # Deliberately omit PhysicalResourceId — KumoStack should use RequestId
     payload = json.dumps({
         "Status": "SUCCESS",
         "RequestId": event["RequestId"],
@@ -398,7 +398,7 @@ def handler(event, context):
 
 
 def test_custom_resource_physical_id_fallback(cfn, lam):
-    """When Lambda omits PhysicalResourceId on Create, Ministack falls back to RequestId."""
+    """When Lambda omits PhysicalResourceId on Create, KumoStack falls back to RequestId."""
     lam.create_function(
         FunctionName="cr-test-nopid",
         Runtime="python3.12",

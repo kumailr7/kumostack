@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-grafana_resource.py  —  TUI helper: add a Ministack AWS resource to Grafana.
+grafana_resource.py  —  TUI helper: add a KumoStack AWS resource to Grafana.
 
 Usage (standalone):
     python3 scripts/grafana_resource.py --service sqs --name my-queue
@@ -149,8 +149,8 @@ def create_dashboard(service, name):
         })
 
     dashboard = {
-        "title": f"Ministack — {tmpl['label']}: {name}",
-        "tags": ["ministack", service, "auto-generated"],
+        "title": f"KumoStack — {tmpl['label']}: {name}",
+        "tags": ["kumostack", service, "auto-generated"],
         "timezone": "browser",
         "refresh": "30s",
         "panels": panels,
@@ -177,7 +177,7 @@ def prompt_and_add(service, name, auto=False):
             ("  Type : ", "dim"), (tmpl["label"],  "cyan bold"), "\n",
             ("  Name : ", "dim"), (name,            "white bold"), "\n",
         ),
-        title="[bold]Ministack[/bold]",
+        title="[bold]KumoStack[/bold]",
         border_style="green",
         padding=(0, 2),
     ))
@@ -221,7 +221,7 @@ def prompt_and_add(service, name, auto=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Add a Ministack resource dashboard to Grafana (with TUI prompt)"
+        description="Add a KumoStack resource dashboard to Grafana (with TUI prompt)"
     )
     parser.add_argument("--service", required=True,
                         choices=list(RESOURCE_TEMPLATES),

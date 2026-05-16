@@ -1,12 +1,12 @@
-# Contributing to MiniStack
+# Contributing to KumoStack
 
-Thanks for wanting to contribute. The codebase is intentionally simple — each AWS service is a single self-contained Python file inside `ministack/services/`. Adding a new service or fixing a bug should take minutes, not hours.
+Thanks for wanting to contribute. The codebase is intentionally simple — each AWS service is a single self-contained Python file inside `kumostack/services/`. Adding a new service or fixing a bug should take minutes, not hours.
 
 ## Project Structure
 
 ```
-ministack/
-├── ministack/
+kumostack/
+├── kumostack/
 │   ├── app.py              # ASGI entry point, service routing, reset endpoint
 │   ├── core/
 │   │   ├── responses.py    # json_response, error_response_json, new_uuid
@@ -28,7 +28,7 @@ ministack/
 
 Every service follows the same 4-step pattern:
 
-### 1. Create `ministack/services/myservice.py`
+### 1. Create `kumostack/services/myservice.py`
 
 ```python
 """
@@ -39,7 +39,7 @@ Supports: OperationOne, OperationTwo, ...
 
 import json
 import logging
-from ministack.core.responses import json_response, error_response_json, new_uuid
+from kumostack.core.responses import json_response, error_response_json, new_uuid
 
 logger = logging.getLogger("myservice")
 
@@ -87,10 +87,10 @@ def reset():
 - XML/Query services (S3, SQS, SNS, IAM, STS, RDS, ElastiCache, EC2) — build XML responses, route via `Action` query param; use `_xml(status, root_tag, inner)` pattern; verify field names against botocore shapes via `Loader().load_service_model()`
 - REST services (Lambda, ECS, Route53) — route via URL path
 
-### 2. Register in `ministack/app.py`
+### 2. Register in `kumostack/app.py`
 
 ```python
-from ministack.services import myservice
+from kumostack.services import myservice
 
 SERVICE_REGISTRY = {
     # ... existing ...
@@ -100,7 +100,7 @@ SERVICE_REGISTRY = {
 
 If the service needs aliases, add them in the registry entry.
 
-### 3. Add detection to `ministack/core/router.py`
+### 3. Add detection to `kumostack/core/router.py`
 
 ```python
 SERVICE_PATTERNS = {
@@ -157,10 +157,10 @@ pytest tests/ -v -k "cognito"
 
 ## Code Conventions
 
-- **One file per service** — keep everything for a service in `ministack/services/myservice.py`
-- **Imports** — always `from ministack.core.responses import ...`, never `from core.responses import ...`
+- **One file per service** — keep everything for a service in `kumostack/services/myservice.py`
+- **Imports** — always `from kumostack.core.responses import ...`, never `from core.responses import ...`
 - **In-memory state** — use module-level dicts (`_things: dict = {}`)
-- **reset()** — every service must expose a `reset()` that clears all module-level state; it's called by `/_ministack/reset`
+- **reset()** — every service must expose a `reset()` that clears all module-level state; it's called by `/_kumostack/reset`
 - **No external AWS deps** — no `boto3`, `botocore`, or `aws-sdk` in service code
 - **Minimal dependencies** — `duckdb` and `docker` are optional; guard with `try/except ImportError`
 - **Error responses** — match real AWS error codes and HTTP status codes as closely as possible
@@ -170,12 +170,12 @@ pytest tests/ -v -k "cognito"
 
 ## Pull Request Checklist
 
-- [ ] New service file in `ministack/services/`
-- [ ] Registered in `ministack/app.py` SERVICE_REGISTRY
-- [ ] Detection patterns added to `ministack/core/router.py`
+- [ ] New service file in `kumostack/services/`
+- [ ] Registered in `kumostack/app.py` SERVICE_REGISTRY
+- [ ] Detection patterns added to `kumostack/core/router.py`
 - [ ] Fixture added to `tests/conftest.py`
 - [ ] Tests added and passing (`pytest tests/ -v`)
-- [ ] Linting passes (`ruff check ministack/`)
+- [ ] Linting passes (`ruff check kumostack/`)
 - [ ] Service added to the table in `README.md`
 - [ ] Entry added to `CHANGELOG.md`
 

@@ -4,7 +4,7 @@ Regression tests for the persistence-symmetry architectural bug.
 Background
 ----------
 When PERSIST_STATE=1, every service that participates in `_state_map`
-(see `ministack/app.py`) is saved on shutdown via `save_all()`. State is
+(see `kumostack/app.py`) is saved on shutdown via `save_all()`. State is
 restored on startup either by a service's own `load_state()` call at
 module import time, OR by `_load_persisted_state()` which calls a
 `load_persisted_state()` method on the service module.
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from ministack.app import _state_map  # noqa: E402  (intentional internal import)
-from ministack.core import persistence
+from kumostack.app import _state_map  # noqa: E402  (intentional internal import)
+from kumostack.core import persistence
 
 # Services that MUST be persistence-round-trippable. Every entry of
 # `_state_map` qualifies. The set is materialised here so an addition to
@@ -31,7 +31,7 @@ ALL_PERSISTED_SERVICES = sorted(_state_map.items())
 
 
 def _module(mod_name):
-    return importlib.import_module(f"ministack.services.{mod_name}")
+    return importlib.import_module(f"kumostack.services.{mod_name}")
 
 
 @pytest.mark.parametrize("svc_key,mod_name", ALL_PERSISTED_SERVICES)
@@ -48,7 +48,7 @@ def test_service_has_restore_path(svc_key, mod_name):
 
     # (a) self-restore at import: must import load_state AND call it.
     self_restoring = (
-        "from ministack.core.persistence import" in src
+        "from kumostack.core.persistence import" in src
         and "load_state" in src
         and "load_state(" in src
     )
@@ -94,7 +94,7 @@ def test_state_map_services_without_endpoint_are_eagerly_imported():
     next pipe-related API call."""
     import inspect
 
-    from ministack.app import SERVICE_REGISTRY, _load_persisted_state
+    from kumostack.app import SERVICE_REGISTRY, _load_persisted_state
 
     # Find services that need eager import.
     routable_modules = {cfg["module"] for cfg in SERVICE_REGISTRY.values()}
@@ -316,11 +316,11 @@ import importlib
 
 import pytest
 
-from ministack.core import persistence
+from kumostack.core import persistence
 
 
 def _get_module(mod_name):
-    return importlib.import_module(f"ministack.services.{mod_name}")
+    return importlib.import_module(f"kumostack.services.{mod_name}")
 
 
 @pytest.fixture(autouse=True)
@@ -511,13 +511,13 @@ def test_ecs_module_reload_with_persisted_attributes_does_not_namerror():
 
 def _persisted_services():
     """Return a sorted list of ``(svc_key, mod_name)`` pairs from
-    ``ministack.app._state_map``.
+    ``kumostack.app._state_map``.
 
     Evaluated by ``@pytest.mark.parametrize(...)`` at test collection
     time — `_state_map` is therefore imported when pytest collects this
     module, NOT lazily per test case. (Calling it inside the parametrize
     decorator means it runs once, at collection.)"""
-    from ministack.app import _state_map
+    from kumostack.app import _state_map
     return sorted(_state_map.items())
 
 
@@ -570,7 +570,7 @@ def test_module_cold_import_with_typical_snapshot_does_not_log_restore_failure(
     # importlib.reload() won't work because it merges into the
     # existing namespace; the late-declared symbol stays bound from
     # the prior import.
-    full_name = f"ministack.services.{mod_name}"
+    full_name = f"kumostack.services.{mod_name}"
     sys.modules.pop(full_name, None)
 
     caplog.clear()

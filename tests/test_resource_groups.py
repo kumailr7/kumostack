@@ -244,15 +244,15 @@ def test_tag_untag_get_tags_lifecycle(rg):
     name = f"g-{_uid()}"
     arn = rg.create_group(Name=name, ResourceQuery=_tag_query())["Group"]["GroupArn"]
     try:
-        rg.tag(Arn=arn, Tags={"env": "test", "owner": "ministack"})
+        rg.tag(Arn=arn, Tags={"env": "test", "owner": "kumostack"})
         got = rg.get_tags(Arn=arn)
         assert got["Arn"] == arn
-        assert got["Tags"] == {"env": "test", "owner": "ministack"}
+        assert got["Tags"] == {"env": "test", "owner": "kumostack"}
 
         rg.untag(Arn=arn, Keys=["env"])
         got2 = rg.get_tags(Arn=arn)
         assert "env" not in got2["Tags"]
-        assert got2["Tags"]["owner"] == "ministack"
+        assert got2["Tags"]["owner"] == "kumostack"
     finally:
         rg.delete_group(Group=name)
 

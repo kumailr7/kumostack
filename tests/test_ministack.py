@@ -1,4 +1,4 @@
-"""Ministack admin/core tests — health, config, persistence, hypercorn compat."""
+"""KumoStack admin/core tests — health, config, persistence, hypercorn compat."""
 
 import io
 import json
@@ -11,35 +11,35 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
-# ========== from test_ministack.py ==========
+# ========== from test_kumostack.py ==========
 
-_ministack_installed = True
+_kumostack_installed = True
 
 _requires_package = pytest.mark.skipif(
-    not _ministack_installed,
-    reason="ministack not installed locally (runs in CI via pip install -e .)",
+    not _kumostack_installed,
+    reason="kumostack not installed locally (runs in CI via pip install -e .)",
 )
 
 @_requires_package
 def test_minstack_app_asgi_callable():
-    """ministack.app:app must be an async callable (ASGI entry point)."""
+    """kumostack.app:app must be an async callable (ASGI entry point)."""
     import inspect
 
-    from ministack import app as app_module
+    from kumostack import app as app_module
 
     assert callable(app_module.app)
     assert inspect.iscoroutinefunction(app_module.app)
     assert callable(app_module.main)
 
 
-def test_ministack_config_invalid_key_ignored():
-    """/_ministack/config silently ignores unknown keys and only applies valid ones."""
+def test_kumostack_config_invalid_key_ignored():
+    """/_kumostack/config silently ignores unknown keys and only applies valid ones."""
     import json as _json
     import urllib.request
 
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
-        f"{endpoint}/_ministack/config",
+        f"{endpoint}/_kumostack/config",
         data=_json.dumps(
             {
                 "nonexistent_module.VAR": "val",
@@ -53,7 +53,7 @@ def test_ministack_config_invalid_key_ignored():
     assert "nonexistent_module.VAR" not in resp["applied"]
     assert resp["applied"].get("athena.ATHENA_ENGINE") == "auto"
 
-def test_ministack_health_endpoints():
+def test_kumostack_health_endpoints():
     import urllib.request
 
     resp_health = urllib.request.urlopen("http://localhost:4566/health")
@@ -63,9 +63,9 @@ def test_ministack_health_endpoints():
     assert "s3" in data_health["services"]
     assert data_health["edition"] == "light"
 
-    resp_ministack = urllib.request.urlopen("http://localhost:4566/_ministack/health")
-    data_ministack = json.loads(resp_ministack.read())
-    assert data_health == data_ministack
+    resp_kumostack = urllib.request.urlopen("http://localhost:4566/_kumostack/health")
+    data_kumostack = json.loads(resp_kumostack.read())
+    assert data_health == data_kumostack
 
     resp_localstack = urllib.request.urlopen("http://localhost:4566/_localstack/health")
     data_localstack = json.loads(resp_localstack.read())
@@ -87,7 +87,7 @@ def test_localstack_unknown_paths_return_json_404():
             body = json.loads(exc.read())
             assert "error" in body, f"Response body missing 'error' key for {url}"
             assert "LocalStack" in body["error"], f"Error message should mention LocalStack: {body['error']}"
-            assert "ministack" in body["error"].lower(), f"Error message should mention ministack: {body['error']}"
+            assert "kumostack" in body["error"].lower(), f"Error message should mention kumostack: {body['error']}"
             assert exc.headers.get("Content-Type") == "application/json", (
                 f"Expected application/json Content-Type for {url}"
             )
@@ -106,13 +106,13 @@ def test_localstack_health_still_returns_200():
 
 
 @_requires_package
-def test_ministack_package_core_importable():
-    """ministack.core modules must all be importable."""
-    from ministack.core.lambda_runtime import get_or_create_worker
-    from ministack.core.lambda_runtime import reset as lr_reset
-    from ministack.core.persistence import load_state, save_all
-    from ministack.core.responses import error_response_json, json_response, new_uuid
-    from ministack.core.router import detect_service
+def test_kumostack_package_core_importable():
+    """kumostack.core modules must all be importable."""
+    from kumostack.core.lambda_runtime import get_or_create_worker
+    from kumostack.core.lambda_runtime import reset as lr_reset
+    from kumostack.core.persistence import load_state, save_all
+    from kumostack.core.responses import error_response_json, json_response, new_uuid
+    from kumostack.core.router import detect_service
 
     assert callable(json_response)
     assert callable(detect_service)
@@ -120,9 +120,9 @@ def test_ministack_package_core_importable():
     assert callable(save_all)
 
 @_requires_package
-def test_ministack_package_services_importable():
-    """All core ministack.services modules must be importable and expose handle_request."""
-    from ministack.services import (
+def test_kumostack_package_services_importable():
+    """All core kumostack.services modules must be importable and expose handle_request."""
+    from kumostack.services import (
         apigateway,
         apigateway_v1,
         appsync_events,
@@ -180,10 +180,10 @@ def test_ministack_package_services_importable():
     ]:
         assert callable(getattr(mod, "handle_request", None)), f"{mod.__name__} missing handle_request"
 
-# ========== from test_ministack_persist.py ==========
+# ========== from test_kumostack_persist.py ==========
 
-def test_ministack_persist_sqs_roundtrip():
-    from ministack.services import sqs as _sqs
+def test_kumostack_persist_sqs_roundtrip():
+    from kumostack.services import sqs as _sqs
     _sqs._queues["http://localhost:4566/000000000000/persist-q"] = {"name": "persist-q", "messages": [], "attributes": {}}
     _sqs._queue_name_to_url["persist-q"] = "http://localhost:4566/000000000000/persist-q"
     state = _sqs.get_state()
@@ -195,8 +195,8 @@ def test_ministack_persist_sqs_roundtrip():
     assert "http://localhost:4566/000000000000/persist-q" in _sqs._queues
     _sqs._queues.update(saved_queues)
 
-def test_ministack_persist_sns_roundtrip():
-    from ministack.services import sns as _sns
+def test_kumostack_persist_sns_roundtrip():
+    from kumostack.services import sns as _sns
     _sns._topics["arn:aws:sns:us-east-1:000000000000:persist-topic"] = {"TopicArn": "arn:aws:sns:us-east-1:000000000000:persist-topic", "subscriptions": []}
     state = _sns.get_state()
     assert "topics" in state
@@ -205,8 +205,8 @@ def test_ministack_persist_sns_roundtrip():
     assert "arn:aws:sns:us-east-1:000000000000:persist-topic" in _sns._topics
     _sns._topics.pop("arn:aws:sns:us-east-1:000000000000:persist-topic", None)
 
-def test_ministack_persist_ssm_roundtrip():
-    from ministack.services import ssm as _ssm
+def test_kumostack_persist_ssm_roundtrip():
+    from kumostack.services import ssm as _ssm
     _ssm._parameters["/persist/key"] = {"Name": "/persist/key", "Value": "val", "Type": "String"}
     state = _ssm.get_state()
     assert "parameters" in state
@@ -215,8 +215,8 @@ def test_ministack_persist_ssm_roundtrip():
     assert "/persist/key" in _ssm._parameters
     _ssm._parameters.pop("/persist/key")
 
-def test_ministack_persist_secretsmanager_roundtrip():
-    from ministack.services import secretsmanager as _sm
+def test_kumostack_persist_secretsmanager_roundtrip():
+    from kumostack.services import secretsmanager as _sm
     _sm._secrets["persist-secret"] = {"Name": "persist-secret", "ARN": "arn:test", "Versions": {}}
     state = _sm.get_state()
     assert "secrets" in state
@@ -225,8 +225,8 @@ def test_ministack_persist_secretsmanager_roundtrip():
     assert "persist-secret" in _sm._secrets
     _sm._secrets.pop("persist-secret")
 
-def test_ministack_persist_dynamodb_roundtrip():
-    from ministack.services import dynamodb as _ddb
+def test_kumostack_persist_dynamodb_roundtrip():
+    from kumostack.services import dynamodb as _ddb
     _ddb._tables["persist-tbl"] = {"TableName": "persist-tbl", "pk_name": "pk", "sk_name": None, "items": {}}
     state = _ddb.get_state()
     assert "tables" in state
@@ -235,8 +235,8 @@ def test_ministack_persist_dynamodb_roundtrip():
     assert "persist-tbl" in _ddb._tables
     _ddb._tables.pop("persist-tbl")
 
-def test_ministack_persist_eventbridge_roundtrip():
-    from ministack.services import eventbridge as _eb
+def test_kumostack_persist_eventbridge_roundtrip():
+    from kumostack.services import eventbridge as _eb
     _eb._rules["default|persist-rule"] = {"Name": "persist-rule", "State": "ENABLED", "EventPattern": "{}"}
     state = _eb.get_state()
     assert "rules" in state
@@ -245,8 +245,8 @@ def test_ministack_persist_eventbridge_roundtrip():
     assert "default|persist-rule" in _eb._rules
     _eb._rules.pop("default|persist-rule")
 
-def test_ministack_persist_kinesis_roundtrip():
-    from ministack.services import kinesis as _kin
+def test_kumostack_persist_kinesis_roundtrip():
+    from kumostack.services import kinesis as _kin
     _kin._streams["persist-stream"] = {"StreamName": "persist-stream", "StreamStatus": "ACTIVE", "shards": {}}
     state = _kin.get_state()
     assert "streams" in state
@@ -255,8 +255,8 @@ def test_ministack_persist_kinesis_roundtrip():
     assert "persist-stream" in _kin._streams
     _kin._streams.pop("persist-stream")
 
-def test_ministack_persist_kms_roundtrip():
-    from ministack.services import kms as _kms
+def test_kumostack_persist_kms_roundtrip():
+    from kumostack.services import kms as _kms
     key_id = "test-persist-key-id"
     _kms._keys[key_id] = {"KeyId": key_id, "Description": "persist-key", "KeySpec": "SYMMETRIC_DEFAULT", "_symmetric_key": b"\x00" * 32}
     state = _kms.get_state()
@@ -267,8 +267,8 @@ def test_ministack_persist_kms_roundtrip():
     assert _kms._keys[key_id]["Description"] == "persist-key"
     _kms._keys.pop(key_id)
 
-def test_ministack_persist_ec2_roundtrip():
-    from ministack.services import ec2 as _ec2
+def test_kumostack_persist_ec2_roundtrip():
+    from kumostack.services import ec2 as _ec2
     _ec2._instances["i-persist01"] = {"InstanceId": "i-persist01", "State": {"Name": "running"}}
     state = _ec2.get_state()
     assert "instances" in state
@@ -277,8 +277,8 @@ def test_ministack_persist_ec2_roundtrip():
     assert "i-persist01" in _ec2._instances
     _ec2._instances.pop("i-persist01")
 
-def test_ministack_persist_route53_roundtrip():
-    from ministack.services import route53 as _r53
+def test_kumostack_persist_route53_roundtrip():
+    from kumostack.services import route53 as _r53
     _r53._zones["Z00PERSIST"] = {"Id": "Z00PERSIST", "Name": "persist.test."}
     state = _r53.get_state()
     assert "zones" in state
@@ -287,8 +287,8 @@ def test_ministack_persist_route53_roundtrip():
     assert "Z00PERSIST" in _r53._zones
     _r53._zones.pop("Z00PERSIST")
 
-def test_ministack_persist_cognito_roundtrip():
-    from ministack.services import cognito as _cog
+def test_kumostack_persist_cognito_roundtrip():
+    from kumostack.services import cognito as _cog
     _cog._user_pools["us-east-1_PERSIST"] = {"Id": "us-east-1_PERSIST", "Name": "persist-pool"}
     state = _cog.get_state()
     assert "user_pools" in state
@@ -297,8 +297,8 @@ def test_ministack_persist_cognito_roundtrip():
     assert "us-east-1_PERSIST" in _cog._user_pools
     _cog._user_pools.pop("us-east-1_PERSIST")
 
-def test_ministack_persist_ecr_roundtrip():
-    from ministack.services import ecr as _ecr
+def test_kumostack_persist_ecr_roundtrip():
+    from kumostack.services import ecr as _ecr
     _ecr._repositories["persist-repo"] = {"repositoryName": "persist-repo", "repositoryArn": "arn:test"}
     state = _ecr.get_state()
     assert "repositories" in state
@@ -307,8 +307,8 @@ def test_ministack_persist_ecr_roundtrip():
     assert "persist-repo" in _ecr._repositories
     _ecr._repositories.pop("persist-repo")
 
-def test_ministack_persist_cloudwatch_roundtrip():
-    from ministack.services import cloudwatch as _cw
+def test_kumostack_persist_cloudwatch_roundtrip():
+    from kumostack.services import cloudwatch as _cw
     _cw._alarms["persist-alarm"] = {"AlarmName": "persist-alarm", "StateValue": "OK"}
     state = _cw.get_state()
     assert "alarms" in state
@@ -317,8 +317,8 @@ def test_ministack_persist_cloudwatch_roundtrip():
     assert "persist-alarm" in _cw._alarms
     _cw._alarms.pop("persist-alarm")
 
-def test_ministack_persist_s3_metadata_roundtrip():
-    from ministack.services import s3 as _s3
+def test_kumostack_persist_s3_metadata_roundtrip():
+    from kumostack.services import s3 as _s3
     _s3._buckets["persist-bkt"] = {"created": "2025-01-01T00:00:00Z", "objects": {"k": {"body": b"v"}}, "region": "us-east-1"}
     _s3._bucket_versioning["persist-bkt"] = "Enabled"
     state = _s3.get_state()
@@ -335,13 +335,13 @@ def test_ministack_persist_s3_metadata_roundtrip():
     _s3._buckets.pop("persist-bkt")
     _s3._bucket_versioning.pop("persist-bkt")
 
-def test_ministack_persist_s3_logging_accelerate_request_payment_roundtrip():
+def test_kumostack_persist_s3_logging_accelerate_request_payment_roundtrip():
     # Regression for #424 + the two adjacent landmines: logging, accelerate,
     # and request-payment configs must all survive save/restore. Previously
     # _bucket_logging_config / _bucket_accelerate_config / _bucket_request_payment_config
     # were never enumerated in get_state/restore_state, so they silently
     # evaporated on warm boot. Now driven by _PERSISTED_BUCKET_DICTS.
-    from ministack.services import s3 as _s3
+    from kumostack.services import s3 as _s3
     _s3._buckets["persist-log-bkt"] = {"created": "2025-01-01T00:00:00Z", "objects": {}, "region": "us-east-1"}
     _s3._bucket_logging_config["persist-log-bkt"] = "<BucketLoggingStatus><LoggingEnabled><TargetBucket>tgt</TargetBucket></LoggingEnabled></BucketLoggingStatus>"
     _s3._bucket_accelerate_config["persist-log-bkt"] = "<AccelerateConfiguration><Status>Enabled</Status></AccelerateConfiguration>"
@@ -363,8 +363,8 @@ def test_ministack_persist_s3_logging_accelerate_request_payment_roundtrip():
     _s3._bucket_accelerate_config.pop("persist-log-bkt")
     _s3._bucket_request_payment_config.pop("persist-log-bkt")
 
-def test_ministack_persist_lambda_roundtrip():
-    from ministack.services import lambda_svc as _lam
+def test_kumostack_persist_lambda_roundtrip():
+    from kumostack.services import lambda_svc as _lam
     _lam._functions["persist-fn"] = {
         "config": {"FunctionName": "persist-fn", "Runtime": "python3.11"},
         "code_zip": b"fake-zip-bytes",
@@ -382,8 +382,8 @@ def test_ministack_persist_lambda_roundtrip():
     assert _lam._functions["persist-fn"]["code_zip"] == b"fake-zip-bytes"
     _lam._functions.pop("persist-fn")
 
-def test_ministack_persist_rds_roundtrip():
-    from ministack.services import rds as _rds
+def test_kumostack_persist_rds_roundtrip():
+    from kumostack.services import rds as _rds
     _rds._instances["persist-db"] = {
         "DBInstanceIdentifier": "persist-db",
         "Engine": "postgres",
@@ -399,8 +399,8 @@ def test_ministack_persist_rds_roundtrip():
     assert _rds._instances["persist-db"]["Engine"] == "postgres"
     _rds._instances.pop("persist-db")
 
-def test_ministack_persist_ecs_roundtrip():
-    from ministack.services import ecs as _ecs
+def test_kumostack_persist_ecs_roundtrip():
+    from kumostack.services import ecs as _ecs
     _ecs._clusters["persist-cluster"] = {"clusterName": "persist-cluster", "status": "ACTIVE"}
     _ecs._tasks["arn:persist-task"] = {
         "taskArn": "arn:persist-task",
@@ -420,8 +420,8 @@ def test_ministack_persist_ecs_roundtrip():
     _ecs._clusters.pop("persist-cluster")
     _ecs._tasks.pop("arn:persist-task")
 
-def test_ministack_persist_elasticache_roundtrip():
-    from ministack.services import elasticache as _ec
+def test_kumostack_persist_elasticache_roundtrip():
+    from kumostack.services import elasticache as _ec
     _ec._clusters["persist-cache"] = {
         "CacheClusterId": "persist-cache",
         "Engine": "redis",
@@ -437,8 +437,8 @@ def test_ministack_persist_elasticache_roundtrip():
     assert _ec._clusters["persist-cache"]["Engine"] == "redis"
     _ec._clusters.pop("persist-cache")
 
-def test_ministack_persist_stepfunctions_roundtrip():
-    from ministack.services import stepfunctions as _sfn
+def test_kumostack_persist_stepfunctions_roundtrip():
+    from kumostack.services import stepfunctions as _sfn
     sm_arn = "arn:aws:states:us-east-1:000000000000:stateMachine:persist-sm"
     _sfn._state_machines[sm_arn] = {
         "stateMachineArn": sm_arn,
@@ -457,8 +457,8 @@ def test_ministack_persist_stepfunctions_roundtrip():
     assert _sfn._state_machines[sm_arn]["name"] == "persist-sm"
     _sfn._state_machines.pop(sm_arn)
 
-def test_ministack_persist_stepfunctions_running_marked_failed():
-    from ministack.services import stepfunctions as _sfn
+def test_kumostack_persist_stepfunctions_running_marked_failed():
+    from kumostack.services import stepfunctions as _sfn
     run_arn = "arn:aws:states:us-east-1:000000000000:execution:persist-sm:run-1"
     done_arn = "arn:aws:states:us-east-1:000000000000:execution:persist-sm:done-1"
     _sfn._executions[run_arn] = {
@@ -500,7 +500,7 @@ def test_ministack_persist_stepfunctions_running_marked_failed():
 boto3 < 1.40's bundled urllib3 aborts with ``BadStatusLine`` when the server
 replies to ``Expect: 100-continue`` with ``HTTP/1.1 100 \\r\\n`` (empty reason
 phrase). h11's default behaviour is to emit an empty reason; the compat shim in
-``ministack/core/hypercorn_compat.py`` injects the canonical reason phrase so
+``kumostack/core/hypercorn_compat.py`` injects the canonical reason phrase so
 the wire output is ``HTTP/1.1 100 Continue\\r\\n``, matching real AWS and every
 SDK we test.
 """
@@ -512,11 +512,11 @@ from urllib.parse import urlparse
 
 def test_unit_h11_informational_has_reason_phrase():
     """h11.InformationalResponse(100, ...) serialises as 'HTTP/1.1 100 Continue' once the patch is installed."""
-    # Import ministack.app triggers the patch; tests usually hit a live server
+    # Import kumostack.app triggers the patch; tests usually hit a live server
     # already, but import it here defensively for isolated runs.
     import h11
 
-    import ministack.app  # noqa: F401
+    import kumostack.app  # noqa: F401
 
     conn = h11.Connection(our_role=h11.SERVER)
     conn.receive_data(
@@ -533,7 +533,7 @@ def test_unit_h11_informational_has_reason_phrase():
 
 
 def test_wire_expect_100_continue_returns_canonical_status_line():
-    """End-to-end: a raw PUT with Expect: 100-continue against ministack must
+    """End-to-end: a raw PUT with Expect: 100-continue against kumostack must
     receive a 100 Continue with the reason phrase intact (issue #389)."""
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
     parsed = urlparse(endpoint)
@@ -544,12 +544,12 @@ def test_wire_expect_100_continue_returns_canonical_status_line():
     # path that accepts a body will do, because the server must emit the 100
     # response before the body arrives. We target S3 because that's the SDK
     # path in the bug report, but any 100-capable endpoint would work.
-    body = b"ministack-issue-389-probe"
+    body = b"kumostack-issue-389-probe"
 
     sock = socket.create_connection((host, port), timeout=5)
     try:
         request = (
-            f"PUT /ministack-probe-389/key HTTP/1.1\r\n"
+            f"PUT /kumostack-probe-389/key HTTP/1.1\r\n"
             f"Host: {host}:{port}\r\n"
             f"Expect: 100-continue\r\n"
             f"Content-Length: {len(body)}\r\n"
@@ -581,7 +581,7 @@ def test_lambda_svc_restore_does_not_forward_reference_ensure_poller():
     load/restore to after _ensure_poller is defined."""
     import importlib
 
-    import ministack.services.lambda_svc as lam_mod
+    import kumostack.services.lambda_svc as lam_mod
 
     # Force re-import so the module-level load runs with our fake state.
     importlib.reload(lam_mod)
@@ -605,12 +605,12 @@ def test_persistence_s3_writes_state_after_ownership_and_public_access_block(tmp
     import importlib
     import json
 
-    import ministack.core.persistence as pers
+    import kumostack.core.persistence as pers
 
     monkeypatch.setattr(pers, "PERSIST_STATE", True)
     monkeypatch.setattr(pers, "STATE_DIR", str(tmp_path))
 
-    import ministack.services.s3 as s3_mod
+    import kumostack.services.s3 as s3_mod
     importlib.reload(s3_mod)
 
     # Simulate what Terraform v6 does during bucket creation.
@@ -644,7 +644,7 @@ def test_persistence_s3_writes_state_after_ownership_and_public_access_block(tmp
 # Unit tests for _S3_VHOST_RE / _S3_VHOST_EXCLUDE_RE / _NON_S3_VHOST_NAMES
 # ---------------------------------------------------------------------------
 
-from ministack.app import _NON_S3_VHOST_NAMES, _S3_VHOST_EXCLUDE_RE
+from kumostack.app import _NON_S3_VHOST_NAMES, _S3_VHOST_EXCLUDE_RE
 
 
 class TestS3VhostExcludeRe:
@@ -690,7 +690,7 @@ class TestNonS3VhostNames:
         assert "my-data" not in _NON_S3_VHOST_NAMES
 
 
-from ministack.app import _extract_s3_vhost_bucket
+from kumostack.app import _extract_s3_vhost_bucket
 
 
 class TestExtractS3VhostBucket:

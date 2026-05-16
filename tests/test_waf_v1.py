@@ -82,6 +82,6 @@ def test_waf_v1_does_not_collide_with_wafv2():
 
 
 def test_waf_v1_module_exposes_no_op_reset():
-    from ministack.services import waf_v1
+    from kumostack.services import waf_v1
     assert callable(getattr(waf_v1, "reset", None))
     waf_v1.reset()

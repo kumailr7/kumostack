@@ -5,19 +5,19 @@ const run = promisify(execFile);
 
 // Only these container names may be managed — prevents injection via spoofed requests.
 const ALLOWED_CONTAINERS = new Set([
-  "ministack-mailhog",
-  "ministack-wiremock",
-  "ministack-stripe",
-  "ministack-httpbin",
-  "ministack-typedb",
-  "ministack-paradedb",
+  "kumostack-mailhog",
+  "kumostack-wiremock",
+  "kumostack-stripe",
+  "kumostack-httpbin",
+  "kumostack-typedb",
+  "kumostack-paradedb",
 ]);
 
 function validate(name: string | null): name is string {
   return !!name && ALLOWED_CONTAINERS.has(name);
 }
 
-// GET /api/extensions/docker?name=ministack-mailhog
+// GET /api/extensions/docker?name=kumostack-mailhog
 // Returns { running: boolean, status: string }
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -64,7 +64,7 @@ export async function POST(req: Request) {
   }
 
   // Build args — no shell interpolation, all values go as discrete array elements
-  const args: string[] = ["run", "-d", "--name", containerName, "--label", "ministack-extension=true"];
+  const args: string[] = ["run", "-d", "--name", containerName, "--label", "kumostack-extension=true"];
 
   for (const p of ports) {
     args.push("-p", `${p.host}:${p.container}`);
@@ -97,7 +97,7 @@ export async function POST(req: Request) {
   }
 }
 
-// DELETE /api/extensions/docker?name=ministack-mailhog
+// DELETE /api/extensions/docker?name=kumostack-mailhog
 export async function DELETE(req: Request) {
   const { searchParams } = new URL(req.url);
   const name = searchParams.get("name");

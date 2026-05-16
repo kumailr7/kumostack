@@ -1,4 +1,4 @@
-# MiniStack — Go Testcontainers Example
+# KumoStack — Go Testcontainers Example
 
 Integration tests for S3, SQS, and DynamoDB using [testcontainers-go](https://golang.testcontainers.org/) and the AWS SDK v2.
 
@@ -14,7 +14,7 @@ go mod tidy
 go test ./... -v
 ```
 
-Testcontainers will pull `ministackorg/ministack:latest`, start it, run the tests, and tear it down automatically.
+Testcontainers will pull `kumostackorg/kumostack:latest`, start it, run the tests, and tear it down automatically.
 
 ## What's tested
 

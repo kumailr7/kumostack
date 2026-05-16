@@ -15,25 +15,25 @@ from botocore.exceptions import ClientError
 
 
 def test_ses_parse_smtp_host_not_set():
-    from ministack.services.ses import _parse_smtp_host
+    from kumostack.services.ses import _parse_smtp_host
     assert _parse_smtp_host() is None
 
 
 def test_ses_parse_smtp_host_with_port():
     os.environ['SMTP_HOST'] = '127.0.0.1:1025'
-    from ministack.services.ses import _parse_smtp_host
+    from kumostack.services.ses import _parse_smtp_host
     assert _parse_smtp_host() == ('127.0.0.1', 1025)
 
 
 def test_ses_parse_smtp_host_without_port():
     os.environ['SMTP_HOST'] = 'mail.example.com'
-    from ministack.services.ses import _parse_smtp_host
+    from kumostack.services.ses import _parse_smtp_host
     assert _parse_smtp_host() == ('mail.example.com', 25)
 
 
 def test_ses_parse_smtp_host_hostname_with_port():
     os.environ['SMTP_HOST'] = 'smtp.gmail.com:587'
-    from ministack.services.ses import _parse_smtp_host
+    from kumostack.services.ses import _parse_smtp_host
     assert _parse_smtp_host() == ('smtp.gmail.com', 587)
 
 
@@ -44,7 +44,7 @@ def test_ses_send(ses):
         Destination={"ToAddresses": ["recipient@example.com"]},
         Message={
             "Subject": {"Data": "Test Subject"},
-            "Body": {"Text": {"Data": "Hello from MiniStack SES"}},
+            "Body": {"Text": {"Data": "Hello from KumoStack SES"}},
         },
     )
     assert "MessageId" in resp
@@ -215,7 +215,7 @@ def test_ses_v2_send_email(sesv2):
             }
         },
     )
-    assert resp["MessageId"].startswith("ministack-")
+    assert resp["MessageId"].startswith("kumostack-")
 
 def test_ses_v2_email_identity_crud(sesv2):
     sesv2.create_email_identity(EmailIdentity="test-domain.com")
@@ -258,7 +258,7 @@ def _clear_smtp_host():
 @pytest.fixture(autouse=True)
 def _reset_ses():
     """Reset SES module state between tests."""
-    from ministack.services import ses
+    from kumostack.services import ses
     ses.reset()
 
 # ---------------------------------------------------------------------------
@@ -272,7 +272,7 @@ def _parse_mime(msg_str):
 
 
 def test_build_mime_text_only():
-    from ministack.services.ses import _build_mime_message
+    from kumostack.services.ses import _build_mime_message
     result = _build_mime_message(
         'from@test.com', ['to@test.com'], [], [],
         'Subject', 'body text', '', 'msg-001',
@@ -285,7 +285,7 @@ def test_build_mime_text_only():
 
 
 def test_build_mime_html_only():
-    from ministack.services.ses import _build_mime_message
+    from kumostack.services.ses import _build_mime_message
     result = _build_mime_message(
         'from@test.com', ['to@test.com'], [], [],
         'Subject', '', '<b>html</b>', 'msg-002',
@@ -295,7 +295,7 @@ def test_build_mime_html_only():
 
 
 def test_build_mime_multipart():
-    from ministack.services.ses import _build_mime_message
+    from kumostack.services.ses import _build_mime_message
     result = _build_mime_message(
         'from@test.com', ['to@test.com'], ['cc@test.com'], [],
         'Subject', 'text', '<b>html</b>', 'msg-003',
@@ -309,17 +309,17 @@ def test_build_mime_multipart():
 # ---------------------------------------------------------------------------
 
 def test_ses_smtp_relay_skipped_when_no_host():
-    from ministack.services.ses import _smtp_relay
-    with patch('ministack.services.ses.smtplib.SMTP') as mock_cls:
+    from kumostack.services.ses import _smtp_relay
+    with patch('kumostack.services.ses.smtplib.SMTP') as mock_cls:
         _smtp_relay('from@test.com', ['to@test.com'], 'message')
         mock_cls.assert_not_called()
 
 
 def test_ses_smtp_relay_sends_when_host_set():
     os.environ['SMTP_HOST'] = '127.0.0.1:1025'
-    from ministack.services.ses import _smtp_relay
+    from kumostack.services.ses import _smtp_relay
     mock_smtp = MagicMock()
-    with patch('ministack.services.ses.smtplib.SMTP', return_value=mock_smtp) as mock_cls:
+    with patch('kumostack.services.ses.smtplib.SMTP', return_value=mock_smtp) as mock_cls:
         mock_smtp.__enter__ = MagicMock(return_value=mock_smtp)
         mock_smtp.__exit__ = MagicMock(return_value=False)
         _smtp_relay('from@test.com', ['to@test.com'], 'message body')
@@ -331,8 +331,8 @@ def test_ses_smtp_relay_sends_when_host_set():
 
 def test_ses_smtp_relay_error_is_logged_not_raised():
     os.environ['SMTP_HOST'] = '127.0.0.1:1025'
-    from ministack.services.ses import _smtp_relay
-    with patch('ministack.services.ses.smtplib.SMTP', side_effect=ConnectionRefusedError):
+    from kumostack.services.ses import _smtp_relay
+    with patch('kumostack.services.ses.smtplib.SMTP', side_effect=ConnectionRefusedError):
         # Should not raise
         _smtp_relay('from@test.com', ['to@test.com'], 'message')
 
@@ -343,9 +343,9 @@ def test_ses_smtp_relay_error_is_logged_not_raised():
 
 def test_ses_smtp_relay_send_email(monkeypatch):
     monkeypatch.setenv('SMTP_HOST', '127.0.0.1:1025')
-    from ministack.services.ses import _send_email
+    from kumostack.services.ses import _send_email
     mock_smtp = MagicMock()
-    with patch('ministack.services.ses.smtplib.SMTP', return_value=mock_smtp):
+    with patch('kumostack.services.ses.smtplib.SMTP', return_value=mock_smtp):
         mock_smtp.__enter__ = MagicMock(return_value=mock_smtp)
         mock_smtp.__exit__ = MagicMock(return_value=False)
         params = {
@@ -368,8 +368,8 @@ def test_ses_smtp_relay_send_email(monkeypatch):
 
 
 def test_ses_smtp_relay_send_email_no_relay_without_host():
-    from ministack.services.ses import _send_email
-    with patch('ministack.services.ses.smtplib.SMTP') as mock_cls:
+    from kumostack.services.ses import _send_email
+    with patch('kumostack.services.ses.smtplib.SMTP') as mock_cls:
         params = {
             'Source': ['sender@example.com'],
             'Destination.ToAddresses.member.1': ['to@example.com'],
@@ -387,9 +387,9 @@ def test_ses_smtp_relay_send_email_no_relay_without_host():
 
 def test_ses_smtp_relay_send_raw_email(monkeypatch):
     monkeypatch.setenv('SMTP_HOST', 'localhost:2525')
-    from ministack.services.ses import _send_raw_email
+    from kumostack.services.ses import _send_raw_email
     mock_smtp = MagicMock()
-    with patch('ministack.services.ses.smtplib.SMTP', return_value=mock_smtp):
+    with patch('kumostack.services.ses.smtplib.SMTP', return_value=mock_smtp):
         mock_smtp.__enter__ = MagicMock(return_value=mock_smtp)
         mock_smtp.__exit__ = MagicMock(return_value=False)
         raw_msg = (
@@ -418,7 +418,7 @@ def test_ses_smtp_relay_send_raw_email(monkeypatch):
 
 def test_ses_smtp_relay_send_templated_email(monkeypatch):
     monkeypatch.setenv('SMTP_HOST', 'localhost:1025')
-    from ministack.services.ses import _send_templated_email, _templates
+    from kumostack.services.ses import _send_templated_email, _templates
     _templates['MyTemplate'] = {
         'TemplateName': 'MyTemplate',
         'SubjectPart': 'Hello {{name}}',
@@ -426,7 +426,7 @@ def test_ses_smtp_relay_send_templated_email(monkeypatch):
         'HtmlPart': '<b>Hi {{name}}</b>',
     }
     mock_smtp = MagicMock()
-    with patch('ministack.services.ses.smtplib.SMTP', return_value=mock_smtp):
+    with patch('kumostack.services.ses.smtplib.SMTP', return_value=mock_smtp):
         mock_smtp.__enter__ = MagicMock(return_value=mock_smtp)
         mock_smtp.__exit__ = MagicMock(return_value=False)
         params = {
@@ -442,14 +442,14 @@ def test_ses_smtp_relay_send_templated_email(monkeypatch):
         assert 'Hello World' in msg['Subject']
 
 # ---------------------------------------------------------------------------
-# Endpoint tests for the new /_ministack/ses/messages endpoint
+# Endpoint tests for the new /_kumostack/ses/messages endpoint
 # Verifies acceptance criteria from issue #415:
 # - v1 SES: SendEmail, SendRawEmail, SendTemplatedEmail, SendBulkTemplatedEmail
 # - v2 SES: SendEmail via sesv2 client
 # ---------------------------------------------------------------------------
 
 def test_ses_messages_endpoint_all_v1_send_types(ses):
-    """GET /_ministack/ses/messages shows all v1 send operations."""
+    """GET /_kumostack/ses/messages shows all v1 send operations."""
     import urllib.request
     
     # Prepare template for SendTemplatedEmail and SendBulkTemplatedEmail
@@ -466,12 +466,12 @@ def test_ses_messages_endpoint_all_v1_send_types(ses):
         Destination={"ToAddresses": ["recipient@example.com"]},
         Message={
             "Subject": {"Data": "Test v1 subject"},
-            "Body": {"Text": {"Data": "Hello from MiniStack SES v1"}},
+            "Body": {"Text": {"Data": "Hello from KumoStack SES v1"}},
         },
     )
     
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    url = f"{endpoint}/_ministack/ses/messages"
+    url = f"{endpoint}/_kumostack/ses/messages"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
         data = json.loads(r.read().decode())
@@ -534,7 +534,7 @@ def test_ses_messages_endpoint_all_v1_send_types(ses):
     assert len(bulk_emails) >= 2, f"Expected SendBulkTemplatedEmail (>=2), got {[m['Type'] for m in data['messages']['000000000000']]}"
 
 def test_ses_messages_endpoint_v2(sesv2):
-    """GET /_ministack/ses/messages shows v2 SendEmail via sesv2 client."""
+    """GET /_kumostack/ses/messages shows v2 SendEmail via sesv2 client."""
     import urllib.request
     
     sesv2.send_email(
@@ -543,13 +543,13 @@ def test_ses_messages_endpoint_v2(sesv2):
         Content={
             "Simple": {
                 "Subject": {"Data": "Test v2 subject"},
-                "Body": {"Text": {"Data": "Hello from MiniStack SES v2"}},
+                "Body": {"Text": {"Data": "Hello from KumoStack SES v2"}},
             }
         },
     )
     
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    url = f"{endpoint}/_ministack/ses/messages"
+    url = f"{endpoint}/_kumostack/ses/messages"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
         data = json.loads(r.read().decode())
@@ -560,7 +560,7 @@ def test_ses_messages_endpoint_v2(sesv2):
     assert v2_emails[0]["Subject"] == "Test v2 subject"
 
 def test_ses_messages_endpoint_reset(ses):
-    """ Calling POST /_ministack/reset clears stored SES messages. """
+    """ Calling POST /_kumostack/reset clears stored SES messages. """
     ses.verify_email_identity(EmailAddress="from@example.com")
     ses.send_email(                                                                                                                                                 
         Source="from@example.com",
@@ -571,14 +571,14 @@ def test_ses_messages_endpoint_reset(ses):
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
 
     urllib.request.urlopen(                                                                                                                                         
-        urllib.request.Request(f"{endpoint}/_ministack/reset", method="POST")                                                                                       
+        urllib.request.Request(f"{endpoint}/_kumostack/reset", method="POST")                                                                                       
     )                                  
-    with urllib.request.urlopen(f"{endpoint}/_ministack/ses/messages") as r:                                                                                        
+    with urllib.request.urlopen(f"{endpoint}/_kumostack/ses/messages") as r:                                                                                        
         data = json.loads(r.read())                                                                                                                                 
     assert data == {"messages": {}}
 
 # ---------------------------------------------------------------------------
-# Account filtering test for /_ministack/ses/messages endpoint
+# Account filtering test for /_kumostack/ses/messages endpoint
 #
 # Verifies that the ?account query parameter properly validates and filters emails.
 # Invalid non-12-digit accounts now return a 400 InvalidAccountID error.
@@ -599,12 +599,12 @@ def _client(service, access_key="test"):
     )
 
 def test_ses_messages_endpoint_account_filter():
-    """GET /_ministack/ses/messages?account=X filters by account ID."""
+    """GET /_kumostack/ses/messages?account=X filters by account ID."""
     import urllib.request
 
     # Clear any existing messages on the running server
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    urllib.request.urlopen(urllib.request.Request(f"{endpoint}/_ministack/reset", method="POST"))
+    urllib.request.urlopen(urllib.request.Request(f"{endpoint}/_kumostack/reset", method="POST"))
 
     # Account 1 and Account 2
     ACCOUNT_1 = "011111111111"
@@ -636,7 +636,7 @@ def test_ses_messages_endpoint_account_filter():
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
 
     # Test 1: Without ?account: returns all emails
-    url = f"{endpoint}/_ministack/ses/messages"
+    url = f"{endpoint}/_kumostack/ses/messages"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
         data = json.loads(r.read().decode())
@@ -646,7 +646,7 @@ def test_ses_messages_endpoint_account_filter():
     assert total == 3, f"Expected 3 messages across all accounts, got {total}"
 
     # Test 2: With invalid non-12-digit account should return error
-    url = f"{endpoint}/_ministack/ses/messages?account=notvalid"
+    url = f"{endpoint}/_kumostack/ses/messages?account=notvalid"
     req = urllib.request.Request(url, method="GET")
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(req, timeout=5)
@@ -657,7 +657,7 @@ def test_ses_messages_endpoint_account_filter():
     assert "got: notvalid" in error_data["message"]
 
     # Test 3: With correct valid custom account (ACCOUNT_1)
-    url = f"{endpoint}/_ministack/ses/messages?account={ACCOUNT_1}"
+    url = f"{endpoint}/_kumostack/ses/messages?account={ACCOUNT_1}"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
         data = json.loads(r.read().decode())
@@ -667,7 +667,7 @@ def test_ses_messages_endpoint_account_filter():
     assert len(messages_for_a1) == 2, f"Expected 2 messages from ACCOUNT_1, got {len(messages_for_a1)}"
 
     # Test 4: With correct valid custom account (ACCOUNT_2)
-    url = f"{endpoint}/_ministack/ses/messages?account={ACCOUNT_2}"
+    url = f"{endpoint}/_kumostack/ses/messages?account={ACCOUNT_2}"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
         data = json.loads(r.read().decode())
@@ -677,7 +677,7 @@ def test_ses_messages_endpoint_account_filter():
     assert len(messages_for_a2) == 1, f"Expected 1 message from ACCOUNT_2, got {len(messages_for_a2)}"
 
     # Test 5: Empty messages for correct account with no emails sent
-    url = f"{endpoint}/_ministack/ses/messages?account=123456789012"
+    url = f"{endpoint}/_kumostack/ses/messages?account=123456789012"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
         data = json.loads(r.read().decode())

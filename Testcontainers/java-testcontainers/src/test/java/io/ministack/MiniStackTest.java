@@ -1,4 +1,4 @@
-package io.ministack;
+package io.kumostack;
 
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.GenericContainer;
@@ -28,16 +28,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class MiniStackTest {
+class KumoStackTest {
 
     @Container
-    static final GenericContainer<?> ministack = new GenericContainer<>(
-            DockerImageName.parse("ministackorg/ministack:latest"))
+    static final GenericContainer<?> kumostack = new GenericContainer<>(
+            DockerImageName.parse("kumostackorg/kumostack:latest"))
             .withExposedPorts(4566)
             .withEnv("GATEWAY_PORT", "4566")
             .withEnv("LOG_LEVEL", "INFO")
             .waitingFor(new HttpWaitStrategy()
-                    .forPath("/_ministack/health")
+                    .forPath("/_kumostack/health")
                     .forPort(4566)
                     .withStartupTimeout(Duration.ofSeconds(60)));
 
@@ -46,7 +46,7 @@ class MiniStackTest {
 
     @BeforeAll
     static void setup() {
-        endpoint = URI.create("http://" + ministack.getHost() + ":" + ministack.getMappedPort(4566));
+        endpoint = URI.create("http://" + kumostack.getHost() + ":" + kumostack.getMappedPort(4566));
         credentials = StaticCredentialsProvider.create(
                 AwsBasicCredentials.create("test", "test"));
     }
@@ -89,13 +89,13 @@ class MiniStackTest {
 
             client.putObject(
                     PutObjectRequest.builder().bucket("test-bucket").key("hello.txt").build(),
-                    RequestBody.fromString("Hello MiniStack!"));
+                    RequestBody.fromString("Hello KumoStack!"));
 
             String body = client.getObjectAsBytes(
                     GetObjectRequest.builder().bucket("test-bucket").key("hello.txt").build()
             ).asUtf8String();
 
-            assertEquals("Hello MiniStack!", body);
+            assertEquals("Hello KumoStack!", body);
         }
     }
 

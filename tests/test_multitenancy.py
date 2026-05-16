@@ -1,7 +1,7 @@
 """
 Tests for multi-tenancy: dynamic Account ID derived from AWS_ACCESS_KEY_ID.
 
-When the access key is a 12-digit number, MiniStack uses it as the Account ID
+When the access key is a 12-digit number, KumoStack uses it as the Account ID
 in all ARN generation. Non-numeric keys (like "test") fall back to the default
 000000000000.
 """

@@ -1,8 +1,8 @@
 # Vector.dev Log Archiving
 
-Build a 3-tier log pipeline: live logs in Loki, warm archives in Ministack S3, cold archives in Garage.
+Build a 3-tier log pipeline: live logs in Loki, warm archives in KumoStack S3, cold archives in Garage.
 
-**Stack:** Vector → Loki (live, 30d) → Ministack S3 (hot, 30d) → Garage (cold, 365d)
+**Stack:** Vector → Loki (live, 30d) → KumoStack S3 (hot, 30d) → Garage (cold, 365d)
 
 ---
 
@@ -14,7 +14,7 @@ Docker containers
       ▼
   Vector.dev  ──► Loki (live queries, 30d retention)
       │
-      ├──► Ministack S3  (hot archive, 30d lifecycle rule)
+      ├──► KumoStack S3  (hot archive, 30d lifecycle rule)
       │
       └──► Garage S3     (cold archive, 365d / 730d for RDS)
 ```
@@ -32,7 +32,7 @@ Vector config lives at `vector/vector.toml`. The pipeline has three stages:
 ```toml
 [sources.docker_logs]
 type = "docker_logs"
-exclude_containers = ["ministack-vector"]
+exclude_containers = ["kumostack-vector"]
 ```
 
 Reads stdout/stderr from every running container except itself.
@@ -100,15 +100,15 @@ environment = "{{ environment }}"
 container   = "{{ container_name }}"
 ```
 
-**Ministack S3 — hot archive**
+**KumoStack S3 — hot archive**
 
 ```toml
 [sinks.s3_archive]
 type   = "aws_s3"
 inputs = ["aws_enrich"]
-bucket = "ministack-logs"
+bucket = "kumostack-logs"
 region = "us-east-1"
-endpoint = "http://ministack:4566"
+endpoint = "http://kumostack:4566"
 
 [sinks.s3_archive.auth]
 access_key_id     = "test"
@@ -161,13 +161,13 @@ Query logs at `http://localhost:3002` → **Explore** → Loki datasource.
 
 ---
 
-## Ministack S3 lifecycle
+## KumoStack S3 lifecycle
 
 Set a 30-day expiry so logs auto-delete from the hot tier:
 
 ```bash
 awslocal s3api put-bucket-lifecycle-configuration \
-  --bucket ministack-logs \
+  --bucket kumostack-logs \
   --lifecycle-configuration '{
     "Rules": [{
       "ID": "expire-logs-30d",
@@ -186,7 +186,7 @@ Garage is a self-hosted S3-compatible object store. It starts automatically with
 
 ```bash
 # Check cluster status
-docker exec ministack-garage garage status
+docker exec kumostack-garage garage status
 
 # List cold-archive objects
 awslocal s3 ls s3://logs-cold-archive/ \
@@ -203,8 +203,8 @@ Access key and secret are pre-configured in `docker-compose.yml`.
 Open `http://localhost:3002` → **Explore** and query Loki:
 
 ```logql
-# All logs from the ministack container
-{container="ministack"}
+# All logs from the kumostack container
+{container="kumostack"}
 
 # Error logs across all services
 {level="error"}
@@ -216,4 +216,4 @@ Open `http://localhost:3002` → **Explore** and query Loki:
 Pre-built dashboards:
 
 - **Log Archiving — Vector + Loki + S3 + Garage** — pipeline health, error rates, archive throughput
-- **Ministack — Container Monitoring** → Logs tab (per-container log streams)
+- **KumoStack — Container Monitoring** → Logs tab (per-container log streams)

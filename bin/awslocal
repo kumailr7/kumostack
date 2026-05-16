@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# awslocal — Wrapper around AWS CLI that points to local MiniStack endpoint.
+# awslocal — Wrapper around AWS CLI that points to local KumoStack endpoint.
 # After resource-creating commands succeed, prompts to add metrics to Grafana.
 #
 # Usage:
@@ -11,7 +11,7 @@
 #   awslocal elasticache create-cache-cluster --cache-cluster-id my-cluster
 #
 # Environment variables:
-#   MINISTACK_ENDPOINT     Ministack URL         (default: http://localhost:4566)
+#   MINISTACK_ENDPOINT     KumoStack URL         (default: http://localhost:4566)
 #   AWSLOCAL_NO_TUI        Set to 1 to skip TUI  (default: 0)
 #   AWSLOCAL_AUTO_GRAFANA  Set to 1 to auto-add  (default: 0)
 

@@ -337,7 +337,7 @@ ENDPOINT_HOST = os.environ.get("MINISTACK_HOST", "127.0.0.1")
 SFTP_PORT = int(os.environ.get("SFTP_PORT", "2222"))
 
 # Honour MINISTACK_ENDPOINT (e.g. http://localhost:14566) so the same test
-# file works against a locally-built MiniStack on port 4566 *and* against a
+# file works against a locally-built KumoStack on port 4566 *and* against a
 # preview Docker image bound to a different host port.
 _endpoint = os.environ.get("MINISTACK_ENDPOINT", f"http://{ENDPOINT_HOST}:4566")
 ADMIN_BASE = _endpoint.rstrip("/")
@@ -383,7 +383,7 @@ def _sftp_listening() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _sftp_listening(),
-    reason=f"SFTP listener not reachable at {ENDPOINT_HOST}:{SFTP_PORT} — start MiniStack first",
+    reason=f"SFTP listener not reachable at {ENDPOINT_HOST}:{SFTP_PORT} — start KumoStack first",
 )
 
 
@@ -730,12 +730,12 @@ def test_sftp_key_disambiguates_overlapping_usernames(transfer, s3):
 
 
 def _sftp_port_state():
-    """Hit /_ministack/transfer/sftp-ports — returns the JSON dict, or None
+    """Hit /_kumostack/transfer/sftp-ports — returns the JSON dict, or None
     on any failure (used to skip per-server-mode tests cleanly)."""
     import json as _json
     try:
         with urllib.request.urlopen(
-            f"{ADMIN_BASE}/_ministack/transfer/sftp-ports", timeout=2
+            f"{ADMIN_BASE}/_kumostack/transfer/sftp-ports", timeout=2
         ) as resp:
             return _json.loads(resp.read())
     except Exception:
@@ -744,7 +744,7 @@ def _sftp_port_state():
 
 @pytest.mark.skipif(
     not (_sftp_port_state() or {}).get("port_per_server"),
-    reason="MiniStack server not started with SFTP_PORT_PER_SERVER=1",
+    reason="KumoStack server not started with SFTP_PORT_PER_SERVER=1",
 )
 def test_sftp_port_per_server_mode(transfer, s3):
     """In per-server mode, the admin endpoint surfaces a unique port for

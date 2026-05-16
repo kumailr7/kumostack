@@ -61,7 +61,7 @@ def _start_echo_server():
 
 
 def _make_signed_token(claims: dict) -> str:
-    from ministack.services import cognito as _cognito
+    from kumostack.services import cognito as _cognito
 
     if _cognito._RSA_PRIVATE_KEY is None:
         pytest.skip("cryptography-backed Cognito signing key unavailable")
@@ -69,7 +69,7 @@ def _make_signed_token(claims: dict) -> str:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
-    header = {"alg": "RS256", "kid": "ministack-key-1"}
+    header = {"alg": "RS256", "kid": "kumostack-key-1"}
     h = base64.urlsafe_b64encode(json.dumps(header).encode()).rstrip(b"=").decode()
     p = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
     signed = f"{h}.{p}".encode()
@@ -844,7 +844,7 @@ def test_apigw_jwt_authorizer_enforced_in_data_plane(apigw):
     import urllib.error as _urlerr
     import urllib.request as _urlreq
 
-    from ministack.services import cognito as _cognito
+    from kumostack.services import cognito as _cognito
 
     api_id = apigw.create_api(Name=f"jwt-enforce-{_uuid_mod.uuid4().hex[:8]}", ProtocolType="HTTP")["ApiId"]
     server, _thread, _captured = _start_echo_server()
@@ -958,8 +958,8 @@ def test_apigw_request_mapping_claims_to_headers(apigw):
 def test_apigw_http_proxy_does_not_block_parallel_ddb(monkeypatch):
     import asyncio
 
-    from ministack.services import apigateway as apigw_mod
-    from ministack.services import dynamodb as ddb_mod
+    from kumostack.services import apigateway as apigw_mod
+    from kumostack.services import dynamodb as ddb_mod
 
     def _slow_urlopen(_request_or_url, _timeout_seconds):
         time.sleep(0.4)
@@ -999,7 +999,7 @@ def test_apigw_http_proxy_does_not_block_parallel_ddb(monkeypatch):
 def test_apigw_http_proxy_timeout_is_configurable(monkeypatch):
     """`_timeout_from_env` honours both apigateway timeout env vars.
     Tested directly to avoid importlib.reload churn on session-scoped module state."""
-    from ministack.services.apigateway import _timeout_from_env
+    from kumostack.services.apigateway import _timeout_from_env
 
     monkeypatch.setenv("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", "41")
     monkeypatch.setenv("MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS", "9")
@@ -1329,7 +1329,7 @@ def _make_fn(lam, name: str, code: str) -> str:
         lam.invoke(
             FunctionName=name,
             InvocationType="RequestResponse",
-            Payload=b'{"_ministack_warmup": true}',
+            Payload=b'{"_kumostack_warmup": true}',
         )
     except Exception:
         pass
@@ -1513,7 +1513,7 @@ def test_ws_get_connection_returns_metadata(apigw, lam):
         )
         r = urllib.request.urlopen(req, timeout=30)
         meta = json.loads(r.read())
-        # Int epoch seconds, per ministack JSON timestamp convention.
+        # Int epoch seconds, per kumostack JSON timestamp convention.
         assert isinstance(meta["ConnectedAt"], int)
         assert isinstance(meta["LastActiveAt"], int)
         assert meta["Identity"]["sourceIp"]
@@ -1781,7 +1781,7 @@ def test_apigwv2_custom_id_via_ms_custom_id_tag(apigw):
 
 def test_apigwv2_custom_id_rejects_ls_custom_id(apigw):
     """ls-custom-id (LocalStack's tag) is not supported. Callers get a clear
-    BadRequestException pointing them at the ministack-native 'ms-custom-id'."""
+    BadRequestException pointing them at the kumostack-native 'ms-custom-id'."""
     with pytest.raises(ClientError) as exc_info:
         apigw.create_api(
             Name="ls-reject-test", ProtocolType="HTTP",
@@ -2051,8 +2051,8 @@ def test_apigwv2_integration_wrapped_alias_arn(apigw, lam):
 def test_apigwv2_extract_lambda_ref_matrix():
     """Unit-level table test for every integrationUri shape we've seen in the
     wild. Lock the parser so #409-class bugs can't recur silently (#407, #409)."""
-    from ministack.services.apigateway import _extract_lambda_ref_from_integration_uri as unwrap
-    from ministack.services.lambda_svc import _resolve_name_and_qualifier as parse
+    from kumostack.services.apigateway import _extract_lambda_ref_from_integration_uri as unwrap
+    from kumostack.services.lambda_svc import _resolve_name_and_qualifier as parse
 
     cases = [
         # wrapped (Terraform invoke_arn)
@@ -2238,7 +2238,7 @@ import importlib as _importlib_get_state
 
 @pytest.mark.parametrize("mod_name", ["apigateway", "apigateway_v1"])
 def test_apigateway_get_state_returns_independent_copy(mod_name):
-    mod = _importlib_get_state.import_module(f"ministack.services.{mod_name}")
+    mod = _importlib_get_state.import_module(f"kumostack.services.{mod_name}")
     if hasattr(mod, "reset"):
         mod.reset()
 

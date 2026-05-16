@@ -1,6 +1,6 @@
 import * as http from "http";
 
-const CONTAINER = process.env.MINISTACK_CONTAINER ?? "ministack";
+const CONTAINER = process.env.MINISTACK_CONTAINER ?? "kumostack";
 const SOCKET    = "/var/run/docker.sock";
 const TAIL      = 300;
 
