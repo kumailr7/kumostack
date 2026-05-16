@@ -358,7 +358,7 @@ def test_kinesis_cbor_put_record(kin):
 
     import cbor2
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
     kin.create_stream(StreamName="cbor-test-stream", ShardCount=1)
 

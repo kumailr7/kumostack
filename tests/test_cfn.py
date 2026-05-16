@@ -2264,11 +2264,11 @@ def test_cfn_eventbus_default_name_fails(cfn, eb):
 
 def test_cfn_aws_region_pseudo_param_uses_caller_region():
     """CFN's AWS::Region pseudo-param must resolve to the caller's request region,
-    not MINISTACK_REGION (issue #398 — CDK bootstrap resources inheriting wrong region)."""
+    not KUMOSTACK_REGION (issue #398 — CDK bootstrap resources inheriting wrong region)."""
     import boto3
     from botocore.config import Config
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
     # Caller explicitly uses us-east-2 via SigV4 Credential scope.
     def _client(svc: str):
@@ -2734,7 +2734,7 @@ def test_cfn_apigwv2_full_http_api_stack_invokes_lambda(cfn, apigw, lam):
     """
     import urllib.request as _urlreq
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     execute_port = urlparse(endpoint).port or 4566
 
     fname = f"cfn-e2e-fn-{_uuid_mod.uuid4().hex[:8]}"

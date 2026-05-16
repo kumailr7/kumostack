@@ -12,8 +12,8 @@ import pytest
 import requests
 from botocore.exceptions import ClientError
 
-ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
+ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
+REGION = os.environ.get("KUMOSTACK_REGION", "us-east-1")
 
 
 def test_ecr_create_repository(ecr):

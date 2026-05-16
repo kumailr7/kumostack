@@ -2855,7 +2855,7 @@ def test_auth_codes_dict_types_are_plain_builtin_dict():
 
 def _fetch_ses_messages():
     """Pull SES outbox via the public inspection endpoint (account 000000000000)."""
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     url = f"{endpoint}/_kumostack/ses/messages"
     with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=5) as r:
         data = json.loads(r.read().decode())

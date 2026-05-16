@@ -12,7 +12,7 @@ import boto3
 import pytest
 from botocore.config import Config
 
-ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 ENDPOINT_HOST = urlparse(ENDPOINT).hostname
 REGION = "us-east-1"
 
@@ -32,7 +32,7 @@ _default_config_kwargs = dict(
 
 @contextlib.contextmanager
 def patch_endpoint_dns():
-    """Make *.MINISTACK_ENDPOINT subdomains resolve to 127.0.0.1 for virtual-hosted S3 testing."""
+    """Make *.KUMOSTACK_ENDPOINT subdomains resolve to 127.0.0.1 for virtual-hosted S3 testing."""
     _real_getaddrinfo = socket.getaddrinfo
 
     def _patched(host, port, *args, **kwargs):

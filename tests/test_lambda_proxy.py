@@ -1,6 +1,6 @@
 """BYO-container Lambda proxy: forward Invoke to a user-managed HTTP server.
 
-The proxy URL is configured per-function via Environment.Variables.MINISTACK_LAMBDA_PROXY_URL,
+The proxy URL is configured per-function via Environment.Variables.KUMOSTACK_LAMBDA_PROXY_URL,
 which means tests don't need to restart the server — they create a function with
 the proxy URL in its environment and invoke it.
 """
@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import boto3
 import pytest
 
-_endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
 
 def _make_zip(code: str = "def handler(event,context):\n    return event\n") -> bytes:
@@ -78,7 +78,7 @@ def _make_client():
 
 
 def _create_proxy_function(client, name: str, url: str | None):
-    env = {"Variables": {"MINISTACK_LAMBDA_PROXY_URL": url}} if url else None
+    env = {"Variables": {"KUMOSTACK_LAMBDA_PROXY_URL": url}} if url else None
     kwargs = dict(
         FunctionName=name,
         Runtime="python3.12",

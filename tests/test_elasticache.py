@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
-ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
 
 def test_elasticache_create(ec):

@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
-_ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 _PORT = urlparse(_ENDPOINT).port or 4566
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -920,7 +920,7 @@ from kumostack.core.responses import set_request_region
 def test_default_dns_localhost_with_region(monkeypatch):
     monkeypatch.delenv("APPSYNC_EVENTS_HTTP_HOST_TEMPLATE", raising=False)
     monkeypatch.delenv("APPSYNC_EVENTS_REALTIME_HOST_TEMPLATE", raising=False)
-    monkeypatch.setenv("MINISTACK_HOST", "localhost")
+    monkeypatch.setenv("KUMOSTACK_HOST", "localhost")
     monkeypatch.setenv("GATEWAY_PORT", "4566")
     set_request_region("us-east-1")
 

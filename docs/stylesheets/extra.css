@@ -1,7 +1,6 @@
 /* ================================================================
-   MINISTACK UPGRADED — Design System
-   Inspired by BMW M: black canvas · heavy/light weight pair
-   M tricolor stripe as brand accent · zero border radius
+   KumoStack — Design System
+   Black canvas · Persian Blue accent (#1C3F94)
    ================================================================ */
 
 /* ── Variables ─────────────────────────────────────────────────── */
@@ -19,13 +18,13 @@
   --ms-body-strong:      #e6e6e6;
   --ms-muted:            #7e7e7e;
 
-  --ms-m-blue:           #0066b1;
-  --ms-m-blue-mid:       #1c69d4;
-  --ms-m-red:            #e22718;
+  --ms-m-blue:           #1C3F94;
+  --ms-m-blue-mid:       #2952C4;
+  --ms-m-red:            #1C3F94;
   --ms-stripe: linear-gradient(90deg,
     var(--ms-m-blue) 0%,
     var(--ms-m-blue-mid) 50%,
-    var(--ms-m-red) 100%
+    var(--ms-m-blue) 100%
   );
 }
 
@@ -44,7 +43,7 @@
   --md-primary-bg-color--light:       rgba(255,255,255,.6);
 
   --md-accent-fg-color:               var(--ms-m-blue-mid);
-  --md-accent-fg-color--transparent:  rgba(28,105,212,.12);
+  --md-accent-fg-color--transparent:  rgba(28,63,148,.12);
   --md-accent-bg-color:               var(--ms-on-dark);
 
   --md-code-bg-color:                 var(--ms-surface-card);
@@ -52,7 +51,7 @@
 
   --md-typeset-color:                 var(--ms-body);
   --md-typeset-a-color:               var(--ms-m-blue-mid);
-  --md-typeset-mark-color:            rgba(28,105,212,.25);
+  --md-typeset-mark-color:            rgba(28,63,148,.25);
   --md-typeset-kbd-color:             var(--ms-surface-card);
   --md-typeset-kbd-accent-color:      var(--ms-surface-elevated);
   --md-typeset-kbd-border-color:      var(--ms-hairline);
@@ -566,7 +565,7 @@ body {
 
 /* ── Selection ──────────────────────────────────────────────────── */
 ::selection {
-  background: rgba(28, 105, 212, 0.3);
+  background: rgba(28, 63, 148, 0.3);
   color: var(--ms-on-dark);
 }
 

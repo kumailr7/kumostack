@@ -12,7 +12,7 @@ import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-_endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
 _EXECUTE_PORT = urlparse(_endpoint).port or 4566
 
@@ -977,7 +977,7 @@ def test_lambda_unknown_path_returns_404(lam):
     import urllib.error
     import urllib.request
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
         f"{endpoint}/2015-03-31/functions/nonexistent-fn/completely-unknown-subpath",
         headers={"Authorization": "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/lambda/aws4_request"},
@@ -1007,7 +1007,7 @@ def test_lambda_reset_terminates_workers(lam):
     boot1 = json.loads(r1["Payload"].read())["boot"]
 
     # Reset — must terminate worker without error
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(f"{endpoint}/_kumostack/reset", data=b"", method="POST")
     for _attempt in range(3):
         try:
@@ -3080,7 +3080,7 @@ def test_lambda_filesystem_configs_s3_mount_round_trip(lam):
 # the function ARN), NOT the host process's AWS_ACCESS_KEY_ID.
 # ============================================================================
 
-_ACCOUNT_CONTEXT_ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_ACCOUNT_CONTEXT_ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 _ACCOUNT_CONTEXT_REGION = "us-east-1"
 
 

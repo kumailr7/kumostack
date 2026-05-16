@@ -32,7 +32,7 @@ except ImportError:
     print("ERROR: pip install rich", file=sys.stderr)
     sys.exit(1)
 
-ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 REGION   = os.environ.get("AWS_DEFAULT_REGION",  "us-east-1")
 
 console = Console()

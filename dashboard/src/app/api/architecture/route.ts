@@ -16,7 +16,7 @@ import { WAFV2Client, ListWebACLsCommand, ListResourcesForWebACLCommand } from "
 import { ECRClient, DescribeRepositoriesCommand } from "@aws-sdk/client-ecr";
 import { SecretsManagerClient, ListSecretsCommand } from "@aws-sdk/client-secrets-manager";
 
-const ENDPOINT = process.env.MINISTACK_ENDPOINT || "http://localhost:4566";
+const ENDPOINT = process.env.KUMOSTACK_ENDPOINT || "http://localhost:4566";
 const REGION = process.env.AWS_REGION || "us-east-1";
 
 const baseConfig = {

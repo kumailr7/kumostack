@@ -88,7 +88,7 @@ def test_tls_use_ssl_with_byo_cert(tmp_path):
     cert, key = _byo_cert(tmp_path)
     port = _free_port()
     proc = _spawn(
-        {"USE_SSL": "1", "MINISTACK_SSL_CERT": cert, "MINISTACK_SSL_KEY": key},
+        {"USE_SSL": "1", "KUMOSTACK_SSL_CERT": cert, "KUMOSTACK_SSL_KEY": key},
         port,
     )
     try:
@@ -112,7 +112,7 @@ def test_tls_use_ssl_accepts_true_value(tmp_path):
     cert, key = _byo_cert(tmp_path)
     port = _free_port()
     proc = _spawn(
-        {"USE_SSL": "true", "MINISTACK_SSL_CERT": cert, "MINISTACK_SSL_KEY": key},
+        {"USE_SSL": "true", "KUMOSTACK_SSL_CERT": cert, "KUMOSTACK_SSL_KEY": key},
         port,
     )
     try:
@@ -134,9 +134,9 @@ def test_tls_disabled_by_default_serves_http():
 
 @pytest.mark.serial
 def test_tls_partial_cert_config_rejected():
-    """Setting only one of MINISTACK_SSL_CERT / KEY must error out fast."""
+    """Setting only one of KUMOSTACK_SSL_CERT / KEY must error out fast."""
     port = _free_port()
-    proc = _spawn({"USE_SSL": "1", "MINISTACK_SSL_CERT": "/nonexistent.crt"}, port)
+    proc = _spawn({"USE_SSL": "1", "KUMOSTACK_SSL_CERT": "/nonexistent.crt"}, port)
     try:
         rc = proc.wait(timeout=10)
     except subprocess.TimeoutExpired:

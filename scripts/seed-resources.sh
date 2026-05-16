@@ -8,11 +8,11 @@
 #
 # Usage:
 #   ./scripts/seed-resources.sh                   # targets localhost:4566
-#   MINISTACK_ENDPOINT=http://... ./scripts/seed-resources.sh
+#   KUMOSTACK_ENDPOINT=http://... ./scripts/seed-resources.sh
 
 set -euo pipefail
 
-EP="${MINISTACK_ENDPOINT:-http://localhost:4566}"
+EP="${KUMOSTACK_ENDPOINT:-http://localhost:4566}"
 REGION="us-east-1"
 
 export AWS_ACCESS_KEY_ID=test

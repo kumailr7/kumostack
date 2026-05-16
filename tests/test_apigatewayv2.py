@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
-_endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
 _EXECUTE_PORT = urlparse(_endpoint).port or 4566
 
@@ -1001,10 +1001,10 @@ def test_apigw_http_proxy_timeout_is_configurable(monkeypatch):
     Tested directly to avoid importlib.reload churn on session-scoped module state."""
     from kumostack.services.apigateway import _timeout_from_env
 
-    monkeypatch.setenv("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", "41")
-    monkeypatch.setenv("MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS", "9")
-    assert _timeout_from_env("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 41.0
-    assert _timeout_from_env("MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS", 5.0) == 9.0
+    monkeypatch.setenv("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", "41")
+    monkeypatch.setenv("KUMOSTACK_APIGW_JWKS_TIMEOUT_SECONDS", "9")
+    assert _timeout_from_env("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 41.0
+    assert _timeout_from_env("KUMOSTACK_APIGW_JWKS_TIMEOUT_SECONDS", 5.0) == 9.0
 
 
 def test_apigw_routekey_in_lambda_event(apigw, lam):

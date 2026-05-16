@@ -12,7 +12,7 @@ import boto3
 import pytest
 from botocore.config import Config
 
-ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 REGION = "us-east-1"
 
 

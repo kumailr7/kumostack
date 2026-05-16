@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
-_endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
 _EXECUTE_PORT = urlparse(_endpoint).port or 4566
 
@@ -82,7 +82,7 @@ def test_apigwv1_rest_api_policy_terraform_roundtrip(apigw_v1):
         # What the AWS SDK v2 deserializer hands to the Terraform provider
         # is the outer-JSON-decoded string. Fetch it raw (bypass botocore
         # which may further manipulate the field).
-        endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+        endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
         with urllib.request.urlopen(f"{endpoint}/restapis/{api_id}") as r:
             body = json.loads(r.read().decode())
         sdk_decoded_policy = body["policy"]
@@ -839,12 +839,12 @@ def test_apigwv1_http_proxy_timeout_is_configurable(monkeypatch):
     apigateway_v1 module state is not rebuilt mid-run."""
     from kumostack.services.apigateway import _timeout_from_env
 
-    monkeypatch.setenv("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", "55")
-    assert _timeout_from_env("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 55.0
-    monkeypatch.setenv("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", "not-a-number")
-    assert _timeout_from_env("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 30.0
-    monkeypatch.setenv("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", "0")
-    assert _timeout_from_env("MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 30.0
+    monkeypatch.setenv("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", "55")
+    assert _timeout_from_env("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 55.0
+    monkeypatch.setenv("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", "not-a-number")
+    assert _timeout_from_env("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 30.0
+    monkeypatch.setenv("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", "0")
+    assert _timeout_from_env("KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS", 30.0) == 30.0
 
 
 def test_apigwv1_no_conflict_with_v2(apigw_v1, apigw, lam):

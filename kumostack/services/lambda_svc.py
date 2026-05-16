@@ -97,15 +97,16 @@ LAMBDA_STRICT = os.environ.get("LAMBDA_STRICT", "0").lower() in ("1", "true", "y
 # kumostack's image with per-language runtimes.
 #
 # Configured per-function via the standard CreateFunction API by setting
-# Environment.Variables.MINISTACK_LAMBDA_PROXY_URL, or globally per name via
-# the env var MINISTACK_LAMBDA_PROXY_<func_name>.
-_PROXY_ENV_VAR = "MINISTACK_LAMBDA_PROXY_URL"
+# Environment.Variables.KUMOSTACK_LAMBDA_PROXY_URL (or legacy MINISTACK_LAMBDA_PROXY_URL),
+# or globally per name via the env var KUMOSTACK_LAMBDA_PROXY_<func_name>.
+_PROXY_ENV_VAR = "KUMOSTACK_LAMBDA_PROXY_URL"
+_PROXY_ENV_VAR_LEGACY = "MINISTACK_LAMBDA_PROXY_URL"
 _PROXY_PREFIX = "MINISTACK_LAMBDA_PROXY_"
 
 
 def _proxy_url_for(config: dict) -> str | None:
     env = (config.get("Environment") or {}).get("Variables") or {}
-    url = env.get(_PROXY_ENV_VAR)
+    url = env.get(_PROXY_ENV_VAR) or env.get(_PROXY_ENV_VAR_LEGACY)
     if url:
         return url
     name = config.get("FunctionName") or ""

@@ -446,7 +446,7 @@ def test_synthetic_pem_body_is_valid_base64():
 
 import urllib.request as _acm_urlreq
 
-_ACM_ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_ACM_ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
 
 def test_acm_list_certificates_omits_nexttoken_when_no_more_pages():

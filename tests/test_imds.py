@@ -4,7 +4,7 @@ import os
 import pytest
 import requests
 
-ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
 
 def test_imds_v1_role_listing():
@@ -60,8 +60,8 @@ def test_imds_token_endpoint_rejects_get():
 
 
 def test_imds_v2_required_blocks_tokenless():
-    """When MINISTACK_IMDS_V2_REQUIRED=1 the server rejects token-less GETs."""
-    pytest.skip("requires server restart with MINISTACK_IMDS_V2_REQUIRED=1; covered manually")
+    """When KUMOSTACK_IMDS_V2_REQUIRED=1 the server rejects token-less GETs."""
+    pytest.skip("requires server restart with KUMOSTACK_IMDS_V2_REQUIRED=1; covered manually")
 
 
 def test_imds_placement_region():

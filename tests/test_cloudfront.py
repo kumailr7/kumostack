@@ -493,7 +493,7 @@ def test_oac_update_no_if_match(cloudfront):
     create_resp = cloudfront.create_origin_access_control(OriginAccessControlConfig=cfg)
     oac_id = create_resp["OriginAccessControl"]["Id"]
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     url = f"{endpoint}/2020-05-31/origin-access-control/{oac_id}/config"
     xml_body = (
         '<OriginAccessControlConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">'
@@ -524,7 +524,7 @@ def test_oac_delete_no_if_match(cloudfront):
     create_resp = cloudfront.create_origin_access_control(OriginAccessControlConfig=cfg)
     oac_id = create_resp["OriginAccessControl"]["Id"]
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     url = f"{endpoint}/2020-05-31/origin-access-control/{oac_id}"
     req = urllib.request.Request(
         url,

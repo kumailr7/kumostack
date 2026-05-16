@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import pytest
 from botocore.exceptions import ClientError
 
-_endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 _EXECUTE_PORT = urlparse(_endpoint).port or 4566
 
 def test_elbv2_create_describe_delete_lb(elbv2):

@@ -1,4 +1,4 @@
-const MINISTACK = process.env.MINISTACK_ENDPOINT ?? "http://localhost:4566";
+const MINISTACK = process.env.KUMOSTACK_ENDPOINT ?? "http://localhost:4566";
 
 export async function GET() {
   try {

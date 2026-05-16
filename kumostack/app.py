@@ -1690,6 +1690,7 @@ async def _run_ready_scripts():
     script_env.setdefault("AWS_ENDPOINT_URL", f"http://{_MINISTACK_HOST}:{port}")
     for ready_dir in ("/docker-entrypoint-initaws.d/ready.d", "/etc/localstack/init/ready.d"):
         if os.path.isdir(ready_dir):
+            script_env.setdefault("KUMOSTACK_INIT_READY_DIR", ready_dir)
             script_env.setdefault("MINISTACK_INIT_READY_DIR", ready_dir)
             break
     for script_path in scripts:
@@ -1699,6 +1700,8 @@ async def _run_ready_scripts():
             cmd = [sys.executable, script_path] if script_path.endswith(".py") else ["sh", script_path]
             per_script_env = {
                 **script_env,
+                "KUMOSTACK_INIT_SCRIPT_DIR": os.path.dirname(script_path),
+                "KUMOSTACK_INIT_SCRIPT_PATH": script_path,
                 "MINISTACK_INIT_SCRIPT_DIR": os.path.dirname(script_path),
                 "MINISTACK_INIT_SCRIPT_PATH": script_path,
             }
@@ -1755,6 +1758,7 @@ def _run_init_scripts():
     base_env = {**os.environ}
     for boot_dir in ("/docker-entrypoint-initaws.d", "/etc/localstack/init/boot.d"):
         if os.path.isdir(boot_dir):
+            base_env.setdefault("KUMOSTACK_INIT_BOOT_DIR", boot_dir)
             base_env.setdefault("MINISTACK_INIT_BOOT_DIR", boot_dir)
             break
     for script_path in scripts:
@@ -1763,6 +1767,8 @@ def _run_init_scripts():
             cmd = [sys.executable, script_path] if script_path.endswith(".py") else ["sh", script_path]
             per_script_env = {
                 **base_env,
+                "KUMOSTACK_INIT_SCRIPT_DIR": os.path.dirname(script_path),
+                "KUMOSTACK_INIT_SCRIPT_PATH": script_path,
                 "MINISTACK_INIT_SCRIPT_DIR": os.path.dirname(script_path),
                 "MINISTACK_INIT_SCRIPT_PATH": script_path,
             }

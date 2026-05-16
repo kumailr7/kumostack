@@ -51,7 +51,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            MINISTACK_VERSION=${{ steps.meta.outputs.version }}
+            KUMOSTACK_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=regular
           cache-to: type=gha,mode=max,scope=regular
 
@@ -84,6 +84,6 @@ jobs:
           tags: ${{ steps.meta_full.outputs.tags }}
           labels: ${{ steps.meta_full.outputs.labels }}
           build-args: |
-            MINISTACK_VERSION=${{ steps.meta.outputs.version }}
+            KUMOSTACK_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=full
           cache-to: type=gha,mode=max,scope=full

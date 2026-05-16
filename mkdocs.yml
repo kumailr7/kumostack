@@ -8,18 +8,18 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
-  logo: assets/images/kumostack_logo.png
-  favicon: assets/images/kumostack_logo.png
+  logo: assets/images/Kumostack_logo.png
+  favicon: assets/images/Kumostack_logo.png
   palette:
     - scheme: slate
-      primary: teal
-      accent: teal
+      primary: indigo
+      accent: indigo
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
     - scheme: default
-      primary: teal
-      accent: teal
+      primary: indigo
+      accent: indigo
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
@@ -39,6 +39,9 @@ theme:
     - content.code.annotate
     - content.tabs.link
     - toc.follow
+
+extra_css:
+  - stylesheets/extra.css
 
 plugins:
   - search

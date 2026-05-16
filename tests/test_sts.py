@@ -103,7 +103,7 @@ def _gwit_post(data: bytes):
     """POST raw form-encoded body to STS GetWebIdentityToken (boto3 has no client method)."""
     import urllib.error
     import urllib.request
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
         endpoint,
         data=data,
@@ -155,7 +155,7 @@ def test_sts_get_web_identity_token_json_protocol():
     """JSON protocol returns int-epoch Expiration per kumostack convention."""
     import urllib.error
     import urllib.request
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
         endpoint,
         data=json.dumps({"Audience": "x", "SigningAlgorithm": "RS256"}).encode(),

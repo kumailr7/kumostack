@@ -37,7 +37,7 @@ def test_kumostack_config_invalid_key_ignored():
     import json as _json
     import urllib.request
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
         f"{endpoint}/_kumostack/config",
         data=_json.dumps(
@@ -76,7 +76,7 @@ def test_localstack_unknown_paths_return_json_404():
     import urllib.error
     import urllib.request
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     for subpath in ("info", "plugins", "init"):
         url = f"{endpoint}/_localstack/{subpath}"
         try:
@@ -97,7 +97,7 @@ def test_localstack_health_still_returns_200():
     """/_localstack/health must still return 200 after the interceptor is wired in."""
     import urllib.request
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     resp = urllib.request.urlopen(f"{endpoint}/_localstack/health", timeout=5)
     assert resp.status == 200
     data = json.loads(resp.read())
@@ -535,7 +535,7 @@ def test_unit_h11_informational_has_reason_phrase():
 def test_wire_expect_100_continue_returns_canonical_status_line():
     """End-to-end: a raw PUT with Expect: 100-continue against kumostack must
     receive a 100 Continue with the reason phrase intact (issue #389)."""
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     parsed = urlparse(endpoint)
     host = parsed.hostname or "localhost"
     port = parsed.port or 4566

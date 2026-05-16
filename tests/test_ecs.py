@@ -73,11 +73,11 @@ def test_ecs_run_task_stops_after_exit(ecs):
 
 def test_ecs_run_task_network_connectivity(ecs):
     """ECS container can reach KumoStack (proves network detection works)."""
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     # Determine how a container can reach the host where KumoStack runs.
     # Docker Desktop (macOS/Windows): host.docker.internal works.
     # Linux: use the Docker bridge gateway IP (typically 172.17.0.1).
-    host = os.environ.get("MINISTACK_HOST_FROM_CONTAINER", "")
+    host = os.environ.get("KUMOSTACK_HOST_FROM_CONTAINER", "")
     if not host:
         import platform
         if platform.system() == "Linux":

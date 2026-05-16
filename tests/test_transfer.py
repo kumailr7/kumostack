@@ -333,13 +333,13 @@ asyncssh = pytest.importorskip("asyncssh")
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-ENDPOINT_HOST = os.environ.get("MINISTACK_HOST", "127.0.0.1")
+ENDPOINT_HOST = os.environ.get("KUMOSTACK_HOST", "127.0.0.1")
 SFTP_PORT = int(os.environ.get("SFTP_PORT", "2222"))
 
-# Honour MINISTACK_ENDPOINT (e.g. http://localhost:14566) so the same test
+# Honour KUMOSTACK_ENDPOINT (e.g. http://localhost:14566) so the same test
 # file works against a locally-built KumoStack on port 4566 *and* against a
 # preview Docker image bound to a different host port.
-_endpoint = os.environ.get("MINISTACK_ENDPOINT", f"http://{ENDPOINT_HOST}:4566")
+_endpoint = os.environ.get("KUMOSTACK_ENDPOINT", f"http://{ENDPOINT_HOST}:4566")
 ADMIN_BASE = _endpoint.rstrip("/")
 
 

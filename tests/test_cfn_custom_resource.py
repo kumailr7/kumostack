@@ -1,6 +1,6 @@
 """
 CloudFormation Custom Resource integration tests.
-Requires a running KumoStack server at MINISTACK_ENDPOINT (default http://localhost:4566).
+Requires a running KumoStack server at KUMOSTACK_ENDPOINT (default http://localhost:4566).
 """
 import io
 import json

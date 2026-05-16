@@ -3379,7 +3379,7 @@ def test_sfn_wait_scale_zero_does_not_timeout_lambda_tasks(sfn, lam):
     """
     import urllib.request
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
     def _set_wait_scale(val):
         req = urllib.request.Request(
@@ -3449,7 +3449,7 @@ def test_sfn_wait_scale_zero_skips_wait(sfn):
     """
     import urllib.request
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
     def _set_wait_scale(val):
         req = urllib.request.Request(
@@ -3989,8 +3989,8 @@ def test_sfn_execution_proceeds_under_non_default_account_id():
 
     # Borrow ENDPOINT + REGION from conftest's _default_kwargs without
     # importing private names; rebuild a client with a 12-digit access key.
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    region = os.environ.get("MINISTACK_REGION", "us-east-1")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
+    region = os.environ.get("KUMOSTACK_REGION", "us-east-1")
 
     alt_account_id = "123456789012"  # AWS docs placeholder account
     alt_kwargs = dict(
@@ -4046,8 +4046,8 @@ def test_sfn_execution_proceeds_under_non_default_account_id():
 def _alt_account_sfn_client(account_id):
     import boto3
     from botocore.config import Config
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
-    region = os.environ.get("MINISTACK_REGION", "us-east-1")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
+    region = os.environ.get("KUMOSTACK_REGION", "us-east-1")
     return boto3.client(
         "stepfunctions",
         endpoint_url=endpoint,

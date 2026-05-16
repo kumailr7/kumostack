@@ -35,11 +35,11 @@ services:
     ports:
       - "3003:3000"
     environment:
-      - MINISTACK_ENDPOINT=http://kumostack:4566
+      - KUMOSTACK_ENDPOINT=http://kumostack:4566
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_REGION=us-east-1
-      - MINISTACK_CONTAINER=kumostack
+      - KUMOSTACK_CONTAINER=kumostack
       - DRAWIO_ENDPOINT=http://kumostack-drawio:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -121,7 +121,7 @@ services:
       - ./vector/vector.toml:/etc/vector/vector.toml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - MINISTACK_ENDPOINT=http://kumostack:4566
+      - KUMOSTACK_ENDPOINT=http://kumostack:4566
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1

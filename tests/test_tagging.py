@@ -674,7 +674,7 @@ def test_tagging_tag_resources_cross_account_isolation(s3):
 
     def _client(svc: str, account: str):
         return boto3.client(
-            svc, endpoint_url=os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566"),
+            svc, endpoint_url=os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566"),
             region_name="us-east-1",
             aws_access_key_id=account, aws_secret_access_key="test",
             config=Config(retries={"mode": "standard"}),

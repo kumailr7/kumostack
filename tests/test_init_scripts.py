@@ -144,7 +144,7 @@ def test_init_scripts_uses_correct_interpreter(tmp_path, monkeypatch):
 
 
 def test_init_scripts_expose_script_dir_env(tmp_path, monkeypatch):
-    """Each init script gets MINISTACK_INIT_SCRIPT_DIR/PATH pointing at its own directory."""
+    """Each init script gets KUMOSTACK_INIT_SCRIPT_DIR/PATH pointing at its own directory."""
     script = tmp_path / "01-seed.sh"
     script.write_text("#!/bin/sh\necho seed")
 
@@ -163,5 +163,5 @@ def test_init_scripts_expose_script_dir_env(tmp_path, monkeypatch):
     monkeypatch.setattr('subprocess.run', fake_run)
     _run_init_scripts()
 
-    assert captured["MINISTACK_INIT_SCRIPT_DIR"] == str(tmp_path)
-    assert captured["MINISTACK_INIT_SCRIPT_PATH"] == str(script)
+    assert captured["KUMOSTACK_INIT_SCRIPT_DIR"] == str(tmp_path)
+    assert captured["KUMOSTACK_INIT_SCRIPT_PATH"] == str(script)

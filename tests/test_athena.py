@@ -269,7 +269,7 @@ def test_athena_engine_mock_via_config(athena):
     import json as _json
     import urllib.request
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
         f"{endpoint}/_kumostack/config",
         data=_json.dumps({"athena.ATHENA_ENGINE": "mock"}).encode(),

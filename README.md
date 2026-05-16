@@ -109,8 +109,8 @@ To set region or account ID, use environment variables at startup:
 
 ```bash
 docker run -p 4566:4566 \
-  -e MINISTACK_REGION=eu-west-1 \
-  -e MINISTACK_ACCOUNT_ID=123456789012 \
+  -e KUMOSTACK_REGION=eu-west-1 \
+  -e KUMOSTACK_ACCOUNT_ID=123456789012 \
   kumostackorg/kumostack
 ```
 
@@ -127,7 +127,7 @@ curl http://localhost:4566/health
 
 ## Multi-Tenancy
 
-KumoStack supports lightweight multi-tenancy without any configuration. If the `AWS_ACCESS_KEY_ID` is a **12-digit number**, it is used as the **Account ID** for all ARN generation. Non-numeric keys (like `test`) fall back to the `MINISTACK_ACCOUNT_ID` env var or `000000000000`.
+KumoStack supports lightweight multi-tenancy without any configuration. If the `AWS_ACCESS_KEY_ID` is a **12-digit number**, it is used as the **Account ID** for all ARN generation. Non-numeric keys (like `test`) fall back to the `KUMOSTACK_ACCOUNT_ID` env var or `000000000000`.
 
 ```bash
 # Team A — gets account 111111111111
@@ -352,7 +352,7 @@ subnet = ec2.create_subnet(
 | **Lambda** | CreateFunction, DeleteFunction, GetFunction, GetFunctionConfiguration, ListFunctions, Invoke, UpdateFunctionCode, UpdateFunctionConfiguration, AddPermission, RemovePermission, GetPolicy, ListVersionsByFunction, PublishVersion, CreateAlias, GetAlias, UpdateAlias, DeleteAlias, ListAliases, TagResource, UntagResource, ListTags, CreateEventSourceMapping, DeleteEventSourceMapping, GetEventSourceMapping, ListEventSourceMappings, UpdateEventSourceMapping, CreateFunctionUrlConfig, GetFunctionUrlConfig, UpdateFunctionUrlConfig, DeleteFunctionUrlConfig, ListFunctionUrlConfigs, PutFunctionConcurrency, GetFunctionConcurrency, DeleteFunctionConcurrency, PutFunctionEventInvokeConfig, GetFunctionEventInvokeConfig, DeleteFunctionEventInvokeConfig, PublishLayerVersion, GetLayerVersion, GetLayerVersionByArn, ListLayerVersions, DeleteLayerVersion, ListLayers, AddLayerVersionPermission, RemoveLayerVersionPermission, GetLayerVersionPolicy | Python and Node.js runtimes execute with warm worker pool; `provided.al2023`/`provided.al2` runtimes execute via Docker RIE (Go, Rust, C++ support); `Publish=True` creates immutable numbered versions; Code via `ZipFile`, `S3Bucket`/`S3Key` (with optional `S3ObjectVersion`), or `ImageUri` (Docker image); `PackageType: Image` pulls and invokes user-provided Docker images via Lambda RIE; SQS, Kinesis, and DynamoDB Streams event source mappings; Function URL CRUD; Lambda Layers CRUD; Aliases; Concurrency; EventInvokeConfig |
 | **IAM** | CreateUser, GetUser, ListUsers, DeleteUser, CreateRole, GetRole, ListRoles, DeleteRole, CreatePolicy, GetPolicy, DeletePolicy, AttachRolePolicy, DetachRolePolicy, PutRolePolicy, GetRolePolicy, DeleteRolePolicy, ListRolePolicies, ListAttachedRolePolicies, CreateAccessKey, ListAccessKeys, DeleteAccessKey, CreateInstanceProfile, GetInstanceProfile, DeleteInstanceProfile, AddRoleToInstanceProfile, RemoveRoleFromInstanceProfile, ListInstanceProfiles, CreateGroup, GetGroup, AddUserToGroup, RemoveUserFromGroup, CreateServiceLinkedRole, DeleteServiceLinkedRole, GetServiceLinkedRoleDeletionStatus, CreateOpenIDConnectProvider, TagRole, UntagRole, TagUser, UntagUser, TagPolicy, UntagPolicy | |
 | **STS** | GetCallerIdentity, AssumeRole, GetSessionToken, AssumeRoleWithWebIdentity | |
-| **IMDS** (EC2 Instance Metadata) | `PUT /latest/api/token`, `GET /latest/meta-data/instance-id`, `GET /latest/meta-data/iam/security-credentials/`, `GET /latest/meta-data/iam/security-credentials/<role>`, `GET /latest/meta-data/iam/info`, `GET /latest/meta-data/placement/{region,availability-zone,...}`, `GET /latest/dynamic/instance-identity/document` | IMDSv1 + IMDSv2; default credential chain falls through to a `kumostack-instance-role` document with `ASIA*` session creds. Point SDKs at kumostack via `AWS_EC2_METADATA_SERVICE_ENDPOINT=http://localhost:4566` (or `ec2_metadata_service_endpoint` in `~/.aws/config`); set `MINISTACK_IMDS_V2_REQUIRED=1` to require the token PUT |
+| **IMDS** (EC2 Instance Metadata) | `PUT /latest/api/token`, `GET /latest/meta-data/instance-id`, `GET /latest/meta-data/iam/security-credentials/`, `GET /latest/meta-data/iam/security-credentials/<role>`, `GET /latest/meta-data/iam/info`, `GET /latest/meta-data/placement/{region,availability-zone,...}`, `GET /latest/dynamic/instance-identity/document` | IMDSv1 + IMDSv2; default credential chain falls through to a `kumostack-instance-role` document with `ASIA*` session creds. Point SDKs at kumostack via `AWS_EC2_METADATA_SERVICE_ENDPOINT=http://localhost:4566` (or `ec2_metadata_service_endpoint` in `~/.aws/config`); set `KUMOSTACK_IMDS_V2_REQUIRED=1` to require the token PUT |
 | **ECS Task Metadata V4** | `GET /v4/<token>`, `GET /v4/<token>/task`, `GET /v4/<token>/stats`, `GET /v4/<token>/task/stats` | Per-container token injected as `ECS_CONTAINER_METADATA_URI_V4` on every container started by `RunTask`. `/task` returns sibling containers in the same task. Containers reach the gateway via `host.docker.internal` (mapped through `extra_hosts: host-gateway`, so it works on user-defined Docker networks); `networkMode: host` containers use loopback. Volatile by design (stripped on persistence, cleared by `/_kumostack/reset`) |
 | **ECS Container Credentials** | `GET /v2/credentials/<uuid>` | The path real ECS exposes via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/v2/credentials/<uuid>` (resolved by SDKs against `169.254.170.2`). KumoStack serves the same path on the gateway and returns the AWS-strict 5-field credentials document (`AccessKeyId`, `SecretAccessKey`, `Token`, `Expiration`, `RoleArn`) — distinct from the IMDS shape served at `/latest/meta-data/iam/security-credentials/<role>`. `RunTask` injects `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN` (satisfies botocore's allow-list for non-loopback gateway hosts), and `AWS_ENDPOINT_URL` so unmodified SDKs inside the task fetch credentials and route service calls through KumoStack with no client config |
 | **SecretsManager** | CreateSecret, GetSecretValue, ListSecrets, DeleteSecret, UpdateSecret, DescribeSecret, PutSecretValue, UpdateSecretVersionStage, RestoreSecret, RotateSecret, GetRandomPassword, ListSecretVersionIds, ReplicateSecretToRegions, TagResource, UntagResource, PutResourcePolicy, GetResourcePolicy, DeleteResourcePolicy, ValidateResourcePolicy | |
@@ -658,9 +658,9 @@ end-to-end without any client config.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GATEWAY_PORT` | `4566` | Port to listen on. Also accepts `EDGE_PORT` (LocalStack compatibility alias) |
-| `MINISTACK_HOST` | `localhost` | Hostname used in response URLs (SQS queues, SNS subscriptions, API Gateway endpoints, Lambda layers) |
-| `MINISTACK_ACCOUNT_ID` | `000000000000` | Default AWS account ID. Overridden per-request when `AWS_ACCESS_KEY_ID` is a 12-digit number (see [Multi-Tenancy](#multi-tenancy)) |
-| `MINISTACK_REGION` | `us-east-1` | AWS region reported in ARNs and service responses across all services |
+| `KUMOSTACK_HOST` | `localhost` | Hostname used in response URLs (SQS queues, SNS subscriptions, API Gateway endpoints, Lambda layers) |
+| `KUMOSTACK_ACCOUNT_ID` | `000000000000` | Default AWS account ID. Overridden per-request when `AWS_ACCESS_KEY_ID` is a 12-digit number (see [Multi-Tenancy](#multi-tenancy)) |
+| `KUMOSTACK_REGION` | `us-east-1` | AWS region reported in ARNs and service responses across all services |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `S3_PERSIST` | `0` | Set `1` to persist S3 objects to disk |
 | `S3_DATA_DIR` | `/tmp/kumostack-data/s3` | S3 persistence directory |
@@ -678,29 +678,29 @@ end-to-end without any client config.
 | `OPENSEARCH_DASHBOARDS` | `0` | Set `1` (together with `OPENSEARCH_DATAPLANE=1`) to also spawn a per-domain `opensearchproject/opensearch-dashboards` sidecar; `DescribeDomain.DashboardEndpoint` is populated |
 | `OPENSEARCH_DASHBOARDS_BASE_PORT` | `15601` | Starting host port for per-domain Dashboards containers |
 | `OPENSEARCH_DASHBOARDS_IMAGE` | `opensearchproject/opensearch-dashboards:2.15.0` | Image used when spawning per-domain Dashboards containers |
-| `MINISTACK_OPENSEARCH_ENDPOINT` | _(unset)_ | If set (e.g. `localhost:9200`), every domain returns this endpoint instead of spawning a per-domain container — useful when you bring your own cluster |
+| `KUMOSTACK_OPENSEARCH_ENDPOINT` | _(unset)_ | If set (e.g. `localhost:9200`), every domain returns this endpoint instead of spawning a per-domain container — useful when you bring your own cluster |
 | `PERSIST_STATE` | `0` | Set `1` to persist service state across restarts |
 | `STATE_DIR` | `/tmp/kumostack-state` | Directory for persisted state files |
 | `LAMBDA_EXECUTOR` | `local` | Lambda execution mode: `local` (subprocess) or `docker` (container). `provided` runtimes and `PackageType: Image` always use Docker |
 | `LAMBDA_STRICT` | `0` | Set `1` for AWS-fidelity mode: every Lambda invocation runs in a Docker container via the AWS RIE image; in-process fallbacks are disabled. Missing Docker surfaces as `Runtime.DockerUnavailable` instead of degrading to a subprocess. Opt-in because the default install doesn't require Docker |
 | `LAMBDA_DOCKER_NETWORK` | _(unset)_ | Legacy alias for `DOCKER_NETWORK` (Lambda only). Prefer `DOCKER_NETWORK` which covers all services |
 | `LAMBDA_DOCKER_FLAGS` | _(unset)_ | Extra `docker run` flags injected into Lambda containers (matches LocalStack). Supports `-e` / `-v` / `--dns` / `--network` / `--cap-add` / `-m` / `--shm-size` / `--tmpfs` / `--add-host` / `--privileged` / `--read-only`. Useful for TLS proxies, custom CAs, and routed dev networks |
-| `MINISTACK_IMAGE_PREFIX` | _(unset)_ | Private-registry prefix prepended to every nested container image (RDS postgres/mysql/mariadb, ElastiCache redis/memcached, EKS k3s, Lambda runtimes). Testcontainers' `hub.image.name.prefix` is auto-forwarded into this var by the Java/Python modules |
+| `KUMOSTACK_IMAGE_PREFIX` | _(unset)_ | Private-registry prefix prepended to every nested container image (RDS postgres/mysql/mariadb, ElastiCache redis/memcached, EKS k3s, Lambda runtimes). Testcontainers' `hub.image.name.prefix` is auto-forwarded into this var by the Java/Python modules |
 | `LAMBDA_WARM_TTL_SECONDS` | `300` | How long an idle warm Lambda container stays in the pool before the reaper evicts it |
 | `LAMBDA_ACCOUNT_CONCURRENCY` | `0` | Account-level concurrent-invocation cap (0 = unbounded). Match real AWS by setting to `1000`. Used to simulate `ConcurrentInvocationLimitExceeded` throttles |
 | `SFN_MOCK_CONFIG` | _(unset)_ | Path to JSON file for Step Functions mock testing; compatible with AWS SFN Local format. Also accepts `LOCALSTACK_SFN_MOCK_CONFIG` |
 | `ATHENA_ENGINE` | `auto` | SQL engine for Athena: `auto`, `duckdb`, `mock` |
 | `SMTP_HOST` | _(unset)_ | SMTP server for SES email relay (e.g. `mailhog:1025`). When set, SES SendEmail/SendRawEmail actually deliver mail. When unset, emails are stored in-memory only |
-| `MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS` | `30` | API Gateway v1/v2 HTTP `HTTP_PROXY` / `HTTP` integration: upstream request timeout (seconds) |
-| `MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS` | `5` | API Gateway v2 JWT authorizer: JWKS document fetch timeout (seconds) |
+| `KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS` | `30` | API Gateway v1/v2 HTTP `HTTP_PROXY` / `HTTP` integration: upstream request timeout (seconds) |
+| `KUMOSTACK_APIGW_JWKS_TIMEOUT_SECONDS` | `5` | API Gateway v2 JWT authorizer: JWKS document fetch timeout (seconds) |
 | `USE_SSL` | `0` | Enable HTTPS on the gateway listener. Accepts `1`, `true`, `yes`. LocalStack-compatible flag name |
-| `MINISTACK_SSL_CERT` | _(unset)_ | Optional PEM-encoded server certificate path; required together with `MINISTACK_SSL_KEY`. When unset, KumoStack auto-generates a self-signed cert under `${TMPDIR}/kumostack-tls/` (cached across restarts) |
-| `MINISTACK_SSL_KEY` | _(unset)_ | Optional PEM-encoded private key path; required together with `MINISTACK_SSL_CERT` |
-| `MINISTACK_IMDS_V2_REQUIRED` | `0` | Reject token-less GETs on `/latest/meta-data/...`. When set, callers must first `PUT /latest/api/token` and pass the token as `X-aws-ec2-metadata-token`, matching real-AWS hop-limit-1 IMDSv2-only instances |
+| `KUMOSTACK_SSL_CERT` | _(unset)_ | Optional PEM-encoded server certificate path; required together with `KUMOSTACK_SSL_KEY`. When unset, KumoStack auto-generates a self-signed cert under `${TMPDIR}/kumostack-tls/` (cached across restarts) |
+| `KUMOSTACK_SSL_KEY` | _(unset)_ | Optional PEM-encoded private key path; required together with `KUMOSTACK_SSL_CERT` |
+| `KUMOSTACK_IMDS_V2_REQUIRED` | `0` | Reject token-less GETs on `/latest/meta-data/...`. When set, callers must first `PUT /latest/api/token` and pass the token as `X-aws-ec2-metadata-token`, matching real-AWS hop-limit-1 IMDSv2-only instances |
 
 ### API Gateway HTTP proxy execution model
 
-API Gateway v1/v2 HTTP proxy forwarding uses non-blocking event-loop semantics by offloading the upstream socket call to a worker thread. This preserves AWS-compatible response behavior while preventing long-running proxy calls from stalling unrelated requests (for example, parallel DynamoDB operations). The same non-blocking path is used for JWT **JWKS** fetches. Tune wall-clock limits with `MINISTACK_APIGW_PROXY_TIMEOUT_SECONDS` and `MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS` at the bottom of the [Configuration](#configuration) table above.
+API Gateway v1/v2 HTTP proxy forwarding uses non-blocking event-loop semantics by offloading the upstream socket call to a worker thread. This preserves AWS-compatible response behavior while preventing long-running proxy calls from stalling unrelated requests (for example, parallel DynamoDB operations). The same non-blocking path is used for JWT **JWKS** fetches. Tune wall-clock limits with `KUMOSTACK_APIGW_PROXY_TIMEOUT_SECONDS` and `KUMOSTACK_APIGW_JWKS_TIMEOUT_SECONDS` at the bottom of the [Configuration](#configuration) table above.
 
 ### Startup Scripts
 
@@ -720,17 +720,17 @@ Each script also gets:
 
 | Variable | Set per | Value |
 |----------|---------|-------|
-| `MINISTACK_INIT_SCRIPT_DIR` | script | Absolute path of the directory the running script lives in |
-| `MINISTACK_INIT_SCRIPT_PATH` | script | Absolute path of the running script |
-| `MINISTACK_INIT_BOOT_DIR` | phase | Boot-phase directory (`/docker-entrypoint-initaws.d` or `/etc/localstack/init/boot.d`) when present |
-| `MINISTACK_INIT_READY_DIR` | phase | Ready-phase directory (`/docker-entrypoint-initaws.d/ready.d` or `/etc/localstack/init/ready.d`) when present |
+| `KUMOSTACK_INIT_SCRIPT_DIR` | script | Absolute path of the directory the running script lives in |
+| `KUMOSTACK_INIT_SCRIPT_PATH` | script | Absolute path of the running script |
+| `KUMOSTACK_INIT_BOOT_DIR` | phase | Boot-phase directory (`/docker-entrypoint-initaws.d` or `/etc/localstack/init/boot.d`) when present |
+| `KUMOSTACK_INIT_READY_DIR` | phase | Ready-phase directory (`/docker-entrypoint-initaws.d/ready.d` or `/etc/localstack/init/ready.d`) when present |
 
 This lets a script reference sibling files without hardcoding the mount path:
 
 ```bash
 # ready.d/01-create-resources.sh
 aws s3 mb s3://my-bucket
-aws s3 cp "${MINISTACK_INIT_SCRIPT_DIR}/seed-data.json" s3://my-bucket/
+aws s3 cp "${KUMOSTACK_INIT_SCRIPT_DIR}/seed-data.json" s3://my-bucket/
 aws sqs create-queue --queue-name my-queue
 ```
 
@@ -921,12 +921,12 @@ lam.create_function(
     Handler="index.handler",                           # any value; ignored in proxy mode
     Code={"ZipFile": b"PK\x05\x06" + b"\x00" * 18},    # empty zip stub
     Environment={"Variables": {
-        "MINISTACK_LAMBDA_PROXY_URL": "http://host.docker.internal:9000/invoke",
+        "KUMOSTACK_LAMBDA_PROXY_URL": "http://host.docker.internal:9000/invoke",
     }},
 )
 ```
 
-Or globally via env var at startup: `MINISTACK_LAMBDA_PROXY_<func-name>=http://...`.
+Or globally via env var at startup: `KUMOSTACK_LAMBDA_PROXY_<func-name>=http://...`.
 
 Your container receives the Lambda event JSON as the request body. Reply with the function's response as JSON (or a Lambda Proxy response shape `{"statusCode", "headers", "body"}` if it sits behind API Gateway). KumoStack passes these context headers on every forward:
 

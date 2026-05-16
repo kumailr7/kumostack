@@ -470,7 +470,7 @@ def test_ses_messages_endpoint_all_v1_send_types(ses):
         },
     )
     
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     url = f"{endpoint}/_kumostack/ses/messages"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
@@ -548,7 +548,7 @@ def test_ses_messages_endpoint_v2(sesv2):
         },
     )
     
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     url = f"{endpoint}/_kumostack/ses/messages"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=5) as r:
@@ -568,7 +568,7 @@ def test_ses_messages_endpoint_reset(ses):
         Message={"Subject": {"Data": "Hi"}, "Body": {"Text": {"Data": "body"}}},                                                           
     )                                                                                                                                                               
     import urllib.request
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
     urllib.request.urlopen(                                                                                                                                         
         urllib.request.Request(f"{endpoint}/_kumostack/reset", method="POST")                                                                                       
@@ -587,7 +587,7 @@ def _client(service, access_key="test"):
     """Create a boto3 client with a specific access key."""
     import boto3
     from botocore.config import Config
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     region = "us-east-1"
     return boto3.client(
         service,
@@ -603,7 +603,7 @@ def test_ses_messages_endpoint_account_filter():
     import urllib.request
 
     # Clear any existing messages on the running server
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     urllib.request.urlopen(urllib.request.Request(f"{endpoint}/_kumostack/reset", method="POST"))
 
     # Account 1 and Account 2
@@ -633,7 +633,7 @@ def test_ses_messages_endpoint_account_filter():
         Message={"Subject": {"Data": "Test email 3"}, "Body": {"Text": {"Data": "Body of test email 3"}}},
     )
 
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 
     # Test 1: Without ?account: returns all emails
     url = f"{endpoint}/_kumostack/ses/messages"

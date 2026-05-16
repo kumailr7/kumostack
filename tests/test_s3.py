@@ -1975,7 +1975,7 @@ def test_s3_upload_part_copy_rejects_malformed_range(s3, bad_range):
     s3.put_object(Bucket=bkt, Key="src", Body=b"0123456789")
 
     upload_id = s3.create_multipart_upload(Bucket=bkt, Key="dst")["UploadId"]
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     r = requests.put(
         f"{endpoint}/{bkt}/dst",
         params={"partNumber": 1, "uploadId": upload_id},
@@ -1997,7 +1997,7 @@ def test_s3_upload_part_copy_rejects_out_of_bounds_range(s3):
     s3.put_object(Bucket=bkt, Key="src", Body=b"0123456789")  # 10 bytes
 
     upload_id = s3.create_multipart_upload(Bucket=bkt, Key="dst")["UploadId"]
-    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
     r = requests.put(
         f"{endpoint}/{bkt}/dst",
         params={"partNumber": 1, "uploadId": upload_id},
