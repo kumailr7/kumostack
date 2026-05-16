@@ -7,6 +7,40 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.41] — 2026-05-16
+
+### Fixed
+- **KMS `Decrypt` error code on malformed ciphertext** — when the caller omitted `KeyId` and the ciphertext was too short or otherwise unparseable, MiniStack returned `NotFoundException` ("Unable to find the key for decryption"); real AWS returns `InvalidCiphertextException` in that case. The two errors are distinguished by AWS-SDK clients that catch encryption faults separately from key-lookup faults (e.g., wrapper libraries that retry on `NotFound` but surface `InvalidCiphertext` immediately). `NotFoundException` is still returned when the caller did pass an explicit `KeyId` that doesn't resolve, matching real AWS.
+
+---
+
+## [1.3.40] — 2026-05-15
+
+### Added
+- **Cognito invitation and verification emails via SES** — `AdminCreateUser`, `SignUp`, `ResendConfirmationCode`, `ForgotPassword`, and `AdminResetUserPassword` now hand their welcome / temporary-password / verification mail to the in-process SES emulator, so simulated apps see the message in `/_ministack/ses/messages` and it relays via SMTP when `SMTP_HOST` is set. Mirrors AWS behaviour: `MessageAction=SUPPRESS` skips, `RESEND` re-sends, `DesiredDeliveryMediums=["SMS"]` excludes email, and template placeholders (`{username}`, `{####}`) expand. Sender resolves to `EmailConfiguration.From`, falling back to `no-reply@verificationemail.com` (overridable via `COGNITO_DEFAULT_FROM`); set `COGNITO_EMAIL_ENABLED=false` to short-circuit globally. Adds the previously-missing `ResendConfirmationCode` action while wiring the delivery path. Contributed by @kjdev.
+- **Step Functions JSONata `Assign` + workflow variables** — state-level `Assign` fields now bind values into an execution-scoped variable store, and later JSONata expressions can reference them as `$name` (with dotted-path access like `$user.email`). Pass `$states.result` resolves to the computed Output; Task `$states.result` to the raw API result; Catch handlers expose `$states.errorOutput`. Undefined references surface as `States.QueryEvaluationError`, matching the AWS error code for JSONata evaluation failures. Reported by @youngkwangk.
+
+### Fixed
+- **Cognito alias-attribute user lookup** — `_resolve_user` now honors the pool's `AliasAttributes` and `UsernameAttributes`, so signing in by `email` / `phone_number` / `preferred_username` resolves correctly. Email and phone aliases require the corresponding `_verified` attribute to equal `"true"` (matches AWS); `preferred_username` has no verification gate. The change routes `AdminInitiateAuth`, `InitiateAuth`, `AdminRespondToAuthChallenge`, `RespondToAuthChallenge`, `ConfirmSignUp`, `ForgotPassword`, `ConfirmForgotPassword`, and the hosted-UI `/login` form through the resolver — internal call sites that need the canonical username (group iteration, create-time uniqueness, post-code token issuance) are left untouched. Contributed by @rjmackay.
+- **SQS `ReceiveMessage` `InternalError` on FIFO queues with `RedrivePolicy`** — a double-JSON-encoded `RedrivePolicy` value slipped past `CreateQueue` / `SetQueueAttributes`, then crashed `_dlq_sweep` on receive because `json.loads` returned a string (not a dict) and `.get()` raised `AttributeError`. MiniStack now validates `RedrivePolicy` at intake (parseable JSON object with non-empty `deadLetterTargetArn` and numeric `maxReceiveCount` between 1 and 1000) and rejects malformed values with `InvalidAttributeValue` (400), matching real AWS. Receive carries a defensive guard so legacy persisted state doesn't crash. Reported by @rbonestell.
+- **DynamoDB `if_not_exists` arithmetic in `SET` expressions** — `SET v = (if_not_exists(v, :d) - :amt)` previously dropped the arithmetic and assigned the resolved value directly: the outer parens kept every token at depth > 0, so the top-level operator scan never saw the `-` at depth 0. `_eval_set_value` now strips a single layer of matched outer parens before parsing, guarded so `(a) + (b)` (two adjacent groups) isn't accidentally flattened. Reported by @youngkwangk.
+- **S3 → Lambda notifications fire for non-boto3 SDK clients** — MiniStack's notification XML parser only recognised the legacy `<CloudFunction>` ARN tag, which is what botocore wire-serialises `LambdaFunctionArn` as. AWS SDK for Java v2, Go SDK, Terraform's `aws_s3_bucket_notification`, and any hand-crafted XML send the modern `<LambdaFunctionArn>` tag — MiniStack silently dropped those configs, so uploads succeeded but the Lambda never fired. Both shapes are now accepted, matching real S3. Reported by @michael-denyer.
+
+---
+
+## [1.3.39] — 2026-05-15
+
+### Added
+- **Node.js Lambda — `@aws-sdk/client-*` built-in stubs** — real Node.js 18+ Lambda ships the AWS SDK v3 built-in; MiniStack's worker now intercepts `require('@aws-sdk/client-*')` and returns lightweight stubs that route through `AWS_ENDPOINT_URL` when the real package isn't installed (Lambda Layers still win). `@aws-sdk/client-lambda` gets a REST stub; 28 `awsJson1.x` services resolve via a generic `X-Amz-Target` Proxy. `err.name`/`err.code` set per v3 catch-by-name convention. HTTPS→HTTP localhost downgrade extended to CDK Provider Framework's `cfn-response.js` PUT. Query-protocol / REST-XML / REST-path clients still need bundling or a Layer, as on real AWS outside a managed runtime. Contributed by @hiddengearz.
+
+### Fixed
+- **Cognito OIDC federation callback (`/oauth2/idpresponse`)** — OIDC federation was half-wired: `/oauth2/authorize` redirected to the IdP correctly but routed the callback at `/saml2/idpresponse`, which only accepts SAML, so every IdP `code`+`state` callback 400'd. MiniStack now serves `/oauth2/idpresponse`: exchanges the code at the IdP's `token_url`, decodes the `id_token` (no signature verification — same posture as SAML), applies `AttributeMapping`, provisions the `{provider}_{sub}` user, and 302s back to the app with a MiniStack-issued code. Reported by @ocr-lasagna.
+- **Step Functions executions stalling at `ExecutionStarted` under non-default account IDs** — `_executions` is an `AccountScopedDict` keyed by `get_account_id()` (a `ContextVar`); the background worker was spawned via plain `threading.Thread` which doesn't propagate contextvars, so the worker looked up the execution under the default account, found nothing, and silently returned. Fixed with `contextvars.copy_context().run` on each thread target, with per-thread snapshots at the Parallel and Map spawn sites (a single `Context` cannot be entered by two threads concurrently). Contributed by @michael-denyer.
+- **Step Functions JSONata `Arguments` on `aws-sdk` Task states** — Tasks with `QueryLanguage: "JSONata"` now evaluate `Arguments` and success/Catch `Output` against `$states.input` / `$states.result` / `$states.errorOutput`, instead of dispatching with an empty JSONPath payload. Contributed by @jayjanssen.
+- **Step Functions JSONata coverage for Pass and Choice** — Pass now evaluates `Output` (previously silently ignored). Choice now evaluates per-branch `Condition` (previously always treated as falsy, falling through to `Default`) and applies per-branch `Output` on the matched rule. Evaluator extended with comparison/arithmetic/string-concat/and/or/in/not, `$count`/`$length`/`$string`/`$number`, paren grouping, unary minus, left-associative parsing. Reported by @youngkwangk.
+
+---
+
 ## [1.3.38] — 2026-05-13
 
 ### Added
@@ -21,6 +55,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 - **ECS `connectivityAt` and `stoppingAt` timestamps wire-formatted as numbers** — both fields are set on tasks but were missing from the `_ECS_TIMESTAMP_FIELDS` normalization set, so they shipped as ISO strings in `DescribeTasks` / `ListTasks` responses. The Go AWS SDK v2 (strict JSON 1.1 timestamp parsing) rejected the response; boto3 was lenient and hid the issue. Both fields are now epoch-normalized alongside the other task timestamps. Contributed by @YakirOren.
 - **CloudFormation `AWS::ECS::TaskDefinition` populates `registeredAt`, `registeredBy`, and `compatibilities`** — the CFN provisioner constructed the task-definition record without these three fields, so `DescribeTaskDefinition` returned them as missing for CFN-created TDs even though the CLI/SDK path (`RegisterTaskDefinition`) always set them. Workloads that read `registeredAt` (e.g. the ARMO ECS operator and other reconcilers) had to fall back to "now". The CFN path now mirrors the CLI path. Contributed by @YakirOren.
+
+---
 
 ## [1.3.37] — 2026-05-12
 
@@ -37,6 +73,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **S3 `UploadPartCopy` validates `x-amz-copy-source-range`** — the header was parsed with `rng.split("-")` and no validation, so malformed values (`bytes=abc-def`, extra dashes, missing prefix) raised an unhandled `ValueError` and surfaced as HTTP 500; reversed and out-of-bounds ranges silently produced wrong-sized parts. All malformed inputs now return 400 `InvalidArgument`; out-of-bounds includes the source object size in the error message. boto3 retries 5xx but fails fast on 4xx, so the prior 500 behaviour caused infinite client retry loops against MiniStack where real S3 would have failed immediately. Contributed by @mfurqaan31.
 - **S3 `_parse_bucket_key` strips absolute-form request targets** — AWS SDK for .NET v4 sends HTTP/1.1 requests with absolute-form targets (e.g. `PUT http://ministack:4566/bucket/key`); hypercorn passes the raw target through, so MS was parsing `http:` as the bucket name. The function now strips scheme + authority before parsing. Contributed by @mark-bray.
 
+---
+
 ## [1.3.36] — 2026-05-11
 
 ### Added
@@ -49,6 +87,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **RDS `DescribeDBClusterParameters` emits `<Source>` element** — the cluster-parameter response XML omitted `<Source>` entirely, so botocore materialized `Parameters[].Source` as `None` for every entry. Each emitted `<Parameter>` now includes `<Source>user</Source>`, matching the existing instance-level path. Note: MiniStack only stores user-modified parameters (engine defaults are not modelled); the literal `user` is correct for the slice MS currently returns but will need to become conditional once engine-defaults are added. Surfaced by the same brownfield-import diffing. Contributed by @jayjanssen.
 - **CUR report definitions lost on warm-boot** — the CUR module declared `get_state()` and `restore_state()` but the `load_state("cur")` call at import time was missing, so MiniStack wrote state on shutdown and never read it on restart. Standard import-time block added; `PERSIST_STATE=1` now correctly survives across container restarts for CUR.
 - **IAM `AttachmentCount` on AWS-managed policies reset on warm-boot** — the per-(session-account, arn) sidecar `_aws_managed_attachment_counts` added with the AWS-managed-policies work was missing from `get_state` / `restore_state`. Customer-managed `AttachmentCount` already persisted via the policy record itself; only the AWS-managed-policy sidecar was dropped. Now wired in.
+
+---
 
 ## [1.3.35] — 2026-05-11
 
