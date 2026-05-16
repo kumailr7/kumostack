@@ -12,16 +12,16 @@ theme:
   favicon: assets/images/Kumostack_logo.png
   palette:
     - scheme: slate
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
-    - scheme: default
-      primary: indigo
-      accent: indigo
+      primary: black
+      accent: white
       toggle:
         icon: material/brightness-7
+        name: Switch to light mode
+    - scheme: default
+      primary: black
+      accent: white
+      toggle:
+        icon: material/brightness-4
         name: Switch to dark mode
   font:
     text: Inter

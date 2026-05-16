@@ -36,7 +36,7 @@
   );
 }
 
-/* ── Material token overrides (dark scheme) ─────────────────────── */
+/* ── Material token overrides — BMW M Black & White ─────────────── */
 [data-md-color-scheme="slate"] {
   --md-default-bg-color:              var(--ms-canvas);
   --md-default-fg-color:              var(--ms-on-dark);
@@ -44,22 +44,25 @@
   --md-default-fg-color--lighter:     var(--ms-muted);
   --md-default-fg-color--lightest:    var(--ms-muted);
 
-  --md-primary-fg-color:              var(--ms-canvas);
-  --md-primary-fg-color--light:       var(--ms-surface-soft);
-  --md-primary-fg-color--dark:        var(--ms-canvas);
-  --md-primary-bg-color:              var(--ms-on-dark);
-  --md-primary-bg-color--light:       rgba(255,255,255,.6);
+  /* Primary = header bg (black) with white text */
+  --md-primary-fg-color:              #000000;
+  --md-primary-fg-color--light:       #111111;
+  --md-primary-fg-color--dark:        #000000;
+  --md-primary-bg-color:              #ffffff;
+  --md-primary-bg-color--light:       rgba(255,255,255,.75);
 
-  --md-accent-fg-color:               var(--ms-m-blue-mid);
-  --md-accent-fg-color--transparent:  rgba(28,105,212,.15);
-  --md-accent-bg-color:               var(--ms-on-dark);
+  /* Accent = white — the BMW M system uses white as the interactive color */
+  --md-accent-fg-color:               #ffffff;
+  --md-accent-fg-color--transparent:  rgba(255,255,255,.1);
+  --md-accent-bg-color:               #000000;
 
   --md-code-bg-color:                 var(--ms-surface-elevated);
   --md-code-fg-color:                 var(--ms-body-strong);
 
   --md-typeset-color:                 var(--ms-body);
-  --md-typeset-a-color:               var(--ms-m-blue-mid);
-  --md-typeset-mark-color:            rgba(28,105,212,.3);
+  /* Links: bright white so they stand out from body grey */
+  --md-typeset-a-color:               #ffffff;
+  --md-typeset-mark-color:            rgba(255,255,255,.15);
   --md-typeset-kbd-color:             var(--ms-surface-elevated);
   --md-typeset-kbd-accent-color:      var(--ms-carbon);
   --md-typeset-kbd-border-color:      var(--ms-hairline-strong);
@@ -74,6 +77,18 @@
   --md-shadow-z1: none;
   --md-shadow-z2: none;
   --md-shadow-z3: none;
+}
+
+/* ── Light mode — black header, white page ──────────────────────── */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color:              #000000;
+  --md-primary-fg-color--light:       #111111;
+  --md-primary-fg-color--dark:        #000000;
+  --md-primary-bg-color:              #ffffff;
+  --md-primary-bg-color--light:       rgba(255,255,255,.75);
+  --md-accent-fg-color:               #000000;
+  --md-accent-fg-color--transparent:  rgba(0,0,0,.08);
+  --md-typeset-a-color:               #000000;
 }
 
 /* ── Global base ────────────────────────────────────────────────── */
@@ -92,9 +107,9 @@ body {
 
 /* ── Header ─────────────────────────────────────────────────────── */
 .md-header {
-  background: #050505 !important;
-  border-bottom: 1px solid var(--ms-hairline);
-  box-shadow: 0 1px 24px rgba(0,0,0,.8) !important;
+  background: #000000 !important;
+  border-bottom: 1px solid var(--ms-hairline-strong);
+  box-shadow: none !important;
   position: relative;
 }
 
@@ -193,9 +208,9 @@ body {
   color: var(--ms-on-dark) !important;
 }
 
-/* Active tab: red underline — M red for selected state */
+/* Active tab: white underline — BMW M uses white for selected state */
 .md-tabs__link--active::after {
-  background: var(--ms-m-red) !important;
+  background: #ffffff !important;
   height: 2px !important;
   bottom: 0 !important;
 }
@@ -242,9 +257,9 @@ body {
   font-weight: 700 !important;
 }
 
-/* Active nav item: M blue left bar */
+/* Active nav item: white left bar */
 .md-nav__item .md-nav__link--active {
-  border-left: 3px solid var(--ms-m-blue-mid);
+  border-left: 3px solid #ffffff;
   padding-left: 13px !important;
 }
 
@@ -291,7 +306,7 @@ body {
   margin-top: 16px;
 }
 
-/* H2 — left blue accent + bottom hairline */
+/* H2 — white left bar + hairline */
 .md-typeset h2 {
   font-size: 26px !important;
   font-weight: 700 !important;
@@ -299,7 +314,7 @@ body {
   line-height: 1.15 !important;
   color: var(--ms-on-dark) !important;
   border-bottom: none !important;
-  border-left: 4px solid var(--ms-m-blue) !important;
+  border-left: 4px solid #ffffff !important;
   padding-left: 14px !important;
   margin-top: 56px !important;
   letter-spacing: 0.03em;
@@ -314,7 +329,7 @@ body {
   left: -4px;
   right: 0;
   height: 1px;
-  background: linear-gradient(90deg, var(--ms-m-blue) 0%, var(--ms-hairline) 40%, transparent 100%);
+  background: linear-gradient(90deg, #ffffff40 0%, var(--ms-hairline) 40%, transparent 100%);
 }
 
 /* H3 */
@@ -323,7 +338,7 @@ body {
   font-weight: 700 !important;
   color: var(--ms-on-dark) !important;
   margin-top: 36px !important;
-  border-left: 3px solid var(--ms-m-red) !important;
+  border-left: 3px solid var(--ms-hairline-strong) !important;
   padding-left: 12px !important;
 }
 
@@ -333,7 +348,7 @@ body {
   font-weight: 700 !important;
   text-transform: uppercase;
   letter-spacing: 2px;
-  color: var(--ms-m-blue-mid) !important;
+  color: var(--ms-body) !important;
   margin-top: 28px !important;
 }
 
@@ -351,13 +366,13 @@ body {
   line-height: 1.7;
 }
 
-/* Bullet marker in M blue */
+/* Bullet / ordered list markers — white */
 .md-typeset ul li::marker {
-  color: var(--ms-m-blue-mid);
+  color: var(--ms-body-strong);
 }
 
 .md-typeset ol li::marker {
-  color: var(--ms-m-blue-mid);
+  color: var(--ms-body-strong);
   font-weight: 700;
 }
 
@@ -367,23 +382,22 @@ body {
 }
 
 .md-typeset a {
-  color: var(--ms-m-blue-mid) !important;
+  color: #ffffff !important;
   text-decoration: none;
   font-weight: 400;
-  transition: color 0.12s;
+  border-bottom: 1px solid rgba(255,255,255,.25);
+  transition: border-color 0.12s;
 }
 
 .md-typeset a:hover {
-  color: var(--ms-on-dark) !important;
-  text-decoration: underline;
-  text-decoration-color: var(--ms-m-red);
-  text-underline-offset: 3px;
+  color: #ffffff !important;
+  border-bottom-color: #ffffff;
 }
 
 /* ── Code ───────────────────────────────────────────────────────── */
 .md-typeset code {
   background: var(--ms-surface-elevated) !important;
-  color: var(--ms-m-blue-mid) !important;
+  color: var(--ms-body-strong) !important;
   border: 1px solid var(--ms-hairline-strong);
   font-size: 12.5px;
   padding: 2px 6px;
@@ -392,7 +406,7 @@ body {
 .md-typeset pre {
   background: var(--ms-surface-elevated) !important;
   border: 1px solid var(--ms-hairline-strong);
-  border-left: 3px solid var(--ms-m-blue) !important;
+  border-left: 3px solid #ffffff !important;
   box-shadow: none !important;
   position: relative;
 }
@@ -413,7 +427,7 @@ body {
 /* Code block filename */
 .md-typeset .highlight > .filename {
   background: var(--ms-carbon) !important;
-  color: var(--ms-m-blue-mid) !important;
+  color: var(--ms-body) !important;
   font-size: 10px !important;
   font-weight: 700;
   letter-spacing: 1.5px;
@@ -429,13 +443,13 @@ body {
 }
 
 .md-clipboard:hover {
-  color: var(--ms-m-blue-mid) !important;
+  color: #ffffff !important;
 }
 
 /* ── Tables ─────────────────────────────────────────────────────── */
 .md-typeset table:not([class]) {
   border: 1px solid var(--ms-hairline-strong);
-  border-top: 3px solid var(--ms-m-blue) !important;
+  border-top: 3px solid #ffffff !important;
   border-collapse: collapse;
   width: 100%;
 }
@@ -475,7 +489,7 @@ body {
 .md-typeset details {
   background: var(--ms-surface-card) !important;
   border: 1px solid var(--ms-hairline-strong) !important;
-  border-left: 4px solid var(--ms-m-blue-mid) !important;
+  border-left: 4px solid #ffffff !important;
   box-shadow: none !important;
 }
 
@@ -498,7 +512,7 @@ body {
 
 .md-typeset .warning > .admonition-title,
 .md-typeset .danger > .admonition-title {
-  color: var(--ms-m-red) !important;
+  color: var(--ms-body-strong) !important;
 }
 
 .md-typeset .admonition.tip,
@@ -535,7 +549,7 @@ body {
 
 .md-typeset .tabbed-set > input:checked + .tabbed-labels > label {
   color: var(--ms-on-dark) !important;
-  border-bottom-color: var(--ms-m-red) !important;
+  border-bottom-color: #ffffff !important;
 }
 
 .md-typeset .tabbed-content {
@@ -559,7 +573,7 @@ body {
 
 .md-footer-nav__link:hover {
   background: var(--ms-carbon) !important;
-  border-color: var(--ms-m-blue) !important;
+  border-color: #ffffff !important;
 }
 
 .md-footer-nav__direction {
@@ -567,7 +581,7 @@ body {
   font-weight: 700 !important;
   letter-spacing: 1.5px !important;
   text-transform: uppercase !important;
-  color: var(--ms-m-blue-mid) !important;
+  color: var(--ms-body) !important;
 }
 
 .md-footer-nav__title {
