@@ -971,6 +971,40 @@ body {
   line-height: 1.5;
 }
 
+/* ── Permalink anchor (¶) — hide completely ─────────────────────── */
+.md-typeset .headerlink {
+  display: none !important;
+}
+
+/* ── Empty right sidebar — collapse when no TOC items ───────────── */
+.md-sidebar--secondary:not([hidden]) {
+  visibility: visible;
+}
+
+/* Hide secondary sidebar when it contains no nav items */
+.md-sidebar--secondary .md-nav__list:empty ~ *,
+.md-sidebar--secondary:has(.md-nav__list:empty) {
+  display: none !important;
+}
+
+/* Collapse the right column when secondary sidebar has no content */
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--secondary {
+    width: 0;
+    min-width: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+
+  /* Only show it when TOC actually has items */
+  .md-sidebar--secondary:has(li.md-nav__item) {
+    width: 12.1rem;
+    min-width: 12.1rem;
+    overflow: visible;
+    padding: initial;
+  }
+}
+
 /* ── Responsive ──────────────────────────────────────────────────── */
 @media screen and (max-width: 768px) {
   .ms-hero {
