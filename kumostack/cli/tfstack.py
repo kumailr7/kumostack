@@ -14,7 +14,8 @@ Usage:
 
 Environment variables:
     AWS_ENDPOINT_URL           Override all service endpoints (e.g. http://localhost:4566)
-    MINISTACK_HOSTNAME         KumoStack host           (default: localhost)
+    KUMOSTACK_HOSTNAME         KumoStack host (preferred; alias for MINISTACK_HOSTNAME)
+    MINISTACK_HOSTNAME         KumoStack host (legacy, still supported; default: localhost)
     GATEWAY_PORT               KumoStack port           (default: 4566)
     USE_SSL                    Use https instead of http (default: 0)
     S3_HOSTNAME                S3 virtual-host base     (default: s3.localhost.kumostack.org)
@@ -91,8 +92,12 @@ if _aws_ep:
     MINISTACK_HOSTNAME = _p.hostname or "localhost"
     GATEWAY_PORT       = _p.port or 4566
 else:
-    MINISTACK_HOSTNAME = _str_env("MINISTACK_HOSTNAME", "localhost")
-    GATEWAY_PORT       = _int_env("GATEWAY_PORT", 4566)
+    # KUMOSTACK_HOSTNAME is the canonical name; MINISTACK_HOSTNAME kept for backwards compat
+    MINISTACK_HOSTNAME = (
+        os.environ.get("KUMOSTACK_HOSTNAME", "").strip()
+        or _str_env("MINISTACK_HOSTNAME", "localhost")
+    )
+    GATEWAY_PORT = _int_env("GATEWAY_PORT", 4566)
 
 BASE_URL   = f"{SCHEME}://{MINISTACK_HOSTNAME}:{GATEWAY_PORT}"
 S3_HOSTNAME = _str_env("S3_HOSTNAME", "s3.localhost.kumostack.org")

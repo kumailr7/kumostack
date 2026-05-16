@@ -1,5 +1,28 @@
-#!/usr/bin/env python3
-# tfstack — direct-execution entry point (no install required).
-# When installed via pip, the console_script in pyproject.toml takes over.
-from kumostack.cli.tfstack import main
-main()
+#!/usr/bin/env bash
+# tfstack — KumoStack Terraform wrapper. No pip install required.
+#
+# Resolution order:
+#   1. .venv/bin/tfstack  (fast — already bootstrapped)
+#   2. uv sync + .venv    (first-run bootstrap via uv)
+#   3. PYTHONPATH inject  (fallback for machines without uv)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+VENV_TFSTACK="$REPO_ROOT/.venv/bin/tfstack"
+
+# Fast path: .venv already bootstrapped
+if [[ -x "$VENV_TFSTACK" ]]; then
+    exec "$VENV_TFSTACK" "$@"
+fi
+
+# Medium path: uv available — create/sync venv then run
+if command -v uv &>/dev/null; then
+    cd "$REPO_ROOT"
+    uv sync -q
+    exec "$VENV_TFSTACK" "$@"
+fi
+
+# Slow path: inject PYTHONPATH and use system python3
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -c "from kumostack.cli.tfstack import main; import sys; sys.argv[0]='tfstack'; main()" "$@"
