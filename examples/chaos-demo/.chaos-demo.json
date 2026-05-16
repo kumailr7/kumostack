@@ -1,0 +1,7 @@
+{
+  "api_url": "http://localhost:4566/restapis/e7d3b6a9/dev/_user_request_/products",
+  "api_id": "e7d3b6a9",
+  "topic_arn": "arn:aws:sns:us-east-1:000000000000:product-failures",
+  "queue_url": "http://localhost:4566/000000000000/product-retry-queue",
+  "queue_arn": "arn:aws:sqs:us-east-1:000000000000:product-retry-queue"
+}

@@ -1599,7 +1599,10 @@ async def _handle_chaos_request(method: str, path: str, body: bytes, query_param
         return 200, ct, json.dumps({"rules": rules}).encode()
 
     # POST /_kumostack/chaos  — create rule
+    # Skip if body is empty (pre-body routing pass); real body arrives in the data-plane pass.
     if method == "POST" and path == "/_kumostack/chaos":
+        if not body:
+            return None
         try:
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
@@ -1680,6 +1683,8 @@ def _get_docker_client():
 async def _handle_chaos_pumba(method: str, path: str, body: bytes):
     """POST /_kumostack/chaos/pumba — run Pumba network/stress chaos on a container."""
     if method != "POST" or path != "/_kumostack/chaos/pumba":
+        return None
+    if not body:
         return None
     ct = {"Content-Type": "application/json"}
     try:
@@ -1777,6 +1782,8 @@ async def _handle_chaos_region(method: str, path: str, body: bytes):
         return 200, ct, json.dumps({"regions": state}).encode()
 
     if method == "POST":
+        if not body:
+            return None
         try:
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
@@ -1812,6 +1819,8 @@ async def _handle_chaos_lambda_failure(method: str, path: str, body: bytes):
             return 200, ct, json.dumps({"failures": list(_lambda_failure.values())}).encode()
 
     if method == "POST":
+        if not body:
+            return None
         try:
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
