@@ -2044,6 +2044,8 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
 
 // ─── Chaos Engineering Tab ───────────────────────────────────────────────────
 
+// ─── Chaos Engineering ───────────────────────────────────────────────────────
+
 const FAULT_TYPES = [
   { id: "error",       label: "Error",       color: "#ef4444", desc: "Return a generic 500 InternalError" },
   { id: "throttle",    label: "Throttle",    color: "#f59e0b", desc: "Return a 400 ThrottlingException" },
@@ -2056,243 +2058,519 @@ const SERVICES_LIST = ["*","s3","sqs","lambda","dynamodb","sns","rds","iam","sec
 
 interface ChaosRule {
   id: string; name: string;
-  target_service: string; target_action: string;
+  target_service: string; target_action: string; target_region?: string;
   fault_type: string; fault_rate: number; delay_ms: number;
   status: string; created_at: string; expires_at: number | null;
   duration_seconds: number; trigger_count: number; last_triggered: string | null;
 }
+interface PumbaJob { id: string; container: string; chaos_type: string; duration_seconds: number; status: string; started_at: string; }
+interface LambdaFailure { function_name: string; failure_mode: string; rate: number; exception_msg: string; status_code: number; latency_ms: number; created_at: string; }
+interface ChaosContainer { name: string; id: string; status: string; image: string; labels: Record<string,string>; }
+
+const PUMBA_TYPES = [
+  { id: "network_delay",   label: "Network Delay",   desc: "Add artificial latency to container network traffic" },
+  { id: "network_loss",    label: "Packet Loss",      desc: "Drop X% of network packets" },
+  { id: "network_corrupt", label: "Packet Corrupt",   desc: "Corrupt X% of network packets" },
+  { id: "kill",            label: "Kill Container",   desc: "Send SIGKILL to the container process" },
+  { id: "stress_cpu",      label: "CPU Stress",       desc: "Stress N CPU cores with 100% load" },
+];
+
+const REGIONS_LIST = ["us-east-1","us-east-2","us-west-1","us-west-2","eu-west-1","eu-central-1","ap-southeast-1","ap-northeast-1"];
+const REGION_STATUS_COLOR: Record<string,string> = { healthy: "#10b981", degraded: "#f59e0b", down: "#ef4444" };
+
+function FaultBadge({ type }: { type: string }) {
+  const f = FAULT_TYPES.find(x => x.id === type);
+  return <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", background: `${f?.color ?? "#6b7280"}18`, border: `1px solid ${f?.color ?? "#6b7280"}35`, color: f?.color ?? "var(--text-dim)", borderRadius: 3 }}>{type}</span>;
+}
 
 function ChaosTab({ connected }: { connected: boolean }) {
+  const [activeSection, setActiveSection] = useState<"faults"|"infra"|"region"|"fis"|"tools">("faults");
+
+  // Service faults
   const [rules, setRules]       = useState<ChaosRule[]>([]);
   const [loading, setLoading]   = useState(false);
   const [showForm, setShowForm] = useState(false);
-
   const [name,      setName]      = useState("My Experiment");
   const [service,   setService]   = useState("*");
   const [action,    setAction]    = useState("*");
+  const [targetRegion, setTargetRegion] = useState("*");
   const [faultType, setFaultType] = useState("error");
   const [rate,      setRate]      = useState(100);
   const [delayMs,   setDelayMs]   = useState(1000);
   const [duration,  setDuration]  = useState(0);
 
-  const fetchRules = useCallback(() => {
+  // Infra / Pumba
+  const [containers, setContainers]   = useState<ChaosContainer[]>([]);
+  const [pumbaJobs,  setPumbaJobs]    = useState<PumbaJob[]>([]);
+  const [pumbaContainer, setPumbaContainer] = useState("");
+  const [pumbaChaosType, setPumbaChaosType] = useState("network_delay");
+  const [pumbaDelay,  setPumbaDelay]  = useState(100);
+  const [pumbaLoss,   setPumbaLoss]   = useState(10);
+  const [pumbaDur,    setPumbaDur]    = useState(30);
+  const [pumbaCpus,   setPumbaCpus]   = useState(1);
+
+  // Region failover
+  const [regionHealth, setRegionHealth] = useState<Record<string,string>>({});
+
+  // Lambda failure-lambda
+  const [lambdaFailures, setLambdaFailures] = useState<LambdaFailure[]>([]);
+  const [lfFn,   setLfFn]   = useState("*");
+  const [lfMode, setLfMode] = useState("exception");
+  const [lfRate, setLfRate] = useState(100);
+  const [lfMsg,  setLfMsg]  = useState("Chaos exception injection");
+  const [lfLatency, setLfLatency] = useState(3000);
+  const [showLfForm, setShowLfForm] = useState(false);
+
+  const fetchAll = useCallback(() => {
     if (!connected) return;
     fetch("/api/chaos").then(r => r.json()).then(d => setRules(d.rules ?? [])).catch(() => {});
+    fetch("/api/chaos?type=containers").then(r => r.json()).then(d => setContainers(d.containers ?? [])).catch(() => {});
+    fetch("/api/chaos?type=pumba").then(r => r.json()).then(d => setPumbaJobs(d.jobs ?? [])).catch(() => {});
+    fetch("/api/chaos?type=region").then(r => r.json()).then(d => setRegionHealth(d.regions ?? {})).catch(() => {});
+    fetch("/api/chaos?type=lambda-failure").then(r => r.json()).then(d => setLambdaFailures(d.failures ?? [])).catch(() => {});
   }, [connected]);
 
-  useEffect(() => { fetchRules(); const id = setInterval(fetchRules, 5000); return () => clearInterval(id); }, [fetchRules]);
+  useEffect(() => { fetchAll(); const id = setInterval(fetchAll, 5000); return () => clearInterval(id); }, [fetchAll]);
 
   const createRule = async () => {
     setLoading(true);
     await fetch("/api/chaos", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, target_service: service, target_action: action, fault_type: faultType, fault_rate: rate / 100, delay_ms: delayMs, duration_seconds: duration }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, target_service: service, target_action: action, target_region: targetRegion === "*" ? undefined : targetRegion, fault_type: faultType, fault_rate: rate / 100, delay_ms: delayMs, duration_seconds: duration }),
     });
-    setShowForm(false); setLoading(false); fetchRules();
+    setShowForm(false); setLoading(false); fetchAll();
   };
 
-  const deleteRule = async (id: string) => {
-    await fetch(`/api/chaos?id=${id}`, { method: "DELETE" });
-    fetchRules();
+  const deleteRule   = async (id: string) => { await fetch(`/api/chaos?id=${id}`, { method: "DELETE" }); fetchAll(); };
+  const toggleRule   = async (r: ChaosRule) => {
+    await fetch(`/api/chaos?id=${r.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: r.status === "active" ? "stopped" : "active" }) });
+    fetchAll();
   };
+  const clearAll     = async () => { await fetch("/api/chaos", { method: "DELETE" }); fetchAll(); };
 
-  const toggleRule = async (r: ChaosRule) => {
-    await fetch(`/api/chaos?id=${r.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: r.status === "active" ? "stopped" : "active" }),
+  const runPumba = async () => {
+    if (!pumbaContainer) return;
+    await fetch("/api/chaos?type=pumba", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ container: pumbaContainer, chaos_type: pumbaChaosType, duration_seconds: pumbaDur, delay_ms: pumbaDelay, loss_percent: pumbaLoss, cpus: pumbaCpus }),
     });
-    fetchRules();
+    fetchAll();
   };
 
-  const clearAll = async () => {
-    await fetch("/api/chaos", { method: "DELETE" });
-    fetchRules();
+  const setRegion = async (region: string, status: string) => {
+    if (status === "healthy") {
+      await fetch(`/api/chaos?type=region&id=${region}`, { method: "DELETE" });
+    } else {
+      await fetch("/api/chaos?type=region", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ region, status }) });
+    }
+    fetchAll();
   };
 
-  const activeCount   = rules.filter(r => r.status === "active").length;
-  const triggerTotal  = rules.reduce((s, r) => s + r.trigger_count, 0);
+  const createLambdaFailure = async () => {
+    await fetch("/api/chaos?type=lambda-failure", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ function_name: lfFn, failure_mode: lfMode, rate: lfRate / 100, exception_msg: lfMsg, latency_ms: lfLatency }),
+    });
+    setShowLfForm(false); fetchAll();
+  };
+
+  const deleteLambdaFailure = async (fn: string) => {
+    await fetch(`/api/chaos?type=lambda-failure&id=${fn}`, { method: "DELETE" }); fetchAll();
+  };
+
+  const activeCount  = rules.filter(r => r.status === "active").length;
+  const triggerTotal = rules.reduce((s, r) => s + r.trigger_count, 0);
+  const downRegions  = Object.values(regionHealth).filter(s => s === "down").length;
   const ft = FAULT_TYPES.find(f => f.id === faultType);
+
+  const SECTIONS = [
+    { id: "faults",  label: "Service Faults",    badge: activeCount > 0 ? `${activeCount} active` : undefined },
+    { id: "infra",   label: "Infrastructure",     badge: pumbaJobs.length > 0 ? `${pumbaJobs.length} jobs` : undefined },
+    { id: "region",  label: "Region Failover",    badge: downRegions > 0 ? `${downRegions} down` : undefined },
+    { id: "fis",     label: "FIS / Lambda",       badge: lambdaFailures.length > 0 ? `${lambdaFailures.length}` : undefined },
+    { id: "tools",   label: "Tools & Docs",       badge: undefined },
+  ] as const;
 
   return (
     <div>
       <div className="page-header">
         <div>
           <h1 className="page-title">Chaos Engineering</h1>
-          <p className="page-subtitle">Inject faults into KumoStack services to test application resilience</p>
+          <p className="page-subtitle">Fault injection · Infrastructure chaos · Region failover · FIS</p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {rules.length > 0 && (
-            <button className="pill-btn" onClick={clearAll} style={{ color: "#ef4444", borderColor: "#ef444440" }}>Clear All</button>
-          )}
-          <button className="btn-primary" onClick={() => setShowForm(!showForm)} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            New Experiment
-          </button>
-        </div>
+        {activeSection === "faults" && rules.length > 0 && (
+          <button className="pill-btn" onClick={clearAll} style={{ color: "#ef4444", borderColor: "#ef444440" }}>Clear All Rules</button>
+        )}
       </div>
 
-      {/* Stats */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 28 }}>
+      {/* Stats bar */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, marginBottom: 20 }}>
         {[
-          { label: "Total Rules",     value: rules.length,   color: "#60a5fa" },
-          { label: "Active",          value: activeCount,    color: activeCount > 0 ? "#ef4444" : "var(--text-dim)" },
-          { label: "Faults Injected", value: triggerTotal,   color: triggerTotal > 0 ? "#f59e0b" : "var(--text-dim)" },
-          { label: "Services Hit",    value: new Set(rules.filter(r=>r.trigger_count>0).map(r=>r.target_service)).size, color: "#8b5cf6" },
+          { label: "Active Rules",    value: activeCount,   color: activeCount > 0 ? "#ef4444" : "var(--text-dim)" },
+          { label: "Faults Fired",   value: triggerTotal,  color: triggerTotal > 0 ? "#f59e0b" : "var(--text-dim)" },
+          { label: "Pumba Jobs",     value: pumbaJobs.length, color: "#3b82f6" },
+          { label: "Regions Down",   value: downRegions,   color: downRegions > 0 ? "#ef4444" : "var(--text-dim)" },
+          { label: "Lambda Failures",value: lambdaFailures.length, color: "#8b5cf6" },
         ].map(({ label, value, color }) => (
-          <div key={label} style={{ background: "var(--bg-card)", border: `1px solid ${color}25`, borderRadius: "var(--radius)", padding: "14px 18px", display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color, letterSpacing: "-0.03em", lineHeight: 1 }}>{value}</div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</div>
+          <div key={label} style={{ background: "var(--bg-card)", border: `1px solid ${color}25`, borderRadius: "var(--radius)", padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ fontSize: 24, fontWeight: 700, color, letterSpacing: "-0.03em", lineHeight: 1 }}>{value}</div>
+            <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</div>
           </div>
         ))}
       </div>
 
-      {/* Fault type quick reference */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8, marginBottom: 28 }}>
-        {FAULT_TYPES.map(f => (
-          <div key={f.id} style={{ background: "var(--bg-card)", border: `1px solid ${f.color}30`, borderRadius: "var(--radius-sm)", padding: "10px 14px" }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: f.color, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>{f.label}</div>
-            <div style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.4 }}>{f.desc}</div>
-          </div>
+      {/* Section tabs */}
+      <div className="filter-pills" style={{ marginBottom: 24 }}>
+        {SECTIONS.map(s => (
+          <button key={s.id} className={`pill-btn${activeSection === s.id ? " active" : ""}`} onClick={() => setActiveSection(s.id as typeof activeSection)}>
+            {s.label}
+            {s.badge && <span style={{ marginLeft: 6, fontSize: 10, padding: "1px 5px", background: "#ef444420", color: "#ef4444", borderRadius: 3, border: "1px solid #ef444440" }}>{s.badge}</span>}
+          </button>
         ))}
       </div>
 
-      {/* New experiment form */}
-      {showForm && (
-        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-strong)", borderRadius: "var(--radius)", padding: 24, marginBottom: 28 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 20 }}>New Chaos Experiment</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Name</label>
-              <input className="search" value={name} onChange={e => setName(e.target.value)} style={{ width: "100%", marginBottom: 0 }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Fault Type</label>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {FAULT_TYPES.map(f => (
-                  <button key={f.id} onClick={() => setFaultType(f.id)} style={{ padding: "5px 12px", fontSize: 12, fontWeight: 700, background: faultType === f.id ? f.color + "20" : "var(--bg-elevated)", border: `1px solid ${faultType === f.id ? f.color : "var(--border)"}`, color: faultType === f.id ? f.color : "var(--text-dim)", borderRadius: "var(--radius-sm)", cursor: "pointer" }}>{f.label}</button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Target Service</label>
-              <select value={service} onChange={e => setService(e.target.value)} style={{ width: "100%", background: "var(--bg-card)", border: "1px solid var(--border-strong)", padding: "8px 12px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>
-                {SERVICES_LIST.map(s => <option key={s}>{s}</option>)}
-              </select>
-            </div>
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Target Action <span style={{ color: "var(--text-faint)", fontWeight: 400 }}>(* = all)</span></label>
-              <input className="search" value={action} onChange={e => setAction(e.target.value)} placeholder="e.g. SendMessage, GetObject, *" style={{ width: "100%", marginBottom: 0 }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Fault Rate — {rate}%</label>
-              <input type="range" min={1} max={100} value={rate} onChange={e => setRate(Number(e.target.value))} style={{ width: "100%", accentColor: ft?.color }} />
-            </div>
-            {faultType === "latency" ? (
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Delay (ms)</label>
-                <input className="search" type="number" min={0} value={delayMs} onChange={e => setDelayMs(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} />
-              </div>
-            ) : (
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 6 }}>Duration (seconds, 0 = indefinite)</label>
-                <input className="search" type="number" min={0} value={duration} onChange={e => setDuration(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} />
-              </div>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-            <button className="btn-primary" onClick={createRule} disabled={loading} style={{ flex: 1 }}>{loading ? "Creating…" : `Inject ${ft?.label ?? "Fault"}`}</button>
-            <button className="pill-btn" onClick={() => setShowForm(false)} style={{ flex: 1 }}>Cancel</button>
-          </div>
-        </div>
-      )}
-
-      {/* Rules table */}
-      {rules.length === 0 ? (
-        <div className="empty-state">No active experiments. Click <strong>New Experiment</strong> to inject a fault.</div>
-      ) : (
-        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                {["Name","Target","Fault","Rate","Triggers","Expires","Status",""].map(h => (
-                  <th key={h} style={{ padding: "10px 14px", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rules.map(r => {
-                const fInfo = FAULT_TYPES.find(f => f.id === r.fault_type);
-                const isActive = r.status === "active";
-                const expiresIn = r.expires_at ? Math.max(0, Math.round((r.expires_at - Date.now() / 1000))) : null;
-                return (
-                  <tr key={r.id} style={{ borderBottom: "1px solid var(--border)", opacity: isActive ? 1 : 0.5 }}>
-                    <td style={{ padding: "12px 14px" }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{r.name}</div>
-                      <div style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "var(--font-mono, monospace)" }}>{r.id}</div>
-                    </td>
-                    <td style={{ padding: "12px 14px" }}>
-                      <div style={{ fontSize: 12, color: "var(--text)" }}>{r.target_service}</div>
-                      <div style={{ fontSize: 11, color: "var(--text-faint)" }}>{r.target_action}</div>
-                    </td>
-                    <td style={{ padding: "12px 14px" }}>
-                      <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", background: `${fInfo?.color ?? "#6b7280"}18`, border: `1px solid ${fInfo?.color ?? "#6b7280"}35`, color: fInfo?.color ?? "var(--text-dim)", borderRadius: 3 }}>{r.fault_type}</span>
-                    </td>
-                    <td style={{ padding: "12px 14px", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{Math.round(r.fault_rate * 100)}%</td>
-                    <td style={{ padding: "12px 14px" }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: r.trigger_count > 0 ? "#f59e0b" : "var(--text-dim)" }}>{r.trigger_count}</div>
-                      {r.last_triggered && <div style={{ fontSize: 10, color: "var(--text-faint)" }}>{r.last_triggered.replace("T"," ").replace("Z","")}</div>}
-                    </td>
-                    <td style={{ padding: "12px 14px", fontSize: 12, color: "var(--text-dim)" }}>
-                      {expiresIn !== null ? (expiresIn > 0 ? `${expiresIn}s` : "expired") : "∞"}
-                    </td>
-                    <td style={{ padding: "12px 14px" }}>
-                      <span className={`pill ${isActive ? "pill--red" : "pill--dim"}`} style={{ fontSize: 10 }}>{r.status.toUpperCase()}</span>
-                    </td>
-                    <td style={{ padding: "12px 14px" }}>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button className="pill-btn" onClick={() => toggleRule(r)} style={{ fontSize: 11, padding: "3px 10px" }}>{isActive ? "Stop" : "Resume"}</button>
-                        <button className="pill-btn" onClick={() => deleteRule(r.id)} style={{ fontSize: 11, padding: "3px 10px", color: "#ef4444", borderColor: "#ef444440" }}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Quick preset experiments */}
-      <div className="section-header" style={{ marginTop: 40, marginBottom: 16 }}>QUICK PRESETS</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 12 }}>
-        {[
-          { name: "SQS Throttle Storm",    service: "sqs",      action: "SendMessage",    fault_type: "throttle",    fault_rate: 0.5,  delay_ms: 0,    duration_seconds: 60,  desc: "Throttle 50% of SQS SendMessage for 60 seconds" },
-          { name: "Lambda Outage",         service: "lambda",   action: "Invoke",         fault_type: "unavailable", fault_rate: 1.0,  delay_ms: 0,    duration_seconds: 30,  desc: "Block all Lambda invocations for 30 seconds" },
-          { name: "DynamoDB Latency",      service: "dynamodb", action: "*",              fault_type: "latency",     fault_rate: 0.8,  delay_ms: 2000, duration_seconds: 120, desc: "Add 2s latency to 80% of DynamoDB calls" },
-          { name: "S3 Flaky Reads",        service: "s3",       action: "GetObject",      fault_type: "error",       fault_rate: 0.3,  delay_ms: 0,    duration_seconds: 60,  desc: "Fail 30% of S3 GetObject requests" },
-          { name: "Full Stack Chaos",      service: "*",        action: "*",              fault_type: "error",       fault_rate: 0.1,  delay_ms: 0,    duration_seconds: 30,  desc: "Random 10% error rate across all services" },
-          { name: "Secrets Manager Deny",  service: "secretsmanager", action: "GetSecretValue", fault_type: "error", fault_rate: 1.0, delay_ms: 0, duration_seconds: 60, desc: "Block all secret reads — test secret rotation fallback" },
-        ].map(p => (
-          <div key={p.name} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "16px 18px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{p.name}</div>
-            <div style={{ fontSize: 12, color: "var(--text-faint)", marginBottom: 12, lineHeight: 1.5 }}>{p.desc}</div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-              <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{p.service}</span>
-              <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{p.fault_type}</span>
-              <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{Math.round(p.fault_rate*100)}%</span>
-              {p.duration_seconds > 0 && <span style={{ fontSize: 10, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{p.duration_seconds}s</span>}
-            </div>
-            <button className="btn-primary" onClick={async () => {
-              await fetch("/api/chaos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...p }) });
-              fetchRules();
-            }} style={{ width: "100%", fontSize: 12 }}>
-              Inject Fault
+      {/* ── SERVICE FAULTS ── */}
+      {activeSection === "faults" && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div className="section-header" style={{ margin: 0 }}>FAULT INJECTION RULES</div>
+            <button className="btn-primary" onClick={() => setShowForm(!showForm)} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              New Rule
             </button>
           </div>
-        ))}
-      </div>
+
+          {showForm && (
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-strong)", borderRadius: "var(--radius)", padding: 20, marginBottom: 20 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+                {[{ label: "Name", node: <input className="search" value={name} onChange={e => setName(e.target.value)} style={{ width: "100%", marginBottom: 0 }} /> },
+                  { label: "Target Service", node: <select value={service} onChange={e => setService(e.target.value)} style={{ width: "100%", background: "var(--bg-card)", border: "1px solid var(--border-strong)", padding: "8px 10px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>{SERVICES_LIST.map(s => <option key={s}>{s}</option>)}</select> },
+                  { label: "Target Action (* = all)", node: <input className="search" value={action} onChange={e => setAction(e.target.value)} placeholder="*" style={{ width: "100%", marginBottom: 0 }} /> },
+                  { label: "Target Region (* = all)", node: <select value={targetRegion} onChange={e => setTargetRegion(e.target.value)} style={{ width: "100%", background: "var(--bg-card)", border: "1px solid var(--border-strong)", padding: "8px 10px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}><option value="*">* (all)</option>{REGIONS_LIST.map(r => <option key={r}>{r}</option>)}</select> },
+                  { label: `Fault Rate — ${rate}%`, node: <input type="range" min={1} max={100} value={rate} onChange={e => setRate(Number(e.target.value))} style={{ width: "100%", accentColor: ft?.color }} /> },
+                  { label: "Duration sec (0=∞)", node: <input className="search" type="number" min={0} value={duration} onChange={e => setDuration(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} /> },
+                ].map(({ label, node }) => (
+                  <div key={label}><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>{label}</label>{node}</div>
+                ))}
+              </div>
+              <div style={{ marginTop: 14 }}><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 8 }}>Fault Type</label>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {FAULT_TYPES.map(f => <button key={f.id} onClick={() => setFaultType(f.id)} style={{ padding: "5px 12px", fontSize: 12, fontWeight: 700, background: faultType === f.id ? f.color + "20" : "var(--bg-elevated)", border: `1px solid ${faultType === f.id ? f.color : "var(--border)"}`, color: faultType === f.id ? f.color : "var(--text-dim)", borderRadius: "var(--radius-sm)", cursor: "pointer" }}>{f.label}</button>)}
+                </div>
+              </div>
+              {faultType === "latency" && <div style={{ marginTop: 12 }}><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Delay (ms)</label><input className="search" type="number" min={0} value={delayMs} onChange={e => setDelayMs(Number(e.target.value))} style={{ width: 160, marginBottom: 0 }} /></div>}
+              <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+                <button className="btn-primary" onClick={createRule} disabled={loading} style={{ flex: 1 }}>{loading ? "Creating…" : `Inject ${ft?.label ?? "Fault"}`}</button>
+                <button className="pill-btn" onClick={() => setShowForm(false)} style={{ flex: 1 }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {rules.length === 0 ? <div className="empty-state">No rules. Click <strong>New Rule</strong> to inject a fault.</div> : (
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr style={{ borderBottom: "1px solid var(--border)" }}>{["Name","Service / Action / Region","Fault","Rate","Triggers","Expires","Status",""].map(h => <th key={h} style={{ padding: "9px 12px", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {rules.map(r => {
+                    const isActive = r.status === "active";
+                    const expiresIn = r.expires_at ? Math.max(0, Math.round((r.expires_at - Date.now() / 1000))) : null;
+                    return (
+                      <tr key={r.id} style={{ borderBottom: "1px solid var(--border)", opacity: isActive ? 1 : 0.5 }}>
+                        <td style={{ padding: "10px 12px" }}><div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{r.name}</div><div style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "var(--font-mono,monospace)" }}>{r.id}</div></td>
+                        <td style={{ padding: "10px 12px" }}><div style={{ fontSize: 12, color: "var(--text)" }}>{r.target_service} · {r.target_action}</div>{r.target_region && r.target_region !== "*" && <div style={{ fontSize: 10, color: "var(--accent)" }}>{r.target_region}</div>}</td>
+                        <td style={{ padding: "10px 12px" }}><FaultBadge type={r.fault_type} /></td>
+                        <td style={{ padding: "10px 12px", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{Math.round(r.fault_rate * 100)}%</td>
+                        <td style={{ padding: "10px 12px" }}><div style={{ fontSize: 13, fontWeight: 700, color: r.trigger_count > 0 ? "#f59e0b" : "var(--text-dim)" }}>{r.trigger_count}</div>{r.last_triggered && <div style={{ fontSize: 10, color: "var(--text-faint)" }}>{r.last_triggered.slice(11,19)}</div>}</td>
+                        <td style={{ padding: "10px 12px", fontSize: 12, color: "var(--text-dim)" }}>{expiresIn !== null ? (expiresIn > 0 ? `${expiresIn}s` : "expired") : "∞"}</td>
+                        <td style={{ padding: "10px 12px" }}><span className={`pill ${isActive ? "pill--red" : "pill--dim"}`} style={{ fontSize: 10 }}>{r.status.toUpperCase()}</span></td>
+                        <td style={{ padding: "10px 12px" }}><div style={{ display: "flex", gap: 5 }}><button className="pill-btn" onClick={() => toggleRule(r)} style={{ fontSize: 10, padding: "2px 8px" }}>{isActive ? "Stop" : "Resume"}</button><button className="pill-btn" onClick={() => deleteRule(r.id)} style={{ fontSize: 10, padding: "2px 8px", color: "#ef4444", borderColor: "#ef444440" }}>✕</button></div></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="section-header" style={{ marginTop: 32, marginBottom: 14 }}>QUICK PRESETS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))", gap: 10 }}>
+            {[
+              { name: "SQS Throttle Storm",   service: "sqs",      action: "SendMessage",    fault_type: "throttle",    fault_rate: 0.5,  delay_ms: 0, duration_seconds: 60,  desc: "Throttle 50% of SQS SendMessage calls" },
+              { name: "Lambda Outage",         service: "lambda",   action: "Invoke",         fault_type: "unavailable", fault_rate: 1.0,  delay_ms: 0, duration_seconds: 30,  desc: "Block all Lambda invocations for 30s" },
+              { name: "DynamoDB Slow Reads",   service: "dynamodb", action: "GetItem",        fault_type: "latency",     fault_rate: 0.8,  delay_ms: 2000, duration_seconds: 120, desc: "2s latency on 80% of DynamoDB reads" },
+              { name: "S3 Flaky Reads",        service: "s3",       action: "GetObject",      fault_type: "error",       fault_rate: 0.3,  delay_ms: 0, duration_seconds: 60,  desc: "Fail 30% of S3 GetObject requests" },
+              { name: "Full Stack 10% Error",  service: "*",        action: "*",              fault_type: "error",       fault_rate: 0.1,  delay_ms: 0, duration_seconds: 60,  desc: "Random 10% error rate across all services" },
+              { name: "Secrets Manager Deny",  service: "secretsmanager", action: "GetSecretValue", fault_type: "error", fault_rate: 1.0, delay_ms: 0, duration_seconds: 60, desc: "Block all secret reads" },
+              { name: "API GW Throttle",       service: "apigateway", action: "*",            fault_type: "throttle",    fault_rate: 0.5,  delay_ms: 0, duration_seconds: 60,  desc: "Throttle 50% of API Gateway calls" },
+              { name: "RDS Timeout",           service: "rds",      action: "*",              fault_type: "timeout",     fault_rate: 0.4,  delay_ms: 0, duration_seconds: 30,  desc: "Force client timeout on 40% of RDS calls" },
+            ].map(p => (
+              <div key={p.name} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "14px 16px" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>{p.name}</div>
+                <div style={{ fontSize: 11, color: "var(--text-faint)", marginBottom: 10, lineHeight: 1.5 }}>{p.desc}</div>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 10 }}>
+                  {[p.service, p.fault_type, `${Math.round(p.fault_rate*100)}%`, `${p.duration_seconds}s`].map(t => <span key={t} style={{ fontSize: 10, padding: "1px 5px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{t}</span>)}
+                </div>
+                <button className="btn-primary" onClick={async () => { await fetch("/api/chaos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }); fetchAll(); }} style={{ width: "100%", fontSize: 11 }}>Inject</button>
+              </div>
+            ))}</div>
+        </div>
+      )}
+
+      {/* ── INFRASTRUCTURE (Pumba) ── */}
+      {activeSection === "infra" && (
+        <div>
+          <div className="section-header" style={{ marginBottom: 16 }}>PUMBA — DOCKER CONTAINER CHAOS</div>
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 20, marginBottom: 24 }}>
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 16, lineHeight: 1.6 }}>
+              <strong style={{ color: "var(--text)" }}>Pumba</strong> injects network chaos and resource stress directly into Docker containers (RDS, ElastiCache, Redis, etc.)
+              via the Docker socket. Requires the <code className="inline-code">gaiaadm/pumba</code> image — it will be pulled automatically on first use.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
+              <div>
+                <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Target Container</label>
+                <select value={pumbaContainer} onChange={e => setPumbaContainer(e.target.value)} style={{ width: "100%", background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", padding: "8px 10px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>
+                  <option value="">Select container…</option>
+                  {containers.map(c => <option key={c.id} value={c.name}>{c.name} ({c.status})</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Chaos Type</label>
+                <select value={pumbaChaosType} onChange={e => setPumbaChaosType(e.target.value)} style={{ width: "100%", background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", padding: "8px 10px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>
+                  {PUMBA_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Duration (seconds)</label>
+                <input className="search" type="number" min={5} value={pumbaDur} onChange={e => setPumbaDur(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} />
+              </div>
+              {pumbaChaosType === "network_delay" && <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Delay (ms)</label><input className="search" type="number" min={0} value={pumbaDelay} onChange={e => setPumbaDelay(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} /></div>}
+              {pumbaChaosType === "network_loss" && <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Loss %</label><input className="search" type="number" min={0} max={100} value={pumbaLoss} onChange={e => setPumbaLoss(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} /></div>}
+              {pumbaChaosType === "stress_cpu" && <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>CPUs</label><input className="search" type="number" min={1} value={pumbaCpus} onChange={e => setPumbaCpus(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} /></div>}
+            </div>
+            <button className="btn-primary" onClick={runPumba} disabled={!pumbaContainer} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Run Pumba
+            </button>
+          </div>
+
+          <div className="section-header" style={{ marginBottom: 12 }}>ACTIVE JOBS</div>
+          {pumbaJobs.length === 0 ? <div className="empty-state">No Pumba jobs running.</div> : (
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr style={{ borderBottom: "1px solid var(--border)" }}>{["Job ID","Container","Type","Duration","Started","Status"].map(h => <th key={h} style={{ padding: "9px 12px", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>)}</tr></thead>
+                <tbody>{pumbaJobs.map(j => <tr key={j.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: "10px 12px", fontSize: 11, fontFamily: "var(--font-mono,monospace)", color: "var(--text-dim)" }}>{j.id}</td>
+                  <td style={{ padding: "10px 12px", fontSize: 13, color: "var(--text)" }}>{j.container}</td>
+                  <td style={{ padding: "10px 12px" }}><span style={{ fontSize: 11, padding: "2px 7px", background: "#3b82f620", border: "1px solid #3b82f635", color: "#3b82f6", borderRadius: 3 }}>{j.chaos_type}</span></td>
+                  <td style={{ padding: "10px 12px", fontSize: 12, color: "var(--text-dim)" }}>{j.duration_seconds}s</td>
+                  <td style={{ padding: "10px 12px", fontSize: 11, color: "var(--text-faint)" }}>{j.started_at?.slice(11,19)}</td>
+                  <td style={{ padding: "10px 12px" }}><span className="pill pill--green" style={{ fontSize: 10 }}>{j.status.toUpperCase()}</span></td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="section-header" style={{ marginTop: 28, marginBottom: 12 }}>AVAILABLE CONTAINERS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 8 }}>
+            {containers.map(c => (
+              <div key={c.id} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+                <span className={`svc-dot ${c.status === "running" ? "svc-dot--up" : "svc-dot--idle"}`} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                  <div style={{ fontSize: 10, color: "var(--text-faint)" }}>{c.status} · {c.image.split(":")[0].split("/").pop()}</div>
+                </div>
+                <button className="pill-btn" onClick={() => setPumbaContainer(c.name)} style={{ marginLeft: "auto", fontSize: 10, padding: "2px 8px", flexShrink: 0 }}>Target</button>
+              </div>
+            ))}
+            {containers.length === 0 && <div style={{ fontSize: 13, color: "var(--text-faint)", padding: "8px 0" }}>No KumoStack containers detected. Start RDS or ElastiCache services first.</div>}
+          </div>
+        </div>
+      )}
+
+      {/* ── REGION FAILOVER ── */}
+      {activeSection === "region" && (
+        <div>
+          <div className="section-header" style={{ marginBottom: 16 }}>MULTI-REGION ARCHITECTURE</div>
+          {/* Architecture diagram — based on the Route53 failover diagram */}
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 28, marginBottom: 28, overflowX: "auto" }}>
+            <div style={{ display: "flex", alignItems: "stretch", gap: 0, minWidth: 700 }}>
+              {/* Route53 */}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 24px 0 0", gap: 8 }}>
+                <div style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(99,91,199,0.2)", border: "2px solid #635bc7", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🌐</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)" }}>Route 53</div>
+                <div style={{ fontSize: 10, color: "var(--text-faint)" }}>DNS Failover</div>
+              </div>
+              {/* Lines to regions */}
+              <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-around", gap: 8, flex: 1 }}>
+                {[{ region: "us-east-1", label: "Primary", color: "#10b981" }, { region: "eu-central-1", label: "Standby", color: "#f59e0b" }].map(({ region, label, color }) => {
+                  const status = regionHealth[region] ?? "healthy";
+                  const sc = REGION_STATUS_COLOR[status] ?? "#10b981";
+                  return (
+                    <div key={region} style={{ background: `${sc}08`, border: `2px dashed ${sc}60`, borderRadius: "var(--radius)", padding: "16px 20px", display: "flex", alignItems: "center", gap: 16 }}>
+                      <div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: sc, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{region}</div>
+                        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+                          {["API Gateway", "Lambda", "DynamoDB"].map(svc => <span key={svc} style={{ fontSize: 10, padding: "2px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: status === "down" ? "#ef4444" : "var(--text-dim)" }}>{svc}</span>)}
+                          {region === "us-east-1" && <span style={{ fontSize: 10, padding: "2px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>Replication λ</span>}
+                        </div>
+                      </div>
+                      <div style={{ marginLeft: "auto", display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+                        <span className={`pill ${status === "healthy" ? "pill--green" : status === "degraded" ? "" : "pill--red"}`} style={{ fontSize: 10 }}>{status.toUpperCase()}</span>
+                        <div style={{ display: "flex", gap: 5 }}>
+                          {status !== "healthy"   && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}   style={{ fontSize: 10, padding: "2px 8px", color: "#10b981", borderColor: "#10b98140" }}>Restore</button>}
+                          {status !== "degraded"  && <button className="pill-btn" onClick={() => setRegion(region, "degraded")}  style={{ fontSize: 10, padding: "2px 8px", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
+                          {status !== "down"      && <button className="pill-btn" onClick={() => setRegion(region, "down")}      style={{ fontSize: 10, padding: "2px 8px", color: "#ef4444", borderColor: "#ef444440" }}>Take Down</button>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="section-header" style={{ marginBottom: 12 }}>ALL REGIONS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))", gap: 8 }}>
+            {REGIONS_LIST.map(region => {
+              const status = regionHealth[region] ?? "healthy";
+              const sc = REGION_STATUS_COLOR[status] ?? "#10b981";
+              return (
+                <div key={region} style={{ background: "var(--bg-card)", border: `1px solid ${sc}30`, borderRadius: "var(--radius-sm)", padding: "12px 14px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{region}</div>
+                    <span className={`pill ${status === "healthy" ? "pill--green" : status === "degraded" ? "" : "pill--red"}`} style={{ fontSize: 9 }}>{status.toUpperCase()}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 5 }}>
+                    {status !== "healthy"  && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}  style={{ flex: 1, fontSize: 10, padding: "2px 0", color: "#10b981", borderColor: "#10b98140" }}>✓ Restore</button>}
+                    {status !== "degraded" && <button className="pill-btn" onClick={() => setRegion(region, "degraded")} style={{ flex: 1, fontSize: 10, padding: "2px 0", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
+                    {status !== "down"     && <button className="pill-btn" onClick={() => setRegion(region, "down")}     style={{ flex: 1, fontSize: 10, padding: "2px 0", color: "#ef4444", borderColor: "#ef444440" }}>Down</button>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ marginTop: 24, padding: "14px 18px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
+            <strong style={{ color: "var(--text)" }}>How region chaos works:</strong> Setting a region to <strong style={{ color: "#ef4444" }}>DOWN</strong> causes KumoStack to return
+            503 ServiceUnavailableException for every API call whose SigV4 credential scope targets that region — simulating a full region outage.
+            <strong style={{ color: "#f59e0b" }}> DEGRADED</strong> adds 1–3s random latency to every call in that region.
+            Route 53 health checks for the failed region return UNHEALTHY, triggering DNS failover to the standby region.
+          </div>
+        </div>
+      )}
+
+      {/* ── FIS / LAMBDA FAILURE ── */}
+      {activeSection === "fis" && (
+        <div>
+          <div className="section-header" style={{ marginBottom: 16 }}>FAULT INJECTION SERVICE (FIS) — LAMBDA</div>
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 20, marginBottom: 24, fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
+            Inspired by <strong style={{ color: "var(--text)" }}>failure-lambda</strong> and <strong style={{ color: "var(--text)" }}>AWS FIS</strong> — inject failures directly at Lambda execution time.
+            Supports exception injection, status code override, artificial latency, and event blacklisting. Works on any Lambda function by function name or <code className="inline-code">*</code> (all functions).
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div className="section-header" style={{ margin: 0 }}>ACTIVE FAILURES</div>
+            <button className="btn-primary" onClick={() => setShowLfForm(!showLfForm)} style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Failure
+            </button>
+          </div>
+
+          {showLfForm && (
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-strong)", borderRadius: "var(--radius)", padding: 20, marginBottom: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Function Name (* = all)</label><input className="search" value={lfFn} onChange={e => setLfFn(e.target.value)} placeholder="my-function or *" style={{ width: "100%", marginBottom: 0 }} /></div>
+                <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Failure Mode</label>
+                  <select value={lfMode} onChange={e => setLfMode(e.target.value)} style={{ width: "100%", background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", padding: "8px 10px", color: "var(--text)", fontSize: 13, borderRadius: "var(--radius-sm)" }}>
+                    {[{ id: "exception", label: "Exception — throw error at invocation" }, { id: "statuscode", label: "Status Code — return non-2xx response" }, { id: "latency", label: "Latency — add delay before execution" }, { id: "blacklist", label: "Blacklist — block events with specific keys" }].map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </select>
+                </div>
+                <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Rate — {lfRate}%</label><input type="range" min={1} max={100} value={lfRate} onChange={e => setLfRate(Number(e.target.value))} style={{ width: "100%", accentColor: "#8b5cf6" }} /></div>
+                {lfMode === "exception" && <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Exception Message</label><input className="search" value={lfMsg} onChange={e => setLfMsg(e.target.value)} style={{ width: "100%", marginBottom: 0 }} /></div>}
+                {lfMode === "latency"   && <div><label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>Latency (ms)</label><input className="search" type="number" value={lfLatency} onChange={e => setLfLatency(Number(e.target.value))} style={{ width: "100%", marginBottom: 0 }} /></div>}
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+                <button className="btn-primary" onClick={createLambdaFailure} style={{ flex: 1 }}>Inject</button>
+                <button className="pill-btn" onClick={() => setShowLfForm(false)} style={{ flex: 1 }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {lambdaFailures.length === 0 ? <div className="empty-state">No Lambda failures configured.</div> : (
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden", marginBottom: 32 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr style={{ borderBottom: "1px solid var(--border)" }}>{["Function","Mode","Rate","Config","Created",""].map(h => <th key={h} style={{ padding: "9px 12px", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>)}</tr></thead>
+                <tbody>{lambdaFailures.map(lf => (
+                  <tr key={lf.function_name} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "10px 12px", fontSize: 13, fontWeight: 600, color: lf.function_name === "*" ? "#8b5cf6" : "var(--text)", fontFamily: "var(--font-mono,monospace)" }}>{lf.function_name}</td>
+                    <td style={{ padding: "10px 12px" }}><span style={{ fontSize: 11, padding: "2px 7px", background: "#8b5cf620", border: "1px solid #8b5cf635", color: "#8b5cf6", borderRadius: 3 }}>{lf.failure_mode}</span></td>
+                    <td style={{ padding: "10px 12px", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{Math.round(lf.rate * 100)}%</td>
+                    <td style={{ padding: "10px 12px", fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono,monospace)" }}>{lf.failure_mode === "exception" ? lf.exception_msg : lf.failure_mode === "latency" ? `${lf.latency_ms}ms` : `${lf.status_code}`}</td>
+                    <td style={{ padding: "10px 12px", fontSize: 11, color: "var(--text-faint)" }}>{lf.created_at?.slice(11,19)}</td>
+                    <td style={{ padding: "10px 12px" }}><button className="pill-btn" onClick={() => deleteLambdaFailure(lf.function_name)} style={{ fontSize: 10, padding: "2px 8px", color: "#ef4444", borderColor: "#ef444440" }}>Remove</button></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="section-header" style={{ marginBottom: 14 }}>FIS PRESET EXPERIMENTS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 10 }}>
+            {[
+              { label: "Lambda: 100% Exception", fn: "*", mode: "exception", rate: 1.0, msg: "FIS: Injected exception on all functions", latency: 0, desc: "Fail every Lambda invocation — test DLQs and error routing" },
+              { label: "Lambda: Slow Cold Start", fn: "*", mode: "latency",   rate: 0.8, msg: "", latency: 5000, desc: "Add 5s latency to 80% of invocations — simulate cold start timeout" },
+              { label: "Lambda: Flaky 30%",        fn: "*", mode: "exception", rate: 0.3, msg: "FIS: Transient failure", latency: 0, desc: "Randomly fail 30% of calls — test retry logic" },
+              { label: "API Handler Timeout",      fn: "api-handler", mode: "latency", rate: 1.0, msg: "", latency: 30000, desc: "Force api-handler Lambda to time out — test API Gateway timeout handling" },
+            ].map(p => (
+              <div key={p.label} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "14px 16px" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>{p.label}</div>
+                <div style={{ fontSize: 11, color: "var(--text-faint)", marginBottom: 10, lineHeight: 1.5 }}>{p.desc}</div>
+                <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+                  {[p.fn, p.mode, `${Math.round(p.rate*100)}%`].map(t => <span key={t} style={{ fontSize: 10, padding: "1px 5px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 3, color: "var(--text-dim)" }}>{t}</span>)}
+                </div>
+                <button className="btn-primary" onClick={async () => { await fetch("/api/chaos?type=lambda-failure", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ function_name: p.fn, failure_mode: p.mode, rate: p.rate, exception_msg: p.msg, latency_ms: p.latency }) }); fetchAll(); }} style={{ width: "100%", fontSize: 11 }}>Inject</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── TOOLS & DOCS ── */}
+      {activeSection === "tools" && (
+        <div>
+          <div className="section-header" style={{ marginBottom: 16 }}>CHAOS ENGINEERING TOOLS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 14 }}>
+            {[
+              { name: "Pumba", desc: "Docker chaos engineering tool. Kills containers, injects network delay/loss/corruption, stresses CPU/memory. Used by KumoStack's Infrastructure tab.", link: "https://github.com/alexei-led/pumba", color: "#3b82f6", badge: "Integrated" },
+              { name: "failure-lambda", desc: "Inject failures into AWS Lambda functions via environment variables and SSM parameters. Supports exceptions, timeouts, status codes.", link: "https://github.com/gunnargrosch/failure-lambda", color: "#8b5cf6", badge: "Integrated" },
+              { name: "AWS FIS", desc: "AWS Fault Injection Simulator — the production version of what KumoStack emulates. Reference for EC2, EKS, Lambda, and RDS experiment templates.", link: "https://docs.aws.amazon.com/fis/", color: "#f59e0b", badge: "Reference" },
+              { name: "AWS SSM Chaos Runner", desc: "Run chaos experiments via SSM Run Command on EC2 instances. CPU stress, memory pressure, network loss, disk I/O.", link: "https://github.com/amzn/awsssmchaosrunner", color: "#10b981", badge: "Reference" },
+              { name: "Chaos SSM Documents", desc: "Collection of SSM Automation documents for chaos engineering: CPU/memory stress, network blackhole, disk filling, kill processes.", link: "https://github.com/adhorn/chaos-ssm-documents", color: "#ec4899", badge: "Reference" },
+              { name: "LocalStack Chaos API", desc: "LocalStack's Chaos API for reference patterns — outage simulation and throttling models that inspired KumoStack's implementation.", link: "https://docs.localstack.cloud/aws/capabilities/chaos-engineering/chaos-api/", color: "#6b7280", badge: "Reference" },
+              { name: "Route 53 Failover Tutorial", desc: "End-to-end guide to testing Route 53 DNS failover with health checks and multi-region active/standby patterns.", link: "https://docs.localstack.cloud/aws/tutorials/route-53-failover/", color: "#f97316", badge: "Tutorial" },
+              { name: "Simulating Outages", desc: "Tutorial: use the Chaos API to simulate DynamoDB outages and test resilient fallback patterns with SQS and retries.", link: "https://docs.localstack.cloud/aws/tutorials/simulating-outages/", color: "#ef4444", badge: "Tutorial" },
+            ].map(t => (
+              <a key={t.name} href={t.link} target="_blank" rel="noreferrer" style={{ textDecoration: "none", display: "block" }}>
+                <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "16px 18px", height: "100%", transition: "border-color 0.15s" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{t.name}</div>
+                    <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", background: `${t.color}18`, border: `1px solid ${t.color}35`, color: t.color, borderRadius: 3, flexShrink: 0, marginLeft: 8 }}>{t.badge}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6 }}>{t.desc}</div>
+                  <div style={{ fontSize: 10, color: t.color, marginTop: 10, display: "flex", alignItems: "center", gap: 4 }}>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    {t.link.replace("https://","").split("/").slice(0,2).join("/")}
+                  </div>
+                </div>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* whitespace at bottom */}
+      <div style={{ height: 40 }}></div>
     </div>
   );
 }

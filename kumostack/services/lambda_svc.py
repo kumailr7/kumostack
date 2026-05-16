@@ -33,6 +33,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import socket
 import subprocess
@@ -2559,6 +2560,27 @@ def _execute_function(func: dict, event: dict) -> dict:
     config = func.get("config") or func
     request_id = new_uuid()
     started = time.time()
+
+    # ── failure-lambda style injection ───────────────────────────────
+    fn_name = config.get("FunctionName", "")
+    try:
+        from kumostack.app import get_lambda_failure_config
+        _fail_cfg = get_lambda_failure_config(fn_name)
+    except Exception:
+        _fail_cfg = None
+    if _fail_cfg and random.random() < _fail_cfg.get("rate", 1.0):
+        mode = _fail_cfg.get("failure_mode", "exception")
+        if mode == "exception":
+            return {"error": {"errorMessage": _fail_cfg.get("exception_msg", "Simulated chaos failure"), "errorType": "ChaosException"}}
+        elif mode == "statuscode":
+            return {"statusCode": _fail_cfg.get("status_code", 500), "body": json.dumps({"message": "Chaos statuscode injection"}), "error": None}
+        elif mode == "latency":
+            import time as _t; _t.sleep(_fail_cfg.get("latency_ms", 3000) / 1000)
+        elif mode == "blacklist":
+            bl = _fail_cfg.get("blacklist", [])
+            if any(k in event for k in bl):
+                return {"error": {"errorMessage": "Event blacklisted by chaos config", "errorType": "ChaosBlacklist"}}
+    # ── end failure-lambda ───────────────────────────────────────────
 
     # Proxy mode wins over every other executor: the function is bound to a
     # user-managed container, kumostack only forwards the event.

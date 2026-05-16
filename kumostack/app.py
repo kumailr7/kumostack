@@ -682,7 +682,23 @@ async def _handle_pre_body_request(method: str, path: str, headers: dict, query_
     if response is not None:
         return response
 
-    return await _handle_chaos_request(method, path, b"", query_params)
+    response = await _handle_chaos_request(method, path, b"", query_params)
+    if response is not None:
+        return response
+
+    response = await _handle_chaos_containers(method, path)
+    if response is not None:
+        return response
+
+    response = await _handle_pumba_jobs(method, path)
+    if response is not None:
+        return response
+
+    response = await _handle_chaos_region(method, path, b"")
+    if response is not None:
+        return response
+
+    return await _handle_chaos_lambda_failure(method, path, b"")
 
 
 def _handle_transfer_sftp_ports_request(method: str, path: str):
@@ -799,7 +815,23 @@ async def _handle_post_body_shortcuts(method: str, path: str, headers: dict, bod
     if response is not None:
         return response
 
-    return await _handle_chaos_request(method, path, body, query_params)
+    response = await _handle_chaos_request(method, path, body, query_params)
+    if response is not None:
+        return response
+
+    response = await _handle_chaos_pumba(method, path, body)
+    if response is not None:
+        return response
+
+    response = await _handle_chaos_region(method, path, body)
+    if response is not None:
+        return response
+
+    response = await _handle_chaos_lambda_failure(method, path, body)
+    if response is not None:
+        return response
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1432,6 +1464,15 @@ import time as _time
 _chaos_lock = threading.Lock()
 _chaos_rules: dict[str, dict] = {}  # rule_id → rule
 
+# Region health: region → "healthy" | "degraded" | "down"
+_region_health: dict[str, str] = {}
+
+# Lambda failure injection: function_name → config
+_lambda_failure: dict[str, dict] = {}
+
+# Pumba job tracking: job_id → {container, type, status, started_at}
+_pumba_jobs: dict[str, dict] = {}
+
 
 def _chaos_rule_id() -> str:
     return uuid.uuid4().hex[:8]
@@ -1454,7 +1495,17 @@ def _chaos_active_rules() -> list[dict]:
 def _chaos_match(rule: dict, service: str, action: str) -> bool:
     rs = rule.get("target_service", "*")
     ra = rule.get("target_action", "*")
-    return (rs in ("*", service)) and (ra in ("*", action))
+    rr = rule.get("target_region", "*")
+    if rs not in ("*", service) or ra not in ("*", action):
+        return False
+    if rr != "*":
+        try:
+            from kumostack.core.responses import get_region
+            if get_region() != rr:
+                return False
+        except Exception:
+            pass
+    return True
 
 
 async def _apply_chaos(service: str, action: str):
@@ -1462,6 +1513,27 @@ async def _apply_chaos(service: str, action: str):
 
     Returns a (status, headers, body) tuple if a fault fires, else None.
     """
+    # ── Region-level health check ─────────────────────────────────────
+    try:
+        from kumostack.core.responses import get_region
+        current_region = get_region()
+    except Exception:
+        current_region = "us-east-1"
+
+    region_status = _region_health.get(current_region, "healthy")
+    headers = {"Content-Type": "application/json"}
+
+    if region_status == "down":
+        return (
+            503, headers,
+            json.dumps({
+                "__type": "ServiceUnavailableException",
+                "message": f"Region {current_region} is simulated as DOWN (chaos region outage)",
+            }).encode(),
+        )
+    if region_status == "degraded":
+        await asyncio.sleep(random.uniform(1.0, 3.0))  # inject latency for degraded region
+
     for rule in _chaos_active_rules():
         if not _chaos_match(rule, service, action):
             continue
@@ -1590,6 +1662,203 @@ async def _handle_chaos_request(method: str, path: str, body: bytes, query_param
         return 200, ct, json.dumps({"cleared": count}).encode()
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Chaos — Pumba, region outage, failure-lambda, container list
+# ---------------------------------------------------------------------------
+
+def _get_docker_client():
+    """Lazy-load Docker client (reuse pattern from elasticache/rds)."""
+    try:
+        import docker as _docker_pkg
+        return _docker_pkg.from_env()
+    except Exception:
+        return None
+
+
+async def _handle_chaos_pumba(method: str, path: str, body: bytes):
+    """POST /_kumostack/chaos/pumba — run Pumba network/stress chaos on a container."""
+    if method != "POST" or path != "/_kumostack/chaos/pumba":
+        return None
+    ct = {"Content-Type": "application/json"}
+    try:
+        data = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return 400, ct, json.dumps({"error": "invalid JSON"}).encode()
+
+    container = data.get("container")
+    chaos_type = data.get("chaos_type", "network_delay")
+    duration   = int(data.get("duration_seconds", 30))
+    delay_ms   = int(data.get("delay_ms", 100))
+    loss_pct   = float(data.get("loss_percent", 10))
+    corrupt_pct= float(data.get("corrupt_percent", 5))
+    cpus       = int(data.get("cpus", 1))
+
+    if not container:
+        return 400, ct, json.dumps({"error": "container name required"}).encode()
+
+    dc = _get_docker_client()
+    if not dc:
+        return 503, ct, json.dumps({"error": "Docker not available"}).encode()
+
+    type_to_cmd = {
+        "network_delay":    f"netem --duration {duration}s --delay {delay_ms}ms delay {container}",
+        "network_loss":     f"netem --duration {duration}s --loss {loss_pct} loss {container}",
+        "network_corrupt":  f"netem --duration {duration}s --corrupt {corrupt_pct} corrupt {container}",
+        "kill":             f"kill --signal SIGKILL {container}",
+        "stress_cpu":       f"stress --duration {duration}s --cpu {cpus} {container}",
+    }
+    cmd = type_to_cmd.get(chaos_type)
+    if not cmd:
+        return 400, ct, json.dumps({"error": f"unknown chaos_type: {chaos_type}"}).encode()
+
+    job_id = _chaos_rule_id()
+    try:
+        dc.containers.run(
+            "gaiaadm/pumba:latest",
+            command=cmd,
+            volumes={"/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}},
+            remove=True,
+            detach=True,
+            name=f"kumostack-pumba-{job_id}",
+        )
+        with _chaos_lock:
+            _pumba_jobs[job_id] = {
+                "id": job_id, "container": container, "chaos_type": chaos_type,
+                "duration_seconds": duration, "status": "running",
+                "started_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            }
+        logger.info("Pumba job %s started: %s on %s", job_id, chaos_type, container)
+        return 200, ct, json.dumps({"job_id": job_id, "status": "started"}).encode()
+    except Exception as e:
+        logger.warning("Pumba failed: %s", e)
+        return 500, ct, json.dumps({"error": str(e)}).encode()
+
+
+async def _handle_chaos_containers(method: str, path: str):
+    """GET /_kumostack/chaos/containers — list kumostack-managed containers for Pumba targeting."""
+    if method != "GET" or path != "/_kumostack/chaos/containers":
+        return None
+    ct = {"Content-Type": "application/json"}
+    dc = _get_docker_client()
+    if not dc:
+        return 200, ct, json.dumps({"containers": []}).encode()
+    try:
+        running = dc.containers.list(filters={"label": "kumostack"})
+        result = [
+            {"name": c.name, "id": c.short_id, "status": c.status,
+             "labels": dict(c.labels), "image": c.image.tags[0] if c.image.tags else "unknown"}
+            for c in running
+        ]
+        # Also include known infrastructure containers by name prefix
+        all_c = dc.containers.list(all=False)
+        infra = [
+            {"name": c.name, "id": c.short_id, "status": c.status,
+             "labels": {}, "image": c.image.tags[0] if c.image.tags else "unknown"}
+            for c in all_c if any(c.name.startswith(p) for p in (
+                "kumostack-", "ministack-", "ministack"
+            )) and c.name not in {r["name"] for r in result}
+        ]
+        return 200, ct, json.dumps({"containers": result + infra}).encode()
+    except Exception as e:
+        return 500, ct, json.dumps({"error": str(e)}).encode()
+
+
+async def _handle_chaos_region(method: str, path: str, body: bytes):
+    """GET/POST /_kumostack/chaos/region — manage region health state."""
+    if not path.startswith("/_kumostack/chaos/region"):
+        return None
+    ct = {"Content-Type": "application/json"}
+
+    if method == "GET":
+        with _chaos_lock:
+            state = dict(_region_health)
+        return 200, ct, json.dumps({"regions": state}).encode()
+
+    if method == "POST":
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return 400, ct, json.dumps({"error": "invalid JSON"}).encode()
+        region = data.get("region")
+        status = data.get("status", "down")  # "healthy" | "degraded" | "down"
+        if not region:
+            return 400, ct, json.dumps({"error": "region required"}).encode()
+        with _chaos_lock:
+            if status == "healthy":
+                _region_health.pop(region, None)
+            else:
+                _region_health[region] = status
+        logger.info("Region %s marked as %s (chaos)", region, status)
+        return 200, ct, json.dumps({"region": region, "status": status}).encode()
+
+    if method == "DELETE":
+        with _chaos_lock:
+            _region_health.clear()
+        return 200, ct, json.dumps({"cleared": True}).encode()
+
+    return None
+
+
+async def _handle_chaos_lambda_failure(method: str, path: str, body: bytes):
+    """GET/POST/DELETE /_kumostack/chaos/lambda-failure — failure-lambda style injection."""
+    if not path.startswith("/_kumostack/chaos/lambda-failure"):
+        return None
+    ct = {"Content-Type": "application/json"}
+
+    if method == "GET":
+        with _chaos_lock:
+            return 200, ct, json.dumps({"failures": list(_lambda_failure.values())}).encode()
+
+    if method == "POST":
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return 400, ct, json.dumps({"error": "invalid JSON"}).encode()
+
+        fn = data.get("function_name", "*")
+        config = {
+            "function_name":   fn,
+            "failure_mode":    data.get("failure_mode", "exception"),  # exception | statuscode | blacklist | latency
+            "exception_msg":   data.get("exception_msg", "Simulated failure — chaos"),
+            "rate":            float(data.get("rate", 1.0)),
+            "status_code":     int(data.get("status_code", 500)),
+            "latency_ms":      int(data.get("latency_ms", 3000)),
+            "blacklist":       data.get("blacklist", []),
+            "created_at":      _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        }
+        with _chaos_lock:
+            _lambda_failure[fn] = config
+        logger.info("Lambda failure injection set: %s mode=%s rate=%.0f%%", fn, config["failure_mode"], config["rate"]*100)
+        return 200, ct, json.dumps(config).encode()
+
+    if method == "DELETE":
+        fn = path.split("/")[-1] if path != "/_kumostack/chaos/lambda-failure" else None
+        with _chaos_lock:
+            if fn and fn in _lambda_failure:
+                del _lambda_failure[fn]
+            elif not fn:
+                _lambda_failure.clear()
+        return 200, ct, json.dumps({"ok": True}).encode()
+
+    return None
+
+
+def get_lambda_failure_config(function_name: str) -> dict | None:
+    """Called from lambda_svc to check if a function has failure injection configured."""
+    with _chaos_lock:
+        return _lambda_failure.get(function_name) or _lambda_failure.get("*")
+
+
+async def _handle_pumba_jobs(method: str, path: str):
+    """GET /_kumostack/chaos/pumba-jobs — list running Pumba jobs."""
+    if method != "GET" or path != "/_kumostack/chaos/pumba-jobs":
+        return None
+    ct = {"Content-Type": "application/json"}
+    with _chaos_lock:
+        jobs = list(_pumba_jobs.values())
+    return 200, ct, json.dumps({"jobs": jobs}).encode()
 
 
 # ---------------------------------------------------------------------------
