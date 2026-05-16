@@ -111,34 +111,6 @@ body {
   border-bottom: none !important;
   box-shadow: none !important;
   position: relative;
-  /* Subtle M-blue tint at the left edge so the black isn't flat */
-  border-left: 4px solid var(--ms-m-blue) !important;
-}
-
-/* M tricolor stripe — thick, vivid, full-width under the header */
-.md-header::after {
-  content: "";
-  display: block;
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--ms-stripe);
-  z-index: 10;
-}
-
-/* M tricolor stripe at the very top of the page too */
-.md-header::before {
-  content: "";
-  display: block;
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--ms-stripe);
-  z-index: 10;
 }
 
 .md-header__button.md-logo img,
@@ -200,8 +172,22 @@ body {
 /* ── Tabs ───────────────────────────────────────────────────────── */
 .md-tabs {
   background: var(--ms-surface-soft) !important;
-  border-bottom: 1px solid var(--ms-hairline);
+  border-bottom: none !important;
   box-shadow: none !important;
+  position: relative;
+}
+
+/* M tricolor accent stripe below the nav tabs */
+.md-tabs::after {
+  content: "";
+  display: block;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--ms-stripe);
+  z-index: 10;
 }
 
 .md-tabs__link {
