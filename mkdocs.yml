@@ -91,6 +91,7 @@ nav:
       - SQS & SNS — Messaging: tutorials/sqs-sns.md
       - API Gateway: tutorials/api-gateway.md
       - Terraform & tfstack: tutorials/terraform.md
+      - Chaos Engineering: tutorials/chaos-engineering.md
   - Guides:
       - Overview: guides/index.md
       - Grafana Monitoring: guides/grafana.md
