@@ -16,6 +16,7 @@ Operations: PutMetricData, GetMetricStatistics, GetMetricData, ListMetrics,
 import copy
 import json
 import logging
+import threading
 import os
 import re
 import time
@@ -183,6 +184,50 @@ def _stat_value(stats, stat_name):
 # ---------------------------------------------------------------------------
 
 
+def _dispatch_alarm_action(arn: str, alarm: dict):
+    """Fire a single alarm action ARN (SNS, Lambda, or SQS)."""
+    parts = arn.split(":")
+    if len(parts) < 6:
+        return
+    service = parts[2]  # sns | lambda | sqs
+    endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
+    try:
+        import boto3
+        kwargs = dict(endpoint_url=endpoint, region_name=REGION, aws_access_key_id="test", aws_secret_access_key="test")
+        payload = json.dumps({
+            "source": "aws.cloudwatch",
+            "AlarmName": alarm.get("AlarmName", ""),
+            "NewStateValue": alarm.get("StateValue", ""),
+            "NewStateReason": alarm.get("StateReason", ""),
+        })
+        if service == "sns":
+            client = boto3.client("sns", **kwargs)
+            client.publish(TopicArn=arn, Subject=f"CloudWatch Alarm: {alarm.get('AlarmName','')}",
+                           Message=payload)
+        elif service == "lambda":
+            func_name = parts[-1]
+            client = boto3.client("lambda", **kwargs)
+            client.invoke(FunctionName=func_name, InvocationType="Event", Payload=payload.encode())
+        elif service == "sqs":
+            queue_name = parts[-1]
+            account = parts[4] if len(parts) > 4 else "000000000000"
+            queue_url = f"{endpoint}/{account}/{queue_name}"
+            client = boto3.client("sqs", **kwargs)
+            client.send_message(QueueUrl=queue_url, MessageBody=payload)
+    except Exception as e:
+        logger.warning("Alarm action %s failed: %s", arn, e)
+
+
+def _fire_alarm_actions(alarm: dict, new_state: str):
+    if not alarm.get("ActionsEnabled", True):
+        return
+    key = {"ALARM": "AlarmActions", "OK": "OKActions", "INSUFFICIENT_DATA": "InsufficientDataActions"}.get(new_state)
+    if not key:
+        return
+    for arn in alarm.get(key, []):
+        threading.Thread(target=_dispatch_alarm_action, args=(arn, alarm), daemon=True).start()
+
+
 def _evaluate_alarm(alarm):
     ns = alarm.get("Namespace")
     mn = alarm.get("MetricName")
@@ -226,6 +271,7 @@ def _evaluate_alarm(alarm):
         alarm["StateReason"] = reason
         alarm["StateUpdatedTimestamp"] = int(time.time())
         _record_history(alarm["AlarmName"], old_state, new_state, reason)
+        _fire_alarm_actions(alarm, new_state)
 
 
 def _evaluate_all_alarms():
@@ -1229,6 +1275,7 @@ def _set_alarm_state(params, cbor_data, is_cbor, is_json=False):
 
     if old_state != new_state:
         _record_history(name, old_state, new_state, reason)
+        _fire_alarm_actions(alarm, new_state)
 
     if is_cbor:
         return _cbor_ok({})

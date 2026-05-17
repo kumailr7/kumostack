@@ -702,6 +702,10 @@ async def _handle_pre_body_request(method: str, path: str, headers: dict, query_
     if response is not None:
         return response
 
+    response = await _handle_cloudtrail_api(method, path, query_params)
+    if response is not None:
+        return response
+
     response = await _handle_chaos_containers(method, path)
     if response is not None:
         return response
@@ -852,6 +856,10 @@ async def _handle_post_body_shortcuts(method: str, path: str, headers: dict, bod
         return response
 
     response = await _handle_sts_log_api(method, path)
+    if response is not None:
+        return response
+
+    response = await _handle_cloudtrail_api(method, path, query_params)
     if response is not None:
         return response
 
@@ -2018,6 +2026,30 @@ async def _handle_sts_log_api(method: str, path: str):
     return 200, ct, json.dumps({"log": get_assume_role_log()}).encode()
 
 
+async def _handle_cloudtrail_api(method: str, path: str, query_params: dict):
+    """GET /_kumostack/cloudtrail/events — return recent CloudTrail events for the dashboard."""
+    if path != "/_kumostack/cloudtrail/events" or method != "GET":
+        return None
+    ct_mod = _loaded_modules.get("cloudtrail") or _get_module("cloudtrail")
+    if not ct_mod or isinstance(ct_mod, _ErrorModule):
+        return 200, {"Content-Type": "application/json"}, json.dumps({"events": []}).encode()
+    q = ct_mod._get_event_queue()
+    events = list(reversed(list(q)))
+    # Optional filters: service, event_name, limit
+    service_filter = query_params.get("service", [None])[0]
+    name_filter = query_params.get("event_name", [None])[0]
+    try:
+        limit = int(query_params.get("limit", [200])[0])
+    except (TypeError, ValueError):
+        limit = 200
+    if service_filter:
+        svc_src = f"{service_filter}.amazonaws.com"
+        events = [e for e in events if e.get("EventSource") == svc_src]
+    if name_filter:
+        events = [e for e in events if e.get("EventName") == name_filter]
+    return 200, {"Content-Type": "application/json"}, json.dumps({"events": events[:limit]}).encode()
+
+
 async def _handle_pumba_jobs(method: str, path: str):
     """GET /_kumostack/chaos/pumba-jobs — list running Pumba jobs."""
     if method != "GET" or path != "/_kumostack/chaos/pumba-jobs":
@@ -2031,6 +2063,23 @@ async def _handle_pumba_jobs(method: str, path: str):
 # ---------------------------------------------------------------------------
 # ASGI entry point
 # ---------------------------------------------------------------------------
+
+
+async def _periodic_save_loop():
+    """Save all service state to disk every 60 seconds when PERSIST_STATE=1."""
+    while True:
+        await asyncio.sleep(60)
+        if not _loaded_modules:
+            continue
+        save_dict = {}
+        for key, mod_name in _state_map.items():
+            if mod_name in _loaded_modules:
+                save_dict[key] = _loaded_modules[mod_name].get_state
+        try:
+            save_all(save_dict)
+            logger.debug("Periodic state snapshot saved (%d services).", len(save_dict))
+        except Exception as e:
+            logger.warning("Periodic state save error: %s", e)
 
 
 async def app(scope, receive, send):
@@ -2198,6 +2247,8 @@ async def _handle_lifespan(scope, receive, send):
             for svc in SERVICE_HANDLERS:
                 logger.debug("%s init completed.", svc.capitalize())
             asyncio.create_task(_run_ready_scripts())
+            if PERSIST_STATE:
+                asyncio.create_task(_periodic_save_loop())
         elif message["type"] == "lifespan.shutdown":
             logger.info("KumoStack shutting down...")
             if PERSIST_STATE:
