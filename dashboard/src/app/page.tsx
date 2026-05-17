@@ -16,7 +16,7 @@ const ArchitectureTab = dynamic(
   }
 );
 
-const CDN = "https://icon.icepanel.io/AWS/svg";
+const CDN = "/svg";
 
 interface Service {
   name: string;
@@ -127,7 +127,7 @@ const COLUMNS: Section[][] = [
     {
       label: "Machine Learning",
       services: [
-        { name: "Bedrock (mock)", icon: `${CDN}/Machine-Learning/Bedrock.svg`, badge: "free", healthKey: "bedrock" },
+        { name: "Bedrock (mock)", icon: `${CDN}/Machine-Learning/SageMaker.svg`, badge: "free", healthKey: "bedrock" },
       ],
     },
   ],
@@ -163,7 +163,7 @@ const COLUMNS: Section[][] = [
 ];
 
 const NAV_ITEMS = [
-  { id: "Overview",         label: "Overview",         icon: <IconGrid /> },
+  { id: "Overview",         label: "Dashboard",        icon: <IconGrid /> },
   { id: "Organizations",    label: "Organizations",    icon: <IconOrg /> },
   { id: "Chaos",            label: "Chaos Engineering", icon: <IconChaos />, highlight: true },
   { id: "Stackport",        label: "Resource Browser", icon: <IconStackport /> },
@@ -1028,7 +1028,7 @@ const SVC_ICON: Record<string, string> = {
   glue: `${CDN}/Analytics/Glue.svg`,
   athena: `${CDN}/Analytics/Athena.svg`,
   apigateway: `${CDN}/App-Integration/API-Gateway.svg`,
-  firehose: `${CDN}/Analytics/Data-Firehose.svg`,
+  firehose: `${CDN}/Analytics/Kinesis-Firehose.svg`,
   elasticloadbalancing: `${CDN}/Networking-Content-Delivery/Elastic-Load-Balancing.svg`,
   elasticache: `${CDN}/Database/ElastiCache.svg`,
   elasticfilesystem: `${CDN}/Storage/EFS.svg`,
@@ -1058,15 +1058,13 @@ function SvcIcon({ svc, size = 28 }: { svc: string; size?: number }) {
   );
 }
 
-function OverviewTab({ connected, version }: {
+function OverviewTab({ connected, version, serviceStatus = {} }: {
   connected: boolean;
   version: string | null;
-  // kept for type compat — data now comes from Stackport
   serviceStatus?: ServiceStatus;
   resourceCounts?: ResourceCounts;
   totalResources?: number;
 }) {
-  const [stats, setStats]         = useState<SpStats | null>(null);
   const [health, setHealth]       = useState<SpHealth | null>(null);
   const [search, setSearch]       = useState("");
   const [loading, setLoading]     = useState(true);
@@ -1075,17 +1073,11 @@ function OverviewTab({ connected, version }: {
   const [grafanaInput, setGrafanaInput] = useState("http://localhost:3002");
   const [grafanaUrl, setGrafanaUrl]     = useState("http://localhost:3002");
   const [showGrafana, setShowGrafana]   = useState(false);
-  const [vectorHealth, setVectorHealth] = useState<"unknown" | "ok" | "error">("unknown");
 
   const load = useCallback(() => {
-    Promise.all([
-      fetch("/api/stackport/stats",  { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch("/api/stackport/health", { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
-    ]).then(([s, h]) => {
-      if (s) { setStats(s); setLastUpdated(new Date()); }
-      if (h) setHealth(h);
-      setLoading(false);
-    });
+    fetch("/api/stackport/health", { cache: "no-store" })
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(h => { if (h) setHealth(h); setLoading(false); setLastUpdated(new Date()); });
   }, []);
 
   useEffect(() => { load(); const id = setInterval(load, 30_000); return () => clearInterval(id); }, [load]);
@@ -1093,22 +1085,27 @@ function OverviewTab({ connected, version }: {
     const g = localStorage.getItem("grafanaUrl");
     if (g) { setGrafanaUrl(g); setGrafanaInput(g); }
   }, []);
-  useEffect(() => {
-    fetch(`/api/vector?base=${encodeURIComponent(grafanaUrl)}&path=/health`)
-      .then(r => setVectorHealth(r.ok ? "ok" : "error"))
-      .catch(() => setVectorHealth("error"));
-  }, [grafanaUrl]);
 
-  const q = search.trim().toLowerCase();
-
-  const svcEntries = Object.entries(stats?.services ?? {}).filter(([k]) => !q || k.includes(q));
-  const totalSvcs  = Object.keys(stats?.services ?? {}).length;
-  const availSvcs  = Object.values(stats?.services ?? {}).filter(v => v.status === "available").length;
-  const uptime     = health ? (() => {
+  const uptime = health ? (() => {
     const s = Math.round(health.uptime_seconds);
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60);
+    return hh > 0 ? `${hh}h ${mm}m` : `${mm}m`;
   })() : null;
+
+  // Build flat service list from COLUMNS (same source as Service Status)
+  const allRows = COLUMNS.flat().flatMap(section =>
+    section.services.map(s => ({ ...s, category: section.label }))
+  );
+  const q = search.trim().toLowerCase();
+  const filteredRows = allRows.filter(s =>
+    !q || s.name.toLowerCase().includes(q) || s.category.toLowerCase().includes(q) || (s.healthKey ?? "").includes(q)
+  );
+
+  const totalSvcs = allRows.length;
+  const runningSvcs = allRows.filter(s => {
+    const st = s.healthKey ? serviceStatus[s.healthKey] : undefined;
+    return st === "available" || st === "running";
+  }).length;
 
   return (
     <div>
@@ -1116,7 +1113,7 @@ function OverviewTab({ connected, version }: {
       <div className="page-header">
         <div>
           <h1 className="page-title">Dashboard</h1>
-          <p className="page-subtitle">AWS Resource Browser</p>
+          <p className="page-subtitle">KumoStack service health — {totalSvcs} services</p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {uptime && <span style={{ fontSize: 11, color: "var(--text-faint)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "4px 10px" }}>uptime {uptime}</span>}
@@ -1132,8 +1129,17 @@ function OverviewTab({ connected, version }: {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           </div>
           <div>
-            <div className="stat-value">{totalSvcs || "—"}</div>
+            <div className="stat-value">{totalSvcs}</div>
             <div className="stat-label">Services</div>
+          </div>
+        </div>
+        <div className={`stat-card ${runningSvcs > 0 ? "stat-card--green" : ""}`}>
+          <div className="stat-card-icon stat-card-icon--green">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
+          </div>
+          <div>
+            <div className="stat-value">{runningSvcs || "—"}</div>
+            <div className="stat-label">Running</div>
           </div>
         </div>
         <div className="stat-card">
@@ -1141,17 +1147,8 @@ function OverviewTab({ connected, version }: {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
           </div>
           <div>
-            <div className="stat-value">{stats?.total_resources ?? "—"}</div>
-            <div className="stat-label">Resources</div>
-          </div>
-        </div>
-        <div className={`stat-card ${availSvcs > 0 ? "stat-card--green" : ""}`}>
-          <div className="stat-card-icon stat-card-icon--green">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
-          </div>
-          <div>
-            <div className="stat-value">{availSvcs || "—"}</div>
-            <div className="stat-label">Available</div>
+            <div className="stat-value">{health?.services_count ?? totalSvcs}</div>
+            <div className="stat-label">Active Services</div>
           </div>
         </div>
         <div className={`stat-card ${connected ? "stat-card--green" : "stat-card--red"}`}>
@@ -1182,57 +1179,48 @@ function OverviewTab({ connected, version }: {
         )}
       </div>
 
-      {/* Service table */}
+      {/* Service table — same rows as Service Status */}
       <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden", marginBottom: 32 }}>
-        {/* Table header */}
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 1fr 60px", padding: "9px 16px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)" }}>
-          {["Service", "Status", "Resources", "Total"].map(h => (
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 100px 120px 80px", padding: "9px 16px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)" }}>
+          {["Service", "Status", "Category", "Type"].map(h => (
             <div key={h} style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{h}</div>
           ))}
         </div>
-        {/* Search row */}
         <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)" }}>
           <input className="search" placeholder="Filter services…" value={search} onChange={e => setSearch(e.target.value)} style={{ marginBottom: 0, width: "100%", maxWidth: 320 }} />
         </div>
 
-        {loading && !stats && (
-          <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>Loading services from Stackport…</div>
-        )}
-        {!loading && !stats && (
-          <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>Stackport not reachable — run <code className="inline-code">docker compose up -d stackport</code></div>
+        {!connected && (
+          <div style={{ padding: "24px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>
+            KumoStack not connected — status unavailable
+          </div>
         )}
 
-        {svcEntries.map(([svc, data], idx) => {
-          const total = Object.values(data.resources).reduce((a, b) => a + b, 0);
-          const resEntries = Object.entries(data.resources).filter(([, n]) => n > 0);
-          const isAvail = data.status === "available";
+        {filteredRows.map((s, idx) => {
+          const status = s.healthKey ? serviceStatus[s.healthKey] : undefined;
+          const isRunning = status === "available" || status === "running";
+          const isError = status === "error";
           return (
-            <div key={svc} style={{ display: "grid", gridTemplateColumns: "2fr 80px 1fr 60px", padding: "10px 16px", borderBottom: idx < svcEntries.length - 1 ? "1px solid var(--border)" : "none", alignItems: "center", transition: "background 0.1s" }}
+            <div key={s.name + s.category}
+              style={{ display: "grid", gridTemplateColumns: "2fr 100px 120px 80px", padding: "9px 16px", borderBottom: idx < filteredRows.length - 1 ? "1px solid var(--border)" : "none", alignItems: "center", transition: "background 0.1s" }}
               onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-card-hover)")}
               onMouseLeave={e => (e.currentTarget.style.background = "")}>
               {/* Service name + icon */}
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <SvcIcon svc={svc} size={24} />
-                <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text)" }}>{svc}</span>
+                <Image src={s.icon} alt={s.name} width={20} height={20} unoptimized />
+                <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text)" }}>{s.name}</span>
               </div>
-              {/* Status dot */}
+              {/* Status */}
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ width: 7, height: 7, borderRadius: "50%", background: isAvail ? "#10b981" : "#6b7280", display: "inline-block", flexShrink: 0 }} />
-                <span style={{ fontSize: 11, color: isAvail ? "#10b981" : "var(--text-faint)" }}>{isAvail ? "available" : data.status}</span>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: isRunning ? "#10b981" : isError ? "#ef4444" : "#6b7280", display: "inline-block", flexShrink: 0 }} />
+                <span style={{ fontSize: 11, color: isRunning ? "#10b981" : isError ? "#ef4444" : "var(--text-faint)" }}>
+                  {connected ? (isRunning ? "Running" : isError ? "Error" : "Idle") : "—"}
+                </span>
               </div>
-              {/* Resource types */}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {resEntries.length > 0
-                  ? resEntries.map(([type, count]) => (
-                      <span key={type} style={{ fontSize: 10, color: "var(--text-dim)", background: "var(--bg-elevated)", border: "1px solid var(--border)", padding: "1px 6px", borderRadius: 3 }}>{count} {type.replace(/_/g, " ")}</span>
-                    ))
-                  : <span style={{ fontSize: 10, color: "var(--text-faint)" }}>none</span>
-                }
-              </div>
-              {/* Total badge */}
-              <div>
-                <span style={{ fontSize: 11, fontWeight: 700, minWidth: 24, textAlign: "center", display: "inline-block", padding: "2px 8px", background: total > 0 ? "var(--accent-subtle, rgba(16,185,129,0.12))" : "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", color: total > 0 ? "var(--accent)" : "var(--text-faint)" }}>{total}</span>
-              </div>
+              {/* Category */}
+              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{s.category}</span>
+              {/* Badge */}
+              <span className={`badge ${s.badge}`}>{s.badgeText ?? (s.badge === "free" ? "Free" : "")}</span>
             </div>
           );
         })}
@@ -1262,7 +1250,6 @@ function OverviewTab({ connected, version }: {
       </div>
     </div>
   );
-  void vectorHealth; // suppress unused warning
 }
 
 // ─── Status Tab ───────────────────────────────────────────────────────────────
@@ -1319,23 +1306,25 @@ interface SpResource { id: string; [key: string]: unknown }
 interface SpResourceList { service: string; resources: Record<string, SpResource[]> }
 
 function ResourceBrowserTab() {
-  // Stackport's own nav sidebar is w-44 (176px in Tailwind).
-  // Shift the iframe left by that amount and clip with overflow:hidden to hide it.
-  const SIDEBAR_W = 177;
+  // Stackport nav sidebar is ~200px wide (measured: w-44=176px + border + scroll).
+  // Shift the iframe left and clip to hide only that column.
+  const SIDEBAR_W = 232;
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}>
-      <iframe
-        src="http://localhost:8082/resources"
-        title="Resource Browser"
-        style={{
-          position: "absolute",
-          top: 0,
-          left: -SIDEBAR_W,
-          width: `calc(100% + ${SIDEBAR_W}px)`,
-          height: "100%",
-          border: "none",
-        }}
-      />
+    <div className="fullscreen-tab" style={{ padding: 0 }}>
+      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+        <iframe
+          src="http://localhost:8082/resources"
+          title="Resource Browser"
+          style={{
+            position: "absolute",
+            top: 0,
+            left: -SIDEBAR_W,
+            width: `calc(100% + ${SIDEBAR_W}px)`,
+            height: "100%",
+            border: "none",
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -1874,7 +1863,25 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
   const [newRegion, setNewRegion] = useState("us-east-1");
   const [newOu, setNewOu]       = useState("r-0001");
   const [accounts, setAccounts] = useState<Account[]>(MOCK_ACCOUNTS);
-  const [scps, setScps]         = useState<SCP[]>(MOCK_SCPS);
+  const [scps, setScps]         = useState<SCP[]>([]);
+  const [assumeRoleLog, setAssumeRoleLog] = useState<{timestamp:number;roleName:string;roleArn:string;sessionName:string;sourceAccount:string;destAccount:string;action:string}[]>([]);
+
+  // Load real SCPs and AssumeRole log via server-side proxy (avoids NEXT_PUBLIC env issues)
+  useEffect(() => {
+    const loadScps = () =>
+      fetch("/api/organizations/scps")
+        .then(r => r.json())
+        .then(d => { if (d.scps) setScps(d.scps); })
+        .catch(() => {});
+    const loadLog = () =>
+      fetch("/api/organizations/assume-role-log")
+        .then(r => r.json())
+        .then(d => { if (d.log) setAssumeRoleLog(d.log); })
+        .catch(() => {});
+    loadScps(); loadLog();
+    const t = setInterval(() => { loadScps(); loadLog(); }, 15_000);
+    return () => clearInterval(t);
+  }, []);
 
   const ouChildren = (ouId: string) => accounts.filter((a) => a.ouId === ouId);
   const ouDescendantOus = (ouId: string) => MOCK_OUS.filter((o) => o.parentId === ouId);
@@ -1901,7 +1908,15 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
   };
 
   const toggleScpStatus = (id: string) => {
-    setScps(scps.map((s) => s.id === id ? { ...s, status: s.status === "ENABLED" ? "DISABLED" : "ENABLED" } : s));
+    const scp = scps.find(s => s.id === id);
+    if (!scp) return;
+    const newStatus = scp.status === "ENABLED" ? "DISABLED" : "ENABLED";
+    setScps(scps.map(s => s.id === id ? { ...s, status: newStatus } : s));
+    fetch(`/api/organizations/scps/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: newStatus }),
+    }).catch(() => {});
   };
 
   const attachedLabel = (attachedTo: string[]) =>
@@ -2097,59 +2112,123 @@ function OrganizationsTab({ activeAccount, setActiveAccount }: {
       </div>
 
       {/* Service Control Policies */}
-      <div className="section-header" style={{ marginTop: 40, marginBottom: 16 }}>SERVICE CONTROL POLICIES</div>
-      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ borderBottom: "1px solid var(--border)" }}>
-              {["Policy", "Description", "Attached To", "Services", "Effect", "Status"].map((h) => (
-                <th key={h} style={{ padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {scps.map((s) => (
-              <tr key={s.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                <td style={{ padding: "12px 16px", fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>{s.name}</td>
-                <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)", maxWidth: 220 }}>{s.description}</td>
-                <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{attachedLabel(s.attachedTo)}</td>
-                <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{s.services.join(", ")}</td>
-                <td style={{ padding: "12px 16px" }}>
-                  <span className={`pill ${s.effect === "DENY" ? "pill--red" : "pill--green"}`}>{s.effect}</span>
-                </td>
-                <td style={{ padding: "12px 16px" }}>
-                  <button
-                    onClick={() => toggleScpStatus(s.id)}
-                    className={`pill ${s.status === "ENABLED" ? "pill--green" : "pill--dim"}`}
-                    style={{ cursor: "pointer", border: "none", fontWeight: 700, fontSize: 11 }}
-                  >
-                    {s.status}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 40, marginBottom: 16 }}>
+        <div className="section-header" style={{ margin: 0 }}>SERVICE CONTROL POLICIES</div>
+        {activeAccount.type === "MANAGEMENT" ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#10b98115", border: "1px solid #10b98140", borderRadius: 6, padding: "2px 10px", fontSize: 11, color: "#10b981", fontWeight: 600 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981", display: "inline-block" }} />
+            Management Account · {activeAccount.id}
+          </span>
+        ) : (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#f59e0b15", border: "1px solid #f59e0b40", borderRadius: 6, padding: "2px 10px", fontSize: 11, color: "#f59e0b", fontWeight: 600 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Requires Management Account
+          </span>
+        )}
       </div>
+
+      {activeAccount.type !== "MANAGEMENT" ? (
+        /* ── Locked: not in management account ── */
+        <div style={{ background: "var(--bg-card)", border: "1px solid #f59e0b30", borderRadius: "var(--radius)", padding: "32px 24px", textAlign: "center" }}>
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="1.5" style={{ margin: "0 auto 12px" }}>
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+          <p style={{ color: "var(--text)", fontWeight: 600, marginBottom: 6 }}>Management Account Required</p>
+          <p style={{ color: "var(--text-dim)", fontSize: 13, marginBottom: 20 }}>
+            Service Control Policies can only be created and managed from the management account.<br/>
+            You are currently signed in as <strong style={{ color: "var(--text)" }}>{activeAccount.name}</strong> ({activeAccount.id}).
+          </p>
+          <button
+            className="btn-primary"
+            onClick={() => { const mgmt = accounts.find(a => a.type === "MANAGEMENT"); if (mgmt) setActiveAccount(mgmt); }}
+          >
+            Switch to Management Account
+          </button>
+          {/* Read-only view of existing SCPs */}
+          {scps.length > 0 && (
+            <div style={{ marginTop: 24, textAlign: "left" }}>
+              <p style={{ fontSize: 11, color: "var(--text-faint)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>Policies visible (read-only)</p>
+              <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                {scps.map((s, i) => (
+                  <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderBottom: i < scps.length - 1 ? "1px solid var(--border)" : "none", fontSize: 12 }}>
+                    <span style={{ fontFamily: "var(--font-mono, monospace)", color: "var(--text)", flex: 1 }}>{s.name}</span>
+                    <span className={`pill ${s.effect === "DENY" ? "pill--red" : "pill--green"}`} style={{ fontSize: 10 }}>{s.effect}</span>
+                    <span className={`pill ${s.status === "ENABLED" ? "pill--green" : "pill--dim"}`} style={{ fontSize: 10 }}>{s.status}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ── Full management view ── */
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                {["Policy", "Description", "Attached To", "Services", "Effect", "Status"].map((h) => (
+                  <th key={h} style={{ padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {scps.length === 0 ? (
+                <tr><td colSpan={6} style={{ padding: "24px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 12 }}>
+                  No SCPs yet. Create one via CLI:<br/>
+                  <code style={{ fontSize: 11, background: "var(--bg-elevated)", padding: "4px 8px", borderRadius: 4, display: "inline-block", marginTop: 8 }}>
+                    aws organizations create-policy --name DenyS3Delete --type SERVICE_CONTROL_POLICY --content &#x27;&#x7B;&quot;Version&quot;:&quot;2012-10-17&quot;,&quot;Statement&quot;:[&#x7B;&quot;Effect&quot;:&quot;Deny&quot;,&quot;Action&quot;:&quot;s3:DeleteBucket&quot;,&quot;Resource&quot;:&quot;*&quot;&#x7D;]&#x7D;&#x27; --endpoint-url http://localhost:4566
+                  </code>
+                </td></tr>
+              ) : scps.map((s) => (
+                <tr key={s.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: "12px 16px", fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>{s.name}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)", maxWidth: 220 }}>{s.description}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{attachedLabel(s.attachedTo)}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{s.services.join(", ")}</td>
+                  <td style={{ padding: "12px 16px" }}>
+                    <span className={`pill ${s.effect === "DENY" ? "pill--red" : "pill--green"}`}>{s.effect}</span>
+                  </td>
+                  <td style={{ padding: "12px 16px" }}>
+                    <button
+                      onClick={() => toggleScpStatus(s.id)}
+                      className={`pill ${s.status === "ENABLED" ? "pill--green" : "pill--dim"}`}
+                      style={{ cursor: "pointer", border: "none", fontWeight: 700, fontSize: 11 }}
+                    >
+                      {s.status}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Cross-account access log */}
       <div className="section-header" style={{ marginTop: 40, marginBottom: 16 }}>CROSS-ACCOUNT ACCESS LOG</div>
       <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
-        {[
-          { time: "just now",   src: "dev-team",   dst: "staging",    role: "DeployRole",       action: "sts:AssumeRole" },
-          { time: "2 min ago",  src: "management", dst: "production", role: "ReadOnlyRole",     action: "sts:AssumeRole" },
-          { time: "5 min ago",  src: "dev-team",   dst: "management", role: "BillingRole",      action: "sts:AssumeRole" },
-          { time: "12 min ago", src: "staging",    dst: "production", role: "CrossAccountRole", action: "sts:AssumeRole" },
-        ].map((e, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", borderBottom: i < 3 ? "1px solid var(--border)" : "none", fontSize: 12 }}>
-            <span style={{ color: "var(--text-faint)", minWidth: 70 }}>{e.time}</span>
-            <span style={{ fontWeight: 600, color: "var(--text)" }}>{e.src}</span>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-            <span style={{ fontWeight: 600, color: "var(--text)" }}>{e.dst}</span>
-            <span style={{ color: "var(--text-dim)", flex: 1, fontFamily: "var(--font-mono, monospace)" }}>{e.role}</span>
-            <span className="pill pill--green" style={{ fontSize: 10 }}>{e.action}</span>
+        {assumeRoleLog.length === 0 ? (
+          <div style={{ padding: "24px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 12 }}>
+            No AssumeRole calls recorded yet. Try: <code style={{ fontSize: 11, background: "var(--bg-elevated)", padding: "2px 6px", borderRadius: 4 }}>aws sts assume-role --role-arn arn:aws:iam::000000000000:role/MyRole --role-session-name test --endpoint-url http://localhost:4566</code>
           </div>
-        ))}
+        ) : assumeRoleLog.slice(0, 20).map((e, i) => {
+          const ago = Math.round((Date.now() / 1000 - e.timestamp));
+          const timeLabel = ago < 10 ? "just now" : ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago/60)}m ago` : `${Math.round(ago/3600)}h ago`;
+          const srcLabel = accounts.find(a => a.id === e.sourceAccount)?.name ?? e.sourceAccount;
+          const dstLabel = accounts.find(a => a.id === e.destAccount)?.name ?? e.destAccount;
+          return (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", borderBottom: i < assumeRoleLog.length - 1 ? "1px solid var(--border)" : "none", fontSize: 12 }}>
+              <span style={{ color: "var(--text-faint)", minWidth: 70 }}>{timeLabel}</span>
+              <span style={{ fontWeight: 600, color: "var(--text)" }}>{srcLabel}</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+              <span style={{ fontWeight: 600, color: "var(--text)" }}>{dstLabel}</span>
+              <span style={{ color: "var(--text-dim)", flex: 1, fontFamily: "var(--font-mono, monospace)" }}>{e.roleName}</span>
+              <span style={{ color: "var(--text-faint)", fontSize: 10, fontFamily: "monospace" }}>{e.sessionName}</span>
+              <span className="pill pill--green" style={{ fontSize: 10 }}>{e.action}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -2224,6 +2303,11 @@ function ChaosTab({ connected }: { connected: boolean }) {
 
   // Region failover
   const [regionHealth, setRegionHealth] = useState<Record<string,string>>({});
+  const [primaryRegion,  setPrimaryRegion]  = useState("us-east-1");
+  const [standbyRegion,  setStandbyRegion]  = useState("eu-central-1");
+  type TestResult = { region: string; status: number; ok: boolean; latency_ms: number; error?: string; tested_at: string };
+  const [testResults, setTestResults]   = useState<TestResult[]>([]);
+  const [testRunning,  setTestRunning]  = useState(false);
 
   // Lambda failure-lambda
   const [lambdaFailures, setLambdaFailures] = useState<LambdaFailure[]>([]);
@@ -2242,6 +2326,20 @@ function ChaosTab({ connected }: { connected: boolean }) {
     fetch("/api/chaos?type=region").then(r => r.json()).then(d => setRegionHealth(d.regions ?? {})).catch(() => {});
     fetch("/api/chaos?type=lambda-failure").then(r => r.json()).then(d => setLambdaFailures(d.failures ?? [])).catch(() => {});
   }, [connected]);
+
+  const runFailoverTest = async () => {
+    setTestRunning(true);
+    const regions = [...new Set([primaryRegion, standbyRegion, ...Object.keys(regionHealth)])];
+    const results = await Promise.all(
+      regions.map(async (r) => {
+        const d = await fetch(`/api/chaos/test-region?region=${r}`).then(x => x.json()).catch(() => ({ region: r, status: 0, ok: false, error: "Network error", latency_ms: 0 }));
+        return { ...d, tested_at: new Date().toLocaleTimeString() } as { region: string; status: number; ok: boolean; latency_ms: number; error?: string; tested_at: string };
+      })
+    );
+    setTestResults(results);
+    setTestRunning(false);
+    fetchAll();
+  };
 
   useEffect(() => { fetchAll(); const id = setInterval(fetchAll, 5000); return () => clearInterval(id); }, [fetchAll]);
 
@@ -2271,11 +2369,12 @@ function ChaosTab({ connected }: { connected: boolean }) {
   };
 
   const setRegion = async (region: string, status: string) => {
-    if (status === "healthy") {
-      await fetch(`/api/chaos?type=region&id=${region}`, { method: "DELETE" });
-    } else {
-      await fetch("/api/chaos?type=region", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ region, status }) });
-    }
+    // Always use POST — backend pops region when status="healthy", sets otherwise
+    await fetch("/api/chaos?type=region", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ region, status }),
+    });
     fetchAll();
   };
 
@@ -2514,6 +2613,33 @@ function ChaosTab({ connected }: { connected: boolean }) {
       {/* ── REGION FAILOVER ── */}
       {activeSection === "region" && (
         <div>
+          {/* ── Region selector row ── */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Primary</label>
+              <select value={primaryRegion} onChange={e => setPrimaryRegion(e.target.value)} style={{ background: "var(--bg-card)", border: "1px solid #10b98150", borderRadius: "var(--radius-sm)", padding: "6px 28px 6px 10px", color: "#10b981", fontSize: 12, fontFamily: "var(--font-mono,monospace)", fontWeight: 700, appearance: "none", backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2310b981' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 8px center" }}>
+                {REGIONS_LIST.map(r => <option key={r}>{r}</option>)}
+              </select>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Standby</label>
+              <select value={standbyRegion} onChange={e => setStandbyRegion(e.target.value)} style={{ background: "var(--bg-card)", border: "1px solid #f59e0b50", borderRadius: "var(--radius-sm)", padding: "6px 28px 6px 10px", color: "#f59e0b", fontSize: 12, fontFamily: "var(--font-mono,monospace)", fontWeight: 700, appearance: "none", backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23f59e0b' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 8px center" }}>
+                {REGIONS_LIST.filter(r => r !== primaryRegion).map(r => <option key={r}>{r}</option>)}
+              </select>
+            </div>
+            <button
+              className="btn-primary"
+              onClick={runFailoverTest}
+              disabled={testRunning || !connected}
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginLeft: "auto" }}
+            >
+              {testRunning
+                ? <><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: "spin 1s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Testing…</>
+                : <><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Failover Test</>
+              }
+            </button>
+          </div>
+
           <div className="section-header" style={{ marginBottom: 16 }}>ROUTE 53 FAILOVER DIAGRAM</div>
 
           {/* ── Failover diagram ── */}
@@ -2531,21 +2657,19 @@ function ChaosTab({ connected }: { connected: boolean }) {
 
               {/* Arrows + regions */}
               <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-                {([
-                  { region: "us-east-1",   label: "Primary",  roleColor: "#10b981", svcs: ["API Gateway","Lambda","DynamoDB","Replication λ"] },
-                  { region: "eu-central-1", label: "Standby",  roleColor: "#f59e0b", svcs: ["API Gateway","Lambda","DynamoDB"] },
-                ] as const).map(({ region, label, roleColor, svcs }) => {
+                {[
+                  { region: primaryRegion, label: "Primary", roleColor: "#10b981", svcs: ["API Gateway","Lambda","DynamoDB","S3"] },
+                  { region: standbyRegion, label: "Standby", roleColor: "#f59e0b", svcs: ["API Gateway","Lambda","DynamoDB"] },
+                ].map(({ region, label, roleColor, svcs }) => {
                   const status = regionHealth[region] ?? "healthy";
                   const sc = REGION_STATUS_COLOR[status] ?? "#10b981";
                   const isActive = status === "healthy" || status === "degraded";
                   return (
                     <div key={region} style={{ display: "flex", alignItems: "center", gap: 0 }}>
-                      {/* arrow */}
                       <div style={{ display: "flex", alignItems: "center", width: 60, flexShrink: 0 }}>
                         <div style={{ flex: 1, height: 2, background: isActive ? sc : "#3f3f3f", transition: "background 0.3s" }} />
                         <svg width="8" height="12" viewBox="0 0 8 12" fill={isActive ? sc : "#3f3f3f"}><path d="M0 0 L8 6 L0 12 Z"/></svg>
                       </div>
-                      {/* region card */}
                       <div style={{ flex: 1, background: `${sc}08`, border: `1.5px solid ${sc}40`, borderRadius: "var(--radius)", padding: "14px 18px", transition: "border-color 0.3s" }}>
                         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10 }}>
                           <div>
@@ -2555,10 +2679,10 @@ function ChaosTab({ connected }: { connected: boolean }) {
                             </div>
                             <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", fontFamily: "var(--font-mono,monospace)" }}>{region}</div>
                           </div>
-                          <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
-                            {status !== "healthy"  && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}  style={{ fontSize: 10, padding: "3px 10px", color: "#10b981", borderColor: "#10b98140" }}>✓ Restore</button>}
-                            {status !== "degraded" && <button className="pill-btn" onClick={() => setRegion(region, "degraded")} style={{ fontSize: 10, padding: "3px 10px", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
-                            {status !== "down"     && <button className="pill-btn" onClick={() => setRegion(region, "down")}     style={{ fontSize: 10, padding: "3px 10px", color: "#ef4444", borderColor: "#ef444440" }}>Take Down</button>}
+                          <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
+                            {status !== "healthy"  && <button onClick={() => setRegion(region, "healthy")}  style={{ padding: "6px 14px", fontSize: 12, fontWeight: 700, borderRadius: 6, border: "1px solid #10b98160", background: "rgba(16,185,129,0.12)", color: "#10b981", cursor: "pointer" }}>✓ Restore</button>}
+                            {status !== "degraded" && <button onClick={() => setRegion(region, "degraded")} style={{ padding: "6px 14px", fontSize: 12, fontWeight: 700, borderRadius: 6, border: "1px solid #f59e0b60", background: "rgba(245,158,11,0.12)", color: "#f59e0b", cursor: "pointer" }}>⚡ Degrade</button>}
+                            {status !== "down"     && <button onClick={() => setRegion(region, "down")}     style={{ padding: "6px 14px", fontSize: 12, fontWeight: 700, borderRadius: 6, border: "1px solid #ef444460", background: "rgba(239,68,68,0.12)",  color: "#ef4444", cursor: "pointer" }}>✕ Take Down</button>}
                           </div>
                         </div>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
@@ -2568,18 +2692,8 @@ function ChaosTab({ connected }: { connected: boolean }) {
                             </span>
                           ))}
                         </div>
-                        {status === "degraded" && (
-                          <div style={{ marginTop: 8, fontSize: 10, color: "#f59e0b", display: "flex", alignItems: "center", gap: 5 }}>
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-                            +1–3s random latency on all API calls
-                          </div>
-                        )}
-                        {status === "down" && (
-                          <div style={{ marginTop: 8, fontSize: 10, color: "#ef4444", display: "flex", alignItems: "center", gap: 5 }}>
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
-                            503 ServiceUnavailableException for all calls to this region
-                          </div>
-                        )}
+                        {status === "degraded" && <div style={{ marginTop: 8, fontSize: 10, color: "#f59e0b", display: "flex", alignItems: "center", gap: 5 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>+1–3s random latency on all API calls</div>}
+                        {status === "down"     && <div style={{ marginTop: 8, fontSize: 10, color: "#ef4444", display: "flex", alignItems: "center", gap: 5 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>503 ServiceUnavailableException for all calls to this region</div>}
                       </div>
                     </div>
                   );
@@ -2587,6 +2701,54 @@ function ChaosTab({ connected }: { connected: boolean }) {
               </div>
             </div>
           </div>
+
+          {/* ── Live Failover Test Results ── */}
+          {testResults.length > 0 && (
+            <div style={{ marginBottom: 24 }}>
+              <div className="section-header" style={{ marginBottom: 12 }}>FAILOVER TEST RESULTS</div>
+              <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      {["Region","Role","HTTP Status","Latency","Result","Tested At"].map(h => (
+                        <th key={h} style={{ padding: "9px 14px", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {testResults.map((r, i) => {
+                      const role = r.region === primaryRegion ? "Primary" : r.region === standbyRegion ? "Standby" : "Other";
+                      const roleColor = role === "Primary" ? "#10b981" : role === "Standby" ? "#f59e0b" : "#6b7280";
+                      const expected = regionHealth[r.region] === "down" ? 503 : 200;
+                      const passed = r.status === expected || (r.ok && expected === 200);
+                      return (
+                        <tr key={r.region} style={{ borderBottom: i < testResults.length - 1 ? "1px solid var(--border)" : "none" }}>
+                          <td style={{ padding: "11px 14px", fontFamily: "var(--font-mono,monospace)", fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{r.region}</td>
+                          <td style={{ padding: "11px 14px" }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 7px", background: `${roleColor}18`, border: `1px solid ${roleColor}40`, color: roleColor, borderRadius: 3 }}>{role}</span>
+                          </td>
+                          <td style={{ padding: "11px 14px" }}>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: r.ok ? "#10b981" : r.status === 503 ? "#ef4444" : "#f59e0b" }}>{r.status || "ERR"}</span>
+                          </td>
+                          <td style={{ padding: "11px 14px", fontSize: 12, color: r.latency_ms > 2000 ? "#f59e0b" : "var(--text-dim)" }}>{r.latency_ms}ms</td>
+                          <td style={{ padding: "11px 14px" }}>
+                            <span className={`pill ${passed ? "pill--green" : "pill--red"}`} style={{ fontSize: 10 }}>
+                              {passed ? (r.ok ? "✓ Reachable" : "✓ Blocked (503)") : r.error ? "✗ Unexpected" : "✗ Wrong status"}
+                            </span>
+                            {r.error && <div style={{ fontSize: 10, color: "#ef4444", marginTop: 2 }}>{r.error.slice(0, 60)}</div>}
+                          </td>
+                          <td style={{ padding: "11px 14px", fontSize: 11, color: "var(--text-faint)" }}>{r.tested_at}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ marginTop: 10, padding: "8px 14px", background: "var(--bg-elevated)", borderRadius: "var(--radius-sm)", fontSize: 11, color: "var(--text-dim)" }}>
+                <strong style={{ color: "var(--text)" }}>Expected:</strong> DOWN regions → 503 · HEALTHY regions → 200 · DEGRADED regions → 200 with +1–3s latency
+              </div>
+            </div>
+          )}
 
           <div className="section-header" style={{ marginBottom: 12 }}>ALL REGIONS</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(210px,1fr))", gap: 8 }}>
@@ -2599,10 +2761,10 @@ function ChaosTab({ connected }: { connected: boolean }) {
                     <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", fontFamily: "var(--font-mono,monospace)" }}>{region}</div>
                     <span className={`pill ${status === "healthy" ? "pill--green" : status === "degraded" ? "" : "pill--red"}`} style={{ fontSize: 9 }}>{status.toUpperCase()}</span>
                   </div>
-                  <div style={{ display: "flex", gap: 4 }}>
-                    {status !== "healthy"  && <button className="pill-btn" onClick={() => setRegion(region, "healthy")}  style={{ flex: 1, fontSize: 9, padding: "3px 0", color: "#10b981", borderColor: "#10b98140" }}>✓ Restore</button>}
-                    {status !== "degraded" && <button className="pill-btn" onClick={() => setRegion(region, "degraded")} style={{ flex: 1, fontSize: 9, padding: "3px 0", color: "#f59e0b", borderColor: "#f59e0b40" }}>Degrade</button>}
-                    {status !== "down"     && <button className="pill-btn" onClick={() => setRegion(region, "down")}     style={{ flex: 1, fontSize: 9, padding: "3px 0", color: "#ef4444", borderColor: "#ef444440" }}>Down</button>}
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {status !== "healthy"  && <button onClick={() => setRegion(region, "healthy")}  style={{ flex: 1, minWidth: 70, padding: "7px 6px", fontSize: 11, fontWeight: 700, borderRadius: 6, border: "1px solid #10b98160", background: "rgba(16,185,129,0.12)",  color: "#10b981", cursor: "pointer" }}>✓ Restore</button>}
+                    {status !== "degraded" && <button onClick={() => setRegion(region, "degraded")} style={{ flex: 1, minWidth: 70, padding: "7px 6px", fontSize: 11, fontWeight: 700, borderRadius: 6, border: "1px solid #f59e0b60", background: "rgba(245,158,11,0.12)", color: "#f59e0b", cursor: "pointer" }}>⚡ Degrade</button>}
+                    {status !== "down"     && <button onClick={() => setRegion(region, "down")}     style={{ flex: 1, minWidth: 70, padding: "7px 6px", fontSize: 11, fontWeight: 700, borderRadius: 6, border: "1px solid #ef444460", background: "rgba(239,68,68,0.12)",  color: "#ef4444", cursor: "pointer" }}>✕ Down</button>}
                   </div>
                 </div>
               );
@@ -2928,7 +3090,7 @@ export default function Dashboard() {
         setActiveAccount={setActiveAccount}
       />
       <main className={`app-main${["Diagrams","Stackport"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
-        {activeTab === "Overview"       && <OverviewTab connected={connected} version={version} />}
+        {activeTab === "Overview"       && <OverviewTab connected={connected} version={version} serviceStatus={serviceStatus} />}
         {activeTab === "Organizations"  && <OrganizationsTab activeAccount={activeAccount} setActiveAccount={setActiveAccount} />}
         {activeTab === "Chaos"          && <ChaosTab connected={connected} />}
         {activeTab === "Stackport"      && <ResourceBrowserTab />}

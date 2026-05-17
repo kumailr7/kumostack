@@ -33,15 +33,6 @@ const SERVICE_COLOR: Record<string, string> = {
   secretsmanager: "#DD344C",
 };
 
-const TIER_LABELS: Record<number, string> = {
-  80:   "Security",
-  320:  "CDN / Edge",
-  560:  "Networking",
-  800:  "Compute",
-  1040: "Storage",
-  1280: "Database",
-  1520: "App Services",
-};
 
 export default function ArchitectureTab({ connected }: { connected: boolean }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -59,16 +50,36 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
-      const styledEdges = (data.edges as Edge[]).map((e: Edge) => ({
-        ...e,
-        type: "smoothstep",
-        markerEnd: { type: MarkerType.ArrowClosed, color: "#334155" },
-        style: { stroke: "#334155", strokeWidth: 2 },
-        labelStyle: { fontSize: 9, fill: "#9aa1ad" },
-        labelBgStyle: { fill: "#161a23" },
-        labelBgPadding: [4, 2] as [number, number],
-        labelBgBorderRadius: 3,
-      }));
+      const EDGE_COLOR: Record<string, string> = {
+        publish:      "#f59e0b",
+        trigger:      "#10b981",
+        origin:       "#a78bfa",
+        "read/write": "#60a5fa",
+        send:         "#fb923c",
+        pull:         "#94a3b8",
+        protects:     "#f87171",
+        credentials:  "#f87171",
+        routes:       "#94a3b8",
+        forwards:     "#94a3b8",
+        connects:     "#60a5fa",
+        reads:        "#a78bfa",
+      };
+
+      const styledEdges = (data.edges as Edge[]).map((e: Edge) => {
+        const lbl   = (e.label as string) ?? "";
+        const color = EDGE_COLOR[lbl] ?? "#94a3b8";
+        return {
+          ...e,
+          type: "smoothstep",
+          animated: true,
+          markerEnd: { type: MarkerType.ArrowClosed, color, width: 20, height: 20 },
+          style: { stroke: color, strokeWidth: 2.5, filter: `drop-shadow(0 0 4px ${color}80)` },
+          labelStyle: { fontSize: 10, fill: color, fontWeight: 700 },
+          labelBgStyle: { fill: "#0d1117", fillOpacity: 0.92 },
+          labelBgPadding: [5, 3] as [number, number],
+          labelBgBorderRadius: 4,
+        };
+      });
 
       setNodes(data.nodes as Node[]);
       setEdges(styledEdges);
@@ -93,8 +104,6 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
     (params: Connection) => setEdges((eds) => addEdge(params, eds)),
     [setEdges]
   );
-
-  const tiers = [...new Set(nodes.map((n) => n.position.x))].sort((a, b) => a - b);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 56px)" }}>
@@ -122,22 +131,6 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
           </button>
         </div>
       </div>
-
-      {/* Tier column labels */}
-      {!loading && nodes.length > 0 && (
-        <div style={{ position: "relative", height: 24, background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          {tiers.map((x) => (
-            <div
-              key={x}
-              style={{ position: "absolute", left: x - 10, width: 160, top: 4, textAlign: "center" }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--text-faint)" }}>
-                {TIER_LABELS[x] ?? ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Canvas */}
       <div style={{ flex: 1, position: "relative" }}>
@@ -202,9 +195,7 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
           style={{ background: "#0b0d12" }}
         >
           <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#1a1f2e" />
-          <Controls
-            style={{ background: "var(--bg-card)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
-          />
+          <Controls />
           <MiniMap
             nodeColor={(node) => SERVICE_COLOR[(node.data as { service: string }).service] ?? "#4b5563"}
             style={{ background: "var(--bg-card)", border: "1px solid var(--border-strong)", borderRadius: 8 }}

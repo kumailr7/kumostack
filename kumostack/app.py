@@ -690,6 +690,14 @@ async def _handle_pre_body_request(method: str, path: str, headers: dict, query_
     if response is not None:
         return response
 
+    response = await _handle_organizations_api(method, path, b"")
+    if response is not None:
+        return response
+
+    response = await _handle_sts_log_api(method, path)
+    if response is not None:
+        return response
+
     response = await _handle_chaos_containers(method, path)
     if response is not None:
         return response
@@ -832,6 +840,14 @@ async def _handle_post_body_shortcuts(method: str, path: str, headers: dict, bod
         return response
 
     response = await _handle_chaos_request(method, path, body, query_params)
+    if response is not None:
+        return response
+
+    response = await _handle_organizations_api(method, path, body)
+    if response is not None:
+        return response
+
+    response = await _handle_sts_log_api(method, path)
     if response is not None:
         return response
 
@@ -1914,6 +1930,88 @@ def get_lambda_failure_config(function_name: str) -> dict | None:
     """Called from lambda_svc to check if a function has failure injection configured."""
     with _chaos_lock:
         return _lambda_failure.get(function_name) or _lambda_failure.get("*")
+
+
+async def _handle_organizations_api(method: str, path: str, body: bytes):
+    """GET /_kumostack/organizations/scps  — list real SCPs for the dashboard.
+       POST /_kumostack/organizations/scps — create SCP.
+       PATCH /_kumostack/organizations/scps/{id} — toggle status.
+       DELETE /_kumostack/organizations/scps/{id} — delete SCP.
+    """
+    ct = {"Content-Type": "application/json"}
+    if not path.startswith("/_kumostack/organizations"):
+        return None
+
+    # PATCH and POST require a body — skip in the pre-body routing pass (body not yet read)
+    # DELETE has no body so always allow it through
+    if method in ("PATCH", "POST") and not body:
+        return None
+
+    from kumostack.services import organizations as _org
+    from kumostack.core.responses import get_account_id
+
+    def _mgmt_check():
+        """Return error tuple if caller is not the management account."""
+        org = _org._orgs.get("self")
+        if org and org.get("MasterAccountId"):
+            caller = get_account_id()
+            if org["MasterAccountId"] != caller:
+                return (403, ct, json.dumps({
+                    "error": "AccessDeniedException",
+                    "message": f"Service Control Policies can only be managed from the management account ({org['MasterAccountId']}). Current account: {caller}",
+                }).encode())
+        return None
+
+    if path == "/_kumostack/organizations/scps":
+        if method == "GET":
+            return 200, ct, json.dumps({"scps": _org.list_scps_raw()}).encode()
+        if method == "POST":
+            if err := _mgmt_check(): return err
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                return 400, ct, json.dumps({"error": "invalid JSON"}).encode()
+            resp = _org._create_policy({
+                "Name":        payload.get("name", "Unnamed"),
+                "Description": payload.get("description", ""),
+                "Content":     json.dumps(payload.get("content", {"Version": "2012-10-17", "Statement": []})),
+                "Type":        "SERVICE_CONTROL_POLICY",
+            })
+            return resp
+
+    # PATCH /_kumostack/organizations/scps/{id}
+    if method == "PATCH" and path.startswith("/_kumostack/organizations/scps/"):
+        if err := _mgmt_check(): return err
+        policy_id = path.split("/")[-1]
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return 400, ct, json.dumps({"error": "invalid JSON"}).encode()
+        if policy_id not in _org._policies:
+            return 404, ct, json.dumps({"error": "not found", "id": policy_id}).encode()
+        if "status" in payload:
+            _org.set_scp_status(policy_id, payload["status"])
+        if "attachedTo" in payload:
+            _org.set_scp_attachments(policy_id, payload["attachedTo"])
+        return 200, ct, json.dumps({"ok": True, "policy": policy_id}).encode()
+
+    # DELETE /_kumostack/organizations/scps/{id}
+    if method == "DELETE" and path.startswith("/_kumostack/organizations/scps/"):
+        if err := _mgmt_check(): return err
+        policy_id = path.split("/")[-1]
+        _org._policies.pop(policy_id, None)
+        return 200, ct, json.dumps({"deleted": policy_id}).encode()
+
+    return None
+
+
+async def _handle_sts_log_api(method: str, path: str):
+    """GET /_kumostack/sts/assume-role-log — return AssumeRole audit log."""
+    if path != "/_kumostack/sts/assume-role-log" or method != "GET":
+        return None
+    from kumostack.services.sts import get_assume_role_log
+    ct = {"Content-Type": "application/json"}
+    return 200, ct, json.dumps({"log": get_assume_role_log()}).encode()
 
 
 async def _handle_pumba_jobs(method: str, path: str):

@@ -10,3 +10,4 @@ Deeper dives into KumoStack's observability stack and developer tooling.
 | [draw.io Architecture Diagrams](drawio.md) | Design AWS architectures in draw.io |
 | [awslocal TUI](awslocal-tui.md) | Auto-add resources to Grafana on creation |
 | [Stackport Resource Browser](stackport.md) | Full CRUD browser for all AWS resources |
+| [Organizations & SCPs](organizations-scp.md) | Real SCP enforcement, cross-account access log, management-account gating |

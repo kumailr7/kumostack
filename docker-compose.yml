@@ -14,6 +14,9 @@ services:
       - RDS_BASE_PORT=15432
       - DOCKER_NETWORK=kumostack_default  # Docker network for RDS/EKS/ElastiCache/Lambda containers
       - ELASTICACHE_BASE_PORT=16379
+    networks:
+      - default
+      - kumostack_default
     volumes:
       - ./data/s3:/tmp/kumostack-data/s3
       - /var/run/docker.sock:/var/run/docker.sock
@@ -43,6 +46,26 @@ services:
       - DRAWIO_ENDPOINT=http://kumostack-drawio:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./svg:/app/public/svg:ro
+    depends_on:
+      kumostack:
+        condition: service_healthy
+    restart: unless-stopped
+
+  metrics-seeder:
+    image: python:3.12-slim
+    container_name: kumostack-metrics-seeder
+    working_dir: /app
+    command: >
+      sh -c "pip install boto3 -q &&
+             python scripts/seed_cloudwatch_metrics.py --backfill 30 --loop --interval 60"
+    volumes:
+      - ./scripts:/app/scripts:ro
+    environment:
+      - AWS_ENDPOINT_URL=http://kumostack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
     depends_on:
       kumostack:
         condition: service_healthy
@@ -231,3 +254,8 @@ volumes:
   loki-data:
   garage-meta:
   garage-data:
+
+networks:
+  default: {}
+  kumostack_default:
+    name: kumostack_default

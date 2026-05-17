@@ -561,6 +561,85 @@ def _get_metric_statistics(params, cbor_data, is_cbor, is_json=False):
 
 
 # ---------------------------------------------------------------------------
+# SEARCH expression evaluator (used by Grafana when matchExact=false)
+# Handles: SEARCH('{Namespace="X" MetricName="Y"}', 'Stat', period)
+#          REMOVE_EMPTY(SEARCH(...))
+# ---------------------------------------------------------------------------
+
+def _eval_search(expr: str, start_time, end_time, period: int, stat_name: str):
+    """
+    Evaluate a SEARCH() CloudWatch math expression.
+    Returns list of (label, timestamps, values) tuples — one per matching
+    dimension combination.
+    """
+    # Strip outer REMOVE_EMPTY(...)
+    inner = expr.strip()
+    m = re.match(r'REMOVE_EMPTY\s*\(\s*(.*)\s*\)\s*$', inner, re.DOTALL)
+    if m:
+        inner = m.group(1).strip()
+
+    # Parse SEARCH('{criteria}', 'stat', period)
+    # Grafana uses single-quoted strings that may contain double quotes inside:
+    #   SEARCH('Namespace="AWS/Lambda" MetricName="Invocations"', 'Sum', 60)
+    m = re.match(
+        r"SEARCH\s*\(\s*"
+        r"(?:'([^']*)'|\"([^\"]*)\")"    # criteria: single or double quoted
+        r"\s*,\s*"
+        r"(?:'([^']*)'|\"([^\"]*)\")"    # stat: single or double quoted
+        r"\s*(?:,\s*(\d+))?\s*\)",
+        inner, re.IGNORECASE
+    )
+    if not m:
+        return []
+
+    criteria        = m.group(1) if m.group(1) is not None else m.group(2)
+    stat_raw        = m.group(3) if m.group(3) is not None else m.group(4)
+    stat_override   = stat_raw or stat_name
+    period_override = int(m.group(5)) if m.group(5) else period
+
+    ns_m  = re.search(r'Namespace\s*[=:]\s*["\']?([^"\'\s}]+)["\']?', criteria, re.IGNORECASE)
+    mn_m  = re.search(r'MetricName\s*[=:]\s*["\']?([^"\'\s}]+)["\']?', criteria, re.IGNORECASE)
+    ns_filter = ns_m.group(1) if ns_m else None
+    mn_filter = mn_m.group(1) if mn_m else None
+
+    # Group all matching data points by (ns, mn, dim_key)
+    groups: dict = {}
+    for (k_ns, k_mn, k_dk), pts in list(_metrics.items()):
+        if ns_filter and k_ns != ns_filter:
+            continue
+        if mn_filter and k_mn != mn_filter:
+            continue
+        key = (k_ns, k_mn, k_dk)
+        if key not in groups:
+            groups[key] = []
+        groups[key].extend(pts)
+
+    results = []
+    for (k_ns, k_mn, k_dk), all_pts in groups.items():
+        filtered = [p for p in all_pts
+                    if (start_time is None or p["Timestamp"] >= start_time)
+                    and (end_time is None or p["Timestamp"] < end_time)]
+        if not filtered:
+            continue
+
+        buckets: dict = defaultdict(list)
+        for pt in filtered:
+            buckets[int(pt["Timestamp"] // period_override) * period_override].append(pt["Value"])
+
+        timestamps, values = [], []
+        for ts in sorted(buckets):
+            stats = _calc_stats(buckets[ts])
+            timestamps.append(_ts_iso(ts))
+            values.append(_stat_value(stats, stat_override))
+
+        # k_dk is a string like "FunctionName=product-api" or "" (no dims)
+        label_str = k_dk if k_dk else k_mn
+        results.append((label_str, timestamps, values))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # GetMetricData — modern multi-query API
 # ---------------------------------------------------------------------------
 
@@ -579,33 +658,21 @@ def _get_metric_data(params, cbor_data, is_cbor, is_json=False):
             label = _p(params, f"MetricDataQueries.member.{qi}.Label") or qid
             return_data = _p(params, f"MetricDataQueries.member.{qi}.ReturnData")
             return_data = return_data != "false"
-            ns = _p(
-                params,
-                f"MetricDataQueries.member.{qi}.MetricStat.Metric.Namespace",
-            )
-            mn = _p(
-                params,
-                f"MetricDataQueries.member.{qi}.MetricStat.Metric.MetricName",
-            )
-            period = int(
-                _p(params, f"MetricDataQueries.member.{qi}.MetricStat.Period") or "60"
-            )
-            stat_name = (
-                _p(params, f"MetricDataQueries.member.{qi}.MetricStat.Stat")
-                or "Average"
-            )
-            queries.append(
-                {
-                    "Id": qid,
-                    "Label": label,
-                    "ReturnData": return_data,
+            expr = _p(params, f"MetricDataQueries.member.{qi}.Expression")
+            if expr:
+                queries.append({"Id": qid, "Label": label, "ReturnData": return_data, "Expression": expr})
+            else:
+                ns = _p(params, f"MetricDataQueries.member.{qi}.MetricStat.Metric.Namespace")
+                mn = _p(params, f"MetricDataQueries.member.{qi}.MetricStat.Metric.MetricName")
+                period = int(_p(params, f"MetricDataQueries.member.{qi}.MetricStat.Period") or "60")
+                stat_name = _p(params, f"MetricDataQueries.member.{qi}.MetricStat.Stat") or "Average"
+                queries.append({
+                    "Id": qid, "Label": label, "ReturnData": return_data,
                     "MetricStat": {
                         "Metric": {"Namespace": ns, "MetricName": mn},
-                        "Period": period,
-                        "Stat": stat_name,
+                        "Period": period, "Stat": stat_name,
                     },
-                }
-            )
+                })
             qi += 1
 
         start_time = _parse_ts(_p(params, "StartTime"))
@@ -618,18 +685,37 @@ def _get_metric_data(params, cbor_data, is_cbor, is_json=False):
         return_data = q.get("ReturnData", True)
 
         if q.get("Expression"):
-            results.append(
-                {
-                    "Id": qid,
-                    "Label": label,
+            expr = q["Expression"]
+            # Support SEARCH() and REMOVE_EMPTY(SEARCH()) used by Grafana
+            if re.search(r'\bSEARCH\s*\(', expr, re.IGNORECASE):
+                search_results = _eval_search(
+                    expr, start_time, end_time,
+                    int(ms.get("Period", 60)) if (ms := q.get("MetricStat", {})) else 60,
+                    "Average",
+                )
+                if search_results:
+                    # Return one result entry per matching metric series
+                    for s_label, s_ts, s_vals in search_results:
+                        results.append({
+                            "Id": qid,
+                            "Label": s_label,
+                            "Timestamps": s_ts,
+                            "Values": s_vals,
+                            "StatusCode": "Complete",
+                        })
+                else:
+                    results.append({
+                        "Id": qid, "Label": label,
+                        "StatusCode": "Complete",
+                        "Timestamps": [], "Values": [],
+                    })
+            else:
+                results.append({
+                    "Id": qid, "Label": label,
                     "StatusCode": "InternalError",
-                    "Messages": [
-                        {"Code": "Unsupported", "Value": "Expressions not implemented"}
-                    ],
-                    "Timestamps": [],
-                    "Values": [],
-                }
-            )
+                    "Messages": [{"Code": "Unsupported", "Value": "Only SEARCH() expressions supported"}],
+                    "Timestamps": [], "Values": [],
+                })
             continue
 
         ms = q.get("MetricStat", {})

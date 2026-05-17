@@ -21,6 +21,30 @@ from kumostack.services.iam import _error, _future, _gen_secret, _gen_session_ac
 
 _sessions: dict[str, dict] = {}
 
+# Cross-account AssumeRole audit log — capped at 500 entries
+_assume_role_log: list[dict] = []
+_MAX_LOG = 500
+
+
+def get_assume_role_log() -> list[dict]:
+    return list(reversed(_assume_role_log))
+
+
+def _log_assume_role(role_arn: str, session_name: str, source_account: str):
+    entry = {
+        "timestamp": time.time(),
+        "roleArn":      role_arn,
+        "sessionName":  session_name,
+        "sourceAccount": source_account,
+        "action": "sts:AssumeRole",
+        # Parse destination account from ARN: arn:aws:iam::ACCOUNT:role/Name
+        "destAccount": role_arn.split(":")[4] if role_arn.count(":") >= 4 else "000000000000",
+        "roleName": role_arn.split("/")[-1] if "/" in role_arn else role_arn,
+    }
+    _assume_role_log.append(entry)
+    if len(_assume_role_log) > _MAX_LOG:
+        del _assume_role_log[0]
+
 
 def reset():
     _sessions.clear()
@@ -75,6 +99,7 @@ async def handle_request(method, path, headers, body, query_params):
         role_arn = _p(params, "RoleArn")
         session_name = _p(params, "RoleSessionName")
         duration = int(_p(params, "DurationSeconds") or 3600)
+        _log_assume_role(role_arn, session_name, get_account_id())
         expiration = _future(duration)
         access_key = _gen_session_access_key()
         secret_key = _gen_secret()

@@ -54,3 +54,7 @@ data/
 # Dashboard (Next.js)
 dashboard/node_modules/
 dashboard/.next/
+examples/eks-rds-alb/.terraform/
+examples/eks-rds-alb/terraform.tfstate*
+examples/s3-static-website-terraform/.terraform/
+examples/s3-static-website-terraform/terraform.tfstate*

@@ -187,6 +187,8 @@ def _k3s_run_kwargs(name: str, port: int, ms_network: str | None = None) -> dict
         image=apply_image_prefix(EKS_K3S_IMAGE),
         command=["server",
                  "--disable=traefik,metrics-server,servicelb",
+                 "--disable-network-policy",
+                 "--flannel-backend=host-gw",
                  "--tls-san=0.0.0.0",
                  "--https-listen-port=6443"],
         detach=True,
@@ -367,6 +369,16 @@ def _delete_cluster(name):
     cluster = _clusters.get(name)
     if not cluster:
         return _error(404, "ResourceNotFoundException", f"No cluster found for name: {name}.")
+
+    # SCP enforcement
+    try:
+        from kumostack.services.organizations import evaluate_scps
+        from kumostack.core.responses import get_account_id
+        allowed, reason = evaluate_scps(get_account_id(), "eks:DeleteCluster", f"arn:aws:eks:us-east-1:{get_account_id()}:cluster/{name}")
+        if not allowed:
+            return _error(403, "AccessDeniedException", reason)
+    except Exception:
+        pass
 
     # Stop k3s container
     container_id = cluster.get("_docker_id")

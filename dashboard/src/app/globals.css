@@ -1385,3 +1385,35 @@ html, body { overflow: hidden; height: 100%; }
   .org-grid { grid-template-columns: 1fr; }
   .org-tree-panel { border-right: none; border-bottom: 1px solid var(--border); }
 }
+
+/* ─── ReactFlow Controls dark theme ───────────────────────────────────────── */
+.react-flow__controls {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: var(--bg-card) !important;
+  border: none !important;
+  border-bottom: 1px solid var(--border) !important;
+  width: 26px !important;
+  height: 26px !important;
+  padding: 5px !important;
+}
+.react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+.react-flow__controls-button:hover {
+  background: var(--bg-card-hover) !important;
+}
+.react-flow__controls-button svg {
+  fill: var(--text-dim) !important;
+  max-width: 14px !important;
+  max-height: 14px !important;
+}
+.react-flow__controls-button:hover svg {
+  fill: var(--text) !important;
+}
+@keyframes spin { to { transform: rotate(360deg); } }

@@ -569,6 +569,30 @@ def _dispatch(
             return _put_bucket_ownership_controls(bucket, body)
         if "publicAccessBlock" in query_params:
             return _put_public_access_block(bucket, body)
+        # SCP enforcement for CreateBucket
+        try:
+            from kumostack.services.organizations import evaluate_scps
+            from kumostack.core.responses import get_account_id
+            account_id = get_account_id()
+            allowed, reason = evaluate_scps(account_id, "s3:CreateBucket", f"arn:aws:s3:::{bucket}")
+            if not allowed:
+                caller_arn = f"arn:aws:iam::{account_id}:root"
+                msg = (
+                    f"User: {caller_arn} is not authorized to perform: s3:CreateBucket "
+                    f"on resource: arn:aws:s3:::{bucket} "
+                    f"with an explicit deny in a service control policy. "
+                    f"Contact your account administrator. "
+                    f"Policy: {reason.split('SCP ')[1].split(' (')[0] if 'SCP ' in reason else 'SCP'}"
+                )
+                return (403, {"Content-Type": "application/xml"},
+                        f'<?xml version="1.0" encoding="UTF-8"?>'
+                        f'<Error><Code>AccessDenied</Code>'
+                        f'<Message>{msg}</Message>'
+                        f'<BucketName>{bucket}</BucketName>'
+                        f'<RequestId>KUMOSTACK-SCP-DENY</RequestId>'
+                        f'</Error>'.encode())
+        except Exception:
+            pass
         return _create_bucket(bucket, body, headers)
 
     if method == "DELETE":
@@ -590,6 +614,31 @@ def _dispatch(
             return _delete_bucket_ownership_controls(bucket)
         if "publicAccessBlock" in query_params:
             return _delete_public_access_block(bucket)
+        # SCP enforcement — check before deleting
+        try:
+            from kumostack.services.organizations import evaluate_scps
+            from kumostack.core.responses import get_account_id
+            account_id = get_account_id()
+            allowed, reason = evaluate_scps(account_id, "s3:DeleteBucket", f"arn:aws:s3:::{bucket}")
+            if not allowed:
+                caller_arn = f"arn:aws:iam::{account_id}:root"
+                policy_name = reason.split("SCP '")[1].split("'")[0] if "SCP '" in reason else "SCP"
+                msg = (
+                    f"User: {caller_arn} is not authorized to perform: s3:DeleteBucket "
+                    f"on resource: arn:aws:s3:::{bucket} "
+                    f"with an explicit deny in a service control policy. "
+                    f"Contact your account administrator. "
+                    f"Policy: {policy_name}"
+                )
+                return (403, {"Content-Type": "application/xml"},
+                        f'<?xml version="1.0" encoding="UTF-8"?>'
+                        f'<Error><Code>AccessDenied</Code>'
+                        f'<Message>{msg}</Message>'
+                        f'<BucketName>{bucket}</BucketName>'
+                        f'<RequestId>KUMOSTACK-SCP-DENY</RequestId>'
+                        f'</Error>'.encode())
+        except Exception:
+            pass
         return _delete_bucket(bucket)
 
     if method == "HEAD":

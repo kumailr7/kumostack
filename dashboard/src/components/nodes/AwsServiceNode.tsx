@@ -8,245 +8,160 @@ interface NodeData {
   meta: Record<string, string>;
 }
 
-const SERVICE_CONFIG: Record<
-  string,
-  { color: string; bg: string; border: string; icon: React.ReactNode; category: string }
-> = {
-  cloudfront: {
-    color: "#ffffff",
-    bg: "#8C4FFF",
-    border: "#6B2FE0",
-    category: "CDN",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <circle cx="20" cy="20" r="13" stroke="white" strokeWidth="2" fill="none" />
-        <ellipse cx="20" cy="20" rx="6" ry="13" stroke="white" strokeWidth="1.5" fill="none" />
-        <line x1="7" y1="20" x2="33" y2="20" stroke="white" strokeWidth="1.5" />
-        <line x1="9" y1="13" x2="31" y2="13" stroke="white" strokeWidth="1.2" />
-        <line x1="9" y1="27" x2="31" y2="27" stroke="white" strokeWidth="1.2" />
-      </svg>
-    ),
-  },
-  s3: {
-    color: "#ffffff",
-    bg: "#3F8624",
-    border: "#2d6219",
-    category: "Storage",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <ellipse cx="20" cy="12" rx="12" ry="5" fill="rgba(255,255,255,0.3)" stroke="white" strokeWidth="1.5" />
-        <rect x="8" y="12" width="24" height="16" fill="rgba(255,255,255,0.1)" />
-        <ellipse cx="20" cy="28" rx="12" ry="5" fill="rgba(255,255,255,0.2)" stroke="white" strokeWidth="1.5" />
-        <line x1="8" y1="12" x2="8" y2="28" stroke="white" strokeWidth="1.5" />
-        <line x1="32" y1="12" x2="32" y2="28" stroke="white" strokeWidth="1.5" />
-        <ellipse cx="20" cy="20" rx="12" ry="5" fill="none" stroke="white" strokeWidth="1.2" strokeDasharray="3 2" />
-      </svg>
-    ),
-  },
-  ec2: {
-    color: "#ffffff",
-    bg: "#F58536",
-    border: "#d4681a",
-    category: "Compute",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <rect x="8" y="8" width="24" height="24" rx="3" stroke="white" strokeWidth="1.8" fill="none" />
-        <rect x="13" y="13" width="14" height="14" rx="2" fill="rgba(255,255,255,0.3)" stroke="white" strokeWidth="1.2" />
-        <circle cx="20" cy="20" r="3" fill="white" />
-        <line x1="20" y1="8" x2="20" y2="4" stroke="white" strokeWidth="1.5" />
-        <line x1="20" y1="32" x2="20" y2="36" stroke="white" strokeWidth="1.5" />
-        <line x1="8" y1="20" x2="4" y2="20" stroke="white" strokeWidth="1.5" />
-        <line x1="32" y1="20" x2="36" y2="20" stroke="white" strokeWidth="1.5" />
-      </svg>
-    ),
-  },
-  alb: {
-    color: "#ffffff",
-    bg: "#8C4FFF",
-    border: "#6B2FE0",
-    category: "Networking",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <path d="M20 8 L34 20 L20 32 L6 20 Z" stroke="white" strokeWidth="1.8" fill="rgba(255,255,255,0.15)" />
-        <circle cx="20" cy="14" r="2.5" fill="white" />
-        <circle cx="14" cy="23" r="2.5" fill="white" />
-        <circle cx="26" cy="23" r="2.5" fill="white" />
-        <line x1="20" y1="16" x2="15" y2="21" stroke="white" strokeWidth="1.3" />
-        <line x1="20" y1="16" x2="25" y2="21" stroke="white" strokeWidth="1.3" />
-      </svg>
-    ),
-  },
-  rds: {
-    color: "#ffffff",
-    bg: "#527FFF",
-    border: "#2955e0",
-    category: "Database",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <ellipse cx="20" cy="13" rx="12" ry="5" stroke="white" strokeWidth="1.8" fill="rgba(255,255,255,0.2)" />
-        <ellipse cx="20" cy="27" rx="12" ry="5" stroke="white" strokeWidth="1.8" fill="rgba(255,255,255,0.1)" />
-        <line x1="8" y1="13" x2="8" y2="27" stroke="white" strokeWidth="1.8" />
-        <line x1="32" y1="13" x2="32" y2="27" stroke="white" strokeWidth="1.8" />
-        <ellipse cx="20" cy="20" rx="12" ry="5" fill="none" stroke="white" strokeWidth="1.2" strokeDasharray="3 2" />
-      </svg>
-    ),
-  },
-  lambda: {
-    color: "#ffffff",
-    bg: "#F58536",
-    border: "#d4681a",
-    category: "Compute",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <rect x="6" y="6" width="28" height="28" rx="4" stroke="white" strokeWidth="1.8" fill="none" />
-        <text x="20" y="27" textAnchor="middle" fill="white" fontSize="18" fontFamily="serif" fontWeight="bold">λ</text>
-      </svg>
-    ),
-  },
-  dynamodb: {
-    color: "#ffffff",
-    bg: "#527FFF",
-    border: "#2955e0",
-    category: "Database",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <ellipse cx="20" cy="11" rx="11" ry="4" stroke="white" strokeWidth="1.6" fill="rgba(255,255,255,0.2)" />
-        <line x1="9" y1="11" x2="9" y2="29" stroke="white" strokeWidth="1.6" />
-        <line x1="31" y1="11" x2="31" y2="29" stroke="white" strokeWidth="1.6" />
-        <ellipse cx="20" cy="29" rx="11" ry="4" stroke="white" strokeWidth="1.6" fill="rgba(255,255,255,0.1)" />
-        <ellipse cx="20" cy="20" rx="11" ry="4" fill="none" stroke="white" strokeWidth="1.2" strokeDasharray="2 2" />
-        <line x1="15" y1="17" x2="25" y2="23" stroke="white" strokeWidth="1.5" />
-        <line x1="25" y1="17" x2="15" y2="23" stroke="white" strokeWidth="1.5" />
-      </svg>
-    ),
-  },
-  sqs: {
-    color: "#ffffff",
-    bg: "#F58536",
-    border: "#d4681a",
-    category: "Messaging",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <rect x="6" y="13" width="28" height="14" rx="2" stroke="white" strokeWidth="1.8" fill="rgba(255,255,255,0.15)" />
-        <circle cx="13" cy="20" r="2.5" fill="white" />
-        <circle cx="20" cy="20" r="2.5" fill="white" />
-        <circle cx="27" cy="20" r="2.5" fill="white" />
-        <path d="M30 9 L34 13 L30 17" stroke="white" strokeWidth="1.5" fill="none" strokeLinecap="round" />
-        <path d="M10 9 L6 13 L10 17" stroke="white" strokeWidth="1.5" fill="none" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  wafv2: {
-    color: "#ffffff",
-    bg: "#DD344C",
-    border: "#b02238",
-    category: "Security",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <path d="M20 5 L33 10 L33 22 C33 29 27 35 20 37 C13 35 7 29 7 22 L7 10 Z" stroke="white" strokeWidth="1.8" fill="rgba(255,255,255,0.15)" />
-        <path d="M20 13 L26 15.5 L26 22 C26 26 23.5 29 20 30.5 C16.5 29 14 26 14 22 L14 15.5 Z" fill="rgba(255,255,255,0.25)" stroke="white" strokeWidth="1.2" />
-        <line x1="20" y1="19" x2="20" y2="26" stroke="white" strokeWidth="2" strokeLinecap="round" />
-        <circle cx="20" cy="17" r="1.5" fill="white" />
-      </svg>
-    ),
-  },
-  ecr: {
-    color: "#ffffff",
-    bg: "#F58536",
-    border: "#d4681a",
-    category: "Registry",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <rect x="6" y="8" width="28" height="24" rx="3" stroke="white" strokeWidth="1.8" fill="none" />
-        <rect x="10" y="12" width="20" height="5" rx="1.5" fill="rgba(255,255,255,0.25)" stroke="white" strokeWidth="1.2" />
-        <rect x="10" y="20" width="20" height="5" rx="1.5" fill="rgba(255,255,255,0.15)" stroke="white" strokeWidth="1.2" />
-        <circle cx="13" cy="14.5" r="1.2" fill="white" />
-        <circle cx="13" cy="22.5" r="1.2" fill="white" />
-      </svg>
-    ),
-  },
-  secretsmanager: {
-    color: "#ffffff",
-    bg: "#DD344C",
-    border: "#b02238",
-    category: "Security",
-    icon: (
-      <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-8 h-8">
-        <rect x="10" y="17" width="20" height="15" rx="3" stroke="white" strokeWidth="1.8" fill="rgba(255,255,255,0.15)" />
-        <path d="M14 17 L14 13 C14 9.7 26 9.7 26 13 L26 17" stroke="white" strokeWidth="1.8" fill="none" strokeLinecap="round" />
-        <circle cx="20" cy="24" r="3" fill="white" />
-        <line x1="20" y1="27" x2="20" y2="30" stroke="white" strokeWidth="2" strokeLinecap="round" />
-      </svg>
-    ),
-  },
+const CDN = "/svg";
+
+const SERVICE_META: Record<string, { border: string; category: string; icon: string }> = {
+  cloudfront:     { border: "#8C4FFF", category: "CDN",        icon: `${CDN}/Networking-Content-Delivery/CloudFront.svg` },
+  s3:             { border: "#3F8624", category: "Storage",     icon: `${CDN}/Storage/Simple-Storage-Service.svg` },
+  ec2:            { border: "#F58536", category: "Compute",     icon: `${CDN}/Compute/EC2.svg` },
+  alb:            { border: "#8C4FFF", category: "Networking",  icon: `${CDN}/Networking-Content-Delivery/Elastic-Load-Balancing.svg` },
+  rds:            { border: "#527FFF", category: "Database",    icon: `${CDN}/Database/RDS.svg` },
+  lambda:         { border: "#F58536", category: "Compute",     icon: `${CDN}/Compute/Lambda.svg` },
+  dynamodb:       { border: "#527FFF", category: "Database",    icon: `${CDN}/Database/DynamoDB.svg` },
+  sqs:            { border: "#F58536", category: "Messaging",   icon: `${CDN}/App-Integration/Simple-Queue-Service.svg` },
+  sns:            { border: "#F58536", category: "Messaging",   icon: `${CDN}/App-Integration/Simple-Notification-Service.svg` },
+  wafv2:          { border: "#DD344C", category: "Security",    icon: `${CDN}/Security-Identity-Compliance/WAF.svg` },
+  ecr:            { border: "#F58536", category: "Registry",    icon: `${CDN}/Containers/Elastic-Container-Registry.svg` },
+  secretsmanager: { border: "#DD344C", category: "Secrets",     icon: `${CDN}/Security-Identity-Compliance/Secrets-Manager.svg` },
+  eks:            { border: "#F58536", category: "Compute",     icon: `${CDN}/Containers/Elastic-Kubernetes-Service.svg` },
+  ecs:            { border: "#F58536", category: "Compute",     icon: `${CDN}/Containers/Elastic-Container-Service.svg` },
+  elasticache:    { border: "#527FFF", category: "Cache",       icon: `${CDN}/Database/ElastiCache.svg` },
+  opensearch:     { border: "#527FFF", category: "Search",      icon: `${CDN}/Analytics/OpenSearch-Service.svg` },
+  apigateway:     { border: "#8C4FFF", category: "API",         icon: `${CDN}/App-Integration/API-Gateway.svg` },
+  cloudformation: { border: "#DD344C", category: "IaC",         icon: `${CDN}/Management-Governance/CloudFormation.svg` },
+  kinesis:        { border: "#8C4FFF", category: "Streaming",   icon: `${CDN}/Analytics/Kinesis.svg` },
+  stepfunctions:  { border: "#F58536", category: "Workflow",    icon: `${CDN}/App-Integration/Step-Functions.svg` },
+  internet:       { border: "#3B82F6", category: "Internet",    icon: `${CDN}/Networking-Content-Delivery/CloudFront.svg` },
 };
 
 const STATUS_COLOR: Record<string, string> = {
-  running: "#22c55e",
-  available: "#22c55e",
-  active: "#22c55e",
-  Deployed: "#22c55e",
-  stopped: "#ef4444",
+  running:    "#22c55e",
+  available:  "#22c55e",
+  active:     "#22c55e",
+  Deployed:   "#22c55e",
+  stopped:    "#ef4444",
   terminated: "#6b7280",
-  pending: "#f59e0b",
-  unknown: "#6b7280",
+  pending:    "#f59e0b",
+  unknown:    "#6b7280",
 };
 
 export default function AwsServiceNode({ data }: { data: NodeData }) {
-  const cfg = SERVICE_CONFIG[data.service] ?? SERVICE_CONFIG["ec2"];
+  const cfg = SERVICE_META[data.service] ?? {
+    border: "#475569",
+    category: data.service,
+    icon: `${CDN}/Compute/EC2.svg`,
+  };
   const statusColor = STATUS_COLOR[data.status] ?? "#6b7280";
 
-  return (
-    <div
-      className="relative flex flex-col items-center"
-      style={{ width: 140 }}
-    >
-      <Handle type="target" position={Position.Left} style={{ background: cfg.border }} />
-      <Handle type="source" position={Position.Right} style={{ background: cfg.border }} />
+  // Internet node — globe style
+  if (data.service === "internet") {
+    return (
+      <div style={{ width: 120, position: "relative" }}>
+        <Handle type="source" position={Position.Right} style={{ background: "#3B82F6", width: 8, height: 8 }} />
+        <div style={{
+          width: "100%",
+          borderRadius: 12,
+          background: "#131720",
+          border: "1.5px solid #3B82F640",
+          boxShadow: "0 0 0 1px #3B82F620, 0 6px 24px rgba(0,0,0,0.5)",
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+        }}>
+          <div style={{ width: "100%", height: 3, background: "#3B82F6", flexShrink: 0 }} />
+          <div style={{ padding: "14px 12px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+            <svg viewBox="0 0 24 24" width="44" height="44" fill="none" stroke="#60a5fa" strokeWidth="1.5">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
+            </svg>
+            <span style={{ fontSize: 9, fontWeight: 700, color: "#3B82F6", textTransform: "uppercase", letterSpacing: "0.12em" }}>
+              Internet
+            </span>
+          </div>
+          <div style={{ width: "80%", height: 1, background: "#3B82F625", marginBottom: 8 }} />
+          <div style={{ padding: "0 10px 10px", textAlign: "center" }}>
+            <p style={{ fontSize: 12, fontWeight: 800, color: "#f1f5f9", margin: 0 }}>{data.label}</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-      {/* Card */}
-      <div
-        style={{ width: "100%", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.5)", overflow: "hidden", border: `2px solid ${cfg.border}` }}
-      >
-        {/* Header with icon */}
-        <div
-          className="flex flex-col items-center justify-center py-3 px-2 gap-1"
-          style={{ background: cfg.bg }}
-        >
-          {cfg.icon}
-          <span className="text-white text-[10px] font-semibold uppercase tracking-wider opacity-80">
+  return (
+    <div style={{ width: 150, position: "relative" }}>
+      <Handle type="target" position={Position.Left} style={{ background: cfg.border, width: 8, height: 8 }} />
+      <Handle type="source" position={Position.Right} style={{ background: cfg.border, width: 8, height: 8 }} />
+      <Handle type="target" position={Position.Top} style={{ background: cfg.border, width: 8, height: 8 }} />
+      <Handle type="source" position={Position.Bottom} style={{ background: cfg.border, width: 8, height: 8 }} />
+
+      <div style={{
+        width: "100%",
+        borderRadius: 12,
+        background: "#131720",
+        border: `1.5px solid ${cfg.border}40`,
+        boxShadow: `0 0 0 1px ${cfg.border}20, 0 6px 24px rgba(0,0,0,0.5)`,
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+      }}>
+        {/* Top accent line in service colour */}
+        <div style={{ width: "100%", height: 3, background: cfg.border, flexShrink: 0 }} />
+
+        {/* Icon + category */}
+        <div style={{ padding: "14px 12px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={cfg.icon} alt={data.service} width={44} height={44} style={{ display: "block" }} />
+          <span style={{
+            fontSize: 9,
+            fontWeight: 700,
+            color: cfg.border,
+            textTransform: "uppercase",
+            letterSpacing: "0.12em",
+          }}>
             {cfg.category}
           </span>
         </div>
 
-        {/* Body */}
-        <div style={{ background: "#1a1f2e", padding: "6px 8px" }}>
-          <p
-            style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", textAlign: "center", lineHeight: 1.3, wordBreak: "break-all", margin: 0 }}
-          >
+        {/* Divider */}
+        <div style={{ width: "80%", height: 1, background: `${cfg.border}25`, marginBottom: 8 }} />
+
+        {/* Resource name */}
+        <div style={{ padding: "0 10px 4px", textAlign: "center", width: "100%" }}>
+          <p style={{
+            fontSize: 12,
+            fontWeight: 800,
+            color: "#f1f5f9",
+            lineHeight: 1.35,
+            wordBreak: "break-word",
+            margin: 0,
+            letterSpacing: "-0.01em",
+          }}>
             {data.label}
           </p>
-          {data.meta && Object.keys(data.meta).length > 0 && (
-            <div style={{ marginTop: 3 }}>
-              {Object.entries(data.meta)
-                .slice(0, 2)
-                .map(([k, v]) =>
-                  v ? (
-                    <p key={k} style={{ fontSize: 9, color: "#94a3b8", textAlign: "center", lineHeight: 1.3, margin: 0 }}>
-                      {v}
-                    </p>
-                  ) : null
-                )}
-            </div>
-          )}
         </div>
 
-        {/* Status bar */}
-        <div style={{ background: "#141824", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "3px 6px" }}>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor, boxShadow: `0 0 4px ${statusColor}`, display: "inline-block", flexShrink: 0 }} />
-          <span style={{ fontSize: 9, color: "#64748b", textTransform: "capitalize" }}>
-            {data.status}
-          </span>
+        {/* Status + region footer */}
+        <div style={{
+          width: "100%",
+          background: "#0c0f15",
+          borderTop: "1px solid rgba(255,255,255,0.04)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "5px 8px 3px" }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor, boxShadow: `0 0 6px ${statusColor}`, display: "inline-block", flexShrink: 0 }} />
+            <span style={{ fontSize: 10, color: statusColor, textTransform: "capitalize", fontWeight: 600 }}>
+              {data.status}
+            </span>
+          </div>
+          {data.meta?.region && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "0 8px 5px" }}>
+              <span style={{ fontSize: 8, color: "#334155" }}>📍</span>
+              <span style={{ fontSize: 9, color: "#334155", fontFamily: "monospace", letterSpacing: "0.03em" }}>
+                {data.meta.region}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>
