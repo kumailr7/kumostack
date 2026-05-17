@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """Hypercorn config — applied via `-c file:` in the Dockerfile ENTRYPOINT.
 
 Hypercorn's `from_pyfile` collects every non-module, non-dunder

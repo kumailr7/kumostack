@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 AWS CloudTrail Service Emulator.
 In-memory audit log — records all API calls and exposes LookupEvents for test assertions.

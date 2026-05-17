@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 SES (Simple Email Service) Emulator — v1 Query API + v2 REST/JSON API.
 

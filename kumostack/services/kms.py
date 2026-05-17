@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 KMS (Key Management Service) Emulator.
 JSON-based API via X-Amz-Target (prefix: TrentService).

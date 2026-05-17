@@ -2,6 +2,8 @@
   <img src="Kumostack_logo.png" alt="KumoStack — Free Open-Source AWS Emulator" width="400"/>
 </p>
 
+> **Attribution:** KumoStack is built on top of [MiniStack](https://github.com/Nahuel990/ministack), licensed under MIT. Original copyright © 2024 MiniStack Contributors.
+
 <h1 align="center">KumoStack</h1>
 <p align="center"><strong>Free, open-source local AWS emulator. Free forever.</strong></p>
 <p align="center">40+ AWS services on a single port · Terraform compatible · Real databases · MIT licensed</p>

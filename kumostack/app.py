@@ -1,3 +1,7 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
+# Originally based on MiniStack: https://github.com/Nahuel990/ministack
 """
 KumoStack — Local AWS Service Emulator.
 Single-port ASGI application on port 4566 (configurable via GATEWAY_PORT).

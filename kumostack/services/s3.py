@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 S3 Service Emulator – AWS-compatible.
 Supports: CreateBucket, DeleteBucket, ListBuckets, HeadBucket,

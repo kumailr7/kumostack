@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 ECR (Elastic Container Registry) Emulator.
 JSON-based API via X-Amz-Target (prefix: AmazonEC2ContainerRegistry_V20150921).

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 AutoScaling Service Emulator.
 Query API (Action=...) — groups, launch configs, policies, hooks, scheduled actions.

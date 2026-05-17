@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 WAF v2 Service Emulator.
 JSON-based API via X-Amz-Target: AWSWAF_20190729.

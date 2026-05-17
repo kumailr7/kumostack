@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 import os as _os
 
 # Backward-compat shim: accept KUMOSTACK_* env vars (new canonical names) and

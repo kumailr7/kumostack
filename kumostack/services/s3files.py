@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 Amazon S3 Files Service Emulator (s3files-2025-05-05).
 REST/JSON API. Routes, payloads, and response shapes match the AWS spec.

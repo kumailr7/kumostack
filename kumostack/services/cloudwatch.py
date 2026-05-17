@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 CloudWatch Metrics Service Emulator.
 Supports legacy Query API (form-encoded), smithy-rpc-v2-cbor (botocore 1.42+),

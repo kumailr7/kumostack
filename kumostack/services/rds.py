@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 RDS Service Emulator.
 Query API (Action=...) for control plane + optional Docker-based real Postgres/MySQL.

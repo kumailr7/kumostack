@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 EFS (Elastic File System) Service Emulator.
 REST/JSON protocol — /2015-02-01/* paths.

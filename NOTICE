@@ -1,0 +1,58 @@
+KumoStack
+Copyright (c) 2026 KumoStack Contributors
+
+This product is based on MiniStack (https://github.com/Nahuel990/ministack),
+originally created by Nahuel Nucera and MiniStack Contributors.
+
+MiniStack
+Copyright (c) 2024 MiniStack Contributors
+Licensed under the MIT License.
+
+---
+
+KumoStack includes significant additions and modifications beyond the original
+MiniStack codebase, including but not limited to:
+
+- Real EKS clusters via k3s Docker containers with full kubectl access
+- Real RDS databases via Docker containers (PostgreSQL, MySQL, MariaDB)
+- Real Secrets Manager with persistent in-memory storage
+- Service Control Policies (SCPs) with real enforcement at the API level
+- AWS Organizations with management account gating
+- Cross-account AssumeRole audit log
+- CloudWatch with SEARCH expression support for Grafana integration
+- Live Infrastructure Architecture diagram (ReactFlow)
+- Stackport Resource Browser with full CRUD
+- Grafana integration with CloudWatch, Prometheus, and Loki dashboards
+- Vector.dev 3-tier log pipeline (Loki + S3 + Garage)
+- Garage self-hosted S3 for Terraform state and log cold archives
+
+---
+
+Third-party and open-source components used by KumoStack:
+
+- LocalStack — inspired patterns for AWS service emulation
+  https://github.com/localstack/localstack (Apache 2.0)
+
+- k3s by Rancher Labs — lightweight Kubernetes for EKS emulation
+  https://github.com/k3s-io/k3s (Apache 2.0)
+
+- Grafana — observability dashboards
+  https://github.com/grafana/grafana (AGPLv3)
+
+- Loki — log aggregation system by Grafana Labs
+  https://github.com/grafana/loki (AGPLv3)
+
+- Vector — high-performance observability data pipeline
+  https://github.com/vectordotdev/vector (MPL 2.0)
+
+- Garage — S3-compatible distributed object storage
+  https://git.deuxfleurs.fr/Deuxfleurs/garage (AGPLv3)
+
+- Prometheus — monitoring and alerting toolkit
+  https://github.com/prometheus/prometheus (Apache 2.0)
+
+- ReactFlow — interactive node-based UI library
+  https://github.com/xyflow/xyflow (MIT)
+
+See the LICENSE file for the full text of the MIT License that governs
+KumoStack and MiniStack source code.

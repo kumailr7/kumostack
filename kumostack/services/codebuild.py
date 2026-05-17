@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 CodeBuild Service Emulator.
 JSON-based API via X-Amz-Target: CodeBuild_20161006.<Operation>.

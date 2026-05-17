@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 RDS Data API Service Emulator.
 REST-style JSON API (POST /Execute, /BeginTransaction, etc.)

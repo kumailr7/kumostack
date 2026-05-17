@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 State persistence for KumoStack services.
 When PERSIST_STATE=1, service state is saved to STATE_DIR on shutdown

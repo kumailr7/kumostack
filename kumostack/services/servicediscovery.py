@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 AWS Cloud Map (Service Discovery) emulator.
 JSON-based API via X-Amz-Target: Route53AutoNaming_v20170314.

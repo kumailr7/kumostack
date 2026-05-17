@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """TLS material helpers — env-driven cert/key resolution for the gateway.
 
 `USE_SSL=1` enables HTTPS (LocalStack-compatible). Self-signed cert

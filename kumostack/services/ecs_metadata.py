@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """ECS Task Metadata V4 emulator.
 
 Real ECS injects ECS_CONTAINER_METADATA_URI_V4=http://169.254.170.2/v4/<token>

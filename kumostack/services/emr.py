@@ -1,3 +1,6 @@
+# Copyright (c) 2026 KumoStack Contributors
+# Copyright (c) 2024 MiniStack Contributors
+# Licensed under the MIT License. See LICENSE for details.
 """
 EMR (Elastic MapReduce) Service Emulator.
 JSON protocol via X-Amz-Target: ElasticMapReduce.{Operation}
