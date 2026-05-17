@@ -1,7 +1,6 @@
 auth_enabled: false
 
-# Run as single monolithic binary — all components in one process
-target: all
+target: all,memberlist-kv
 
 server:
   http_listen_port: 3100
@@ -18,30 +17,11 @@ common:
   replication_factor: 1
   ring:
     kvstore:
-      store: inmemory
+      store: memberlist
 
-ingester:
-  lifecycler:
-    ring:
-      kvstore:
-        store: inmemory
-      replication_factor: 1
-    final_sleep: 0s
-    heartbeat_period: 5s
-    heartbeat_timeout: 1m
-    join_after: 0s
-    observe_period: 0s
-    interface_names:
-      - eth0
-      - lo
-  wal:
-    enabled: true
-    dir: /loki/wal
-    flush_on_shutdown: true
-    checkpoint_duration: 5m
-  chunk_idle_period: 30m
-  max_chunk_age: 1h
-  chunk_encoding: snappy
+memberlist:
+  bind_port: 7946
+  join_members: []
 
 query_range:
   results_cache:
@@ -75,5 +55,4 @@ compactor:
   working_directory: /loki/compactor
   retention_enabled: true
   retention_delete_delay: 2h
-  retention_delete_worker_count: 150
   delete_request_store: filesystem
