@@ -1318,81 +1318,13 @@ function StatusTab({ connected, serviceStatus }: { connected: boolean; serviceSt
 interface SpResource { id: string; [key: string]: unknown }
 interface SpResourceList { service: string; resources: Record<string, SpResource[]> }
 
-const STACKPORT_BASE = "http://localhost:8082";
-
-function ResourceBrowserTab({ connected }: { connected: boolean }) {
-  const [stats, setStats]   = useState<SpStats | null>(null);
-  const [selSvc, setSelSvc] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const iframeRef           = useRef<HTMLIFrameElement>(null);
-
-  useEffect(() => {
-    fetch("/api/stackport/stats", { cache: "no-store" })
-      .then(r => r.ok ? r.json() : null).then(d => { if (d) setStats(d); }).catch(() => {});
-  }, []);
-
-  // Navigate the iframe to the selected service
-  useEffect(() => {
-    if (!iframeRef.current) return;
-    const url = selSvc
-      ? `${STACKPORT_BASE}/resources/${selSvc}`
-      : `${STACKPORT_BASE}/resources`;
-    iframeRef.current.src = url;
-  }, [selSvc]);
-
-  const q = search.trim().toLowerCase();
-  const svcList = Object.entries(stats?.services ?? {})
-    .filter(([k]) => !q || k.includes(q))
-    .sort(([a], [b]) => a.localeCompare(b));
-
+function ResourceBrowserTab() {
   return (
-    <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
-
-      {/* ── Service sidebar ── */}
-      <div style={{ width: 210, flexShrink: 0, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", background: "var(--bg-elevated)" }}>
-        <div style={{ padding: "12px 12px 8px" }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-faint)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>Services</div>
-          <input
-            className="search"
-            placeholder="Filter services…"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            style={{ marginBottom: 0, width: "100%", fontSize: 12 }}
-          />
-        </div>
-        <div style={{ overflow: "auto", flex: 1 }}>
-          {!stats && <div style={{ padding: "16px 12px", fontSize: 12, color: "var(--text-faint)" }}>Loading…</div>}
-          {svcList.map(([svc, data]) => {
-            const total = Object.values(data.resources).reduce((a, b) => a + b, 0);
-            const isSelected = svc === selSvc;
-            return (
-              <button key={svc} onClick={() => setSelSvc(svc)}
-                style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "7px 12px", background: isSelected ? "rgba(16,185,129,0.08)" : "transparent", border: "none", borderLeft: isSelected ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer", textAlign: "left" }}
-                onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.04)"; }}
-                onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}>
-                <SvcIcon svc={svc} size={20} />
-                <span style={{ flex: 1, fontSize: 13, color: isSelected ? "var(--text)" : "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{svc}</span>
-                {total > 0 && (
-                  <span style={{ fontSize: 11, fontWeight: 600, padding: "1px 6px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text-dim)", flexShrink: 0 }}>{total}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-        {!connected && (
-          <div style={{ padding: "8px 12px", borderTop: "1px solid var(--border)", fontSize: 11, color: "#ef4444" }}>KumoStack offline</div>
-        )}
-      </div>
-
-      {/* ── Stackport iframe — full Stackport UI ── */}
-      <iframe
-        ref={iframeRef}
-        src={`${STACKPORT_BASE}/resources`}
-        title="Stackport Resource Browser"
-        style={{ flex: 1, border: "none", height: "100%", display: "block" }}
-        allow="same-origin"
-      />
-    </div>
+    <iframe
+      src="http://localhost:8082/resources"
+      title="Resource Browser"
+      style={{ width: "100%", height: "100%", border: "none", display: "block" }}
+    />
   );
 }
 
@@ -2987,7 +2919,7 @@ export default function Dashboard() {
         {activeTab === "Overview"       && <OverviewTab connected={connected} version={version} />}
         {activeTab === "Organizations"  && <OrganizationsTab activeAccount={activeAccount} setActiveAccount={setActiveAccount} />}
         {activeTab === "Chaos"          && <ChaosTab connected={connected} />}
-        {activeTab === "Stackport"      && <ResourceBrowserTab connected={connected} />}
+        {activeTab === "Stackport"      && <ResourceBrowserTab />}
         {activeTab === "Diagrams"       && <DiagramsTab />}
         {activeTab === "Tutorials"      && <TutorialsTab />}
         {activeTab === "Status"         && <StatusTab connected={connected} serviceStatus={serviceStatus} />}
