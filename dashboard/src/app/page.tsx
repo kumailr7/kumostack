@@ -980,212 +980,246 @@ function Sidebar({ activeTab, setTab, connected, version, collapsed, setCollapse
 
 // ─── Overview Tab ─────────────────────────────────────────────────────────────
 
-function OverviewTab({ connected, serviceStatus, version, resourceCounts, totalResources }: {
+// ── Stackport service icon colours (matches Stackport UI) ────────────────────
+const SVC_COLOR: Record<string, string> = {
+  s3: "#3F8624", sqs: "#F58536", sns: "#F58536", dynamodb: "#527FFF",
+  lambda: "#F58536", ec2: "#F58536", rds: "#527FFF", ecs: "#F58536",
+  eks: "#F58536", ecr: "#F58536", "cognito-idp": "#DD344C",
+  "cognito-identity": "#DD344C", cloudformation: "#DD344C",
+  cloudfront: "#8C4FFF", route53: "#8C4FFF", iam: "#DD344C",
+  kms: "#DD344C", secretsmanager: "#DD344C", ssm: "#DD344C",
+  logs: "#DD344C", events: "#F58536", kinesis: "#8C4FFF",
+  stepfunctions: "#F58536", monitoring: "#DD344C", ses: "#DD344C",
+  acm: "#DD344C", wafv2: "#DD344C", glue: "#8C4FFF", athena: "#527FFF",
+  apigateway: "#F58536", firehose: "#8C4FFF", "elasticloadbalancing": "#8C4FFF",
+  elasticache: "#527FFF", elasticfilesystem: "#3F8624", elasticmapreduce: "#F58536",
+  appsync: "#F58536",
+};
+const SVC_ICON: Record<string, string> = {
+  s3: `${CDN}/Storage/Simple-Storage-Service.svg`,
+  sqs: `${CDN}/App-Integration/Simple-Queue-Service.svg`,
+  sns: `${CDN}/App-Integration/Simple-Notification-Service.svg`,
+  dynamodb: `${CDN}/Database/DynamoDB.svg`,
+  lambda: `${CDN}/Compute/Lambda.svg`,
+  ec2: `${CDN}/Compute/EC2.svg`,
+  rds: `${CDN}/Database/RDS.svg`,
+  ecs: `${CDN}/Containers/Elastic-Container-Service.svg`,
+  eks: `${CDN}/Containers/Elastic-Kubernetes-Service.svg`,
+  ecr: `${CDN}/Containers/Elastic-Container-Registry.svg`,
+  "cognito-idp": `${CDN}/Security-Identity-Compliance/Cognito.svg`,
+  "cognito-identity": `${CDN}/Security-Identity-Compliance/Cognito.svg`,
+  cloudformation: `${CDN}/Management-Governance/CloudFormation.svg`,
+  cloudfront: `${CDN}/Networking-Content-Delivery/CloudFront.svg`,
+  route53: `${CDN}/Networking-Content-Delivery/Route-53.svg`,
+  iam: `${CDN}/Security-Identity-Compliance/Identity-and-Access-Management.svg`,
+  kms: `${CDN}/Security-Identity-Compliance/Key-Management-Service.svg`,
+  secretsmanager: `${CDN}/Security-Identity-Compliance/Secrets-Manager.svg`,
+  ssm: `${CDN}/Management-Governance/Systems-Manager.svg`,
+  logs: `${CDN}/Management-Governance/CloudWatch.svg`,
+  events: `${CDN}/App-Integration/EventBridge.svg`,
+  kinesis: `${CDN}/Analytics/Kinesis.svg`,
+  stepfunctions: `${CDN}/App-Integration/Step-Functions.svg`,
+  monitoring: `${CDN}/Management-Governance/CloudWatch.svg`,
+  ses: `${CDN}/Business-Applications/Simple-Email-Service.svg`,
+  acm: `${CDN}/Security-Identity-Compliance/Certificate-Manager.svg`,
+  wafv2: `${CDN}/Security-Identity-Compliance/WAF.svg`,
+  glue: `${CDN}/Analytics/Glue.svg`,
+  athena: `${CDN}/Analytics/Athena.svg`,
+  apigateway: `${CDN}/App-Integration/API-Gateway.svg`,
+  firehose: `${CDN}/Analytics/Data-Firehose.svg`,
+  elasticloadbalancing: `${CDN}/Networking-Content-Delivery/Elastic-Load-Balancing.svg`,
+  elasticache: `${CDN}/Database/ElastiCache.svg`,
+  elasticfilesystem: `${CDN}/Storage/EFS.svg`,
+  elasticmapreduce: `${CDN}/Analytics/EMR.svg`,
+  appsync: `${CDN}/App-Integration/AppSync.svg`,
+};
+
+interface SpStats {
+  services: Record<string, { status: string; resources: Record<string, number> }>;
+  total_resources: number;
+  uptime_seconds: number;
+}
+interface SpHealth {
+  status: string; version: string; uptime_seconds: number;
+  services_count: number; writes_enabled: boolean;
+}
+
+function SvcIcon({ svc, size = 28 }: { svc: string; size?: number }) {
+  const icon = SVC_ICON[svc];
+  const color = SVC_COLOR[svc] ?? "#6b7280";
+  if (icon) return <Image src={icon} alt={svc} width={size} height={size} unoptimized style={{ display: "block" }} />;
+  return (
+    <div style={{ width: size, height: size, borderRadius: 4, background: `${color}22`, border: `1px solid ${color}50`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.45, fontWeight: 700, color, letterSpacing: "-0.03em" }}>
+      {svc.slice(0, 2).toUpperCase()}
+    </div>
+  );
+}
+
+function OverviewTab({ connected, version }: {
   connected: boolean;
-  serviceStatus: ServiceStatus;
   version: string | null;
-  resourceCounts: ResourceCounts;
-  totalResources: number;
+  // kept for type compat — data now comes from Stackport
+  serviceStatus?: ServiceStatus;
+  resourceCounts?: ResourceCounts;
+  totalResources?: number;
 }) {
-  const allServices = COLUMNS.flat().flatMap((s) => s.services);
-  const keys = [...new Set(allServices.map((s) => s.healthKey).filter(Boolean) as string[])];
-  const healthy = keys.filter((k) => ["available", "running"].includes(serviceStatus[k] ?? "")).length;
-  const errors  = keys.filter((k) => serviceStatus[k] === "error").length;
+  const [stats, setStats]         = useState<SpStats | null>(null);
+  const [health, setHealth]       = useState<SpHealth | null>(null);
+  const [search, setSearch]       = useState("");
+  const [loading, setLoading]     = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const [grafanaInput, setGrafanaInput] = useState("http://localhost:3002");
   const [grafanaUrl, setGrafanaUrl]     = useState("http://localhost:3002");
   const [showGrafana, setShowGrafana]   = useState(false);
-  const [vectorInput, setVectorInput]   = useState("http://localhost:8686");
-  const [vectorUrl, setVectorUrl]       = useState("http://localhost:8686");
   const [vectorHealth, setVectorHealth] = useState<"unknown" | "ok" | "error">("unknown");
-  const [search, setSearch]             = useState("");
 
-  useEffect(() => {
-    const g = localStorage.getItem("grafanaUrl");
-    const v = localStorage.getItem("vectorUrl");
-    if (g) { setGrafanaUrl(g); setGrafanaInput(g); }
-    if (v) { setVectorUrl(v); setVectorInput(v); }
+  const load = useCallback(() => {
+    Promise.all([
+      fetch("/api/stackport/stats",  { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch("/api/stackport/health", { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([s, h]) => {
+      if (s) { setStats(s); setLastUpdated(new Date()); }
+      if (h) setHealth(h);
+      setLoading(false);
+    });
   }, []);
 
+  useEffect(() => { load(); const id = setInterval(load, 30_000); return () => clearInterval(id); }, [load]);
   useEffect(() => {
-    fetch(`/api/vector?base=${encodeURIComponent(vectorUrl)}&path=/health`)
-      .then((r) => setVectorHealth(r.ok ? "ok" : "error"))
+    const g = localStorage.getItem("grafanaUrl");
+    if (g) { setGrafanaUrl(g); setGrafanaInput(g); }
+  }, []);
+  useEffect(() => {
+    fetch(`/api/vector?base=${encodeURIComponent(grafanaUrl)}&path=/health`)
+      .then(r => setVectorHealth(r.ok ? "ok" : "error"))
       .catch(() => setVectorHealth("error"));
-  }, [vectorUrl]);
+  }, [grafanaUrl]);
 
   const q = search.trim().toLowerCase();
 
+  const svcEntries = Object.entries(stats?.services ?? {}).filter(([k]) => !q || k.includes(q));
+  const totalSvcs  = Object.keys(stats?.services ?? {}).length;
+  const availSvcs  = Object.values(stats?.services ?? {}).filter(v => v.status === "available").length;
+  const uptime     = health ? (() => {
+    const s = Math.round(health.uptime_seconds);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  })() : null;
+
   return (
     <div>
-      {/* Page header */}
+      {/* Header */}
       <div className="page-header">
         <div>
-          <h1 className="page-title">Overview</h1>
-          <p className="page-subtitle">All AWS services available in KumoStack</p>
+          <h1 className="page-title">Dashboard</h1>
+          <p className="page-subtitle">AWS Resource Browser — powered by Stackport</p>
         </div>
-        {version && <span className="version-badge">v{version}</span>}
-      </div>
-
-      {/* Stat cards */}
-      <div className="stat-cards">
-        <div className="stat-card">
-          <div className="stat-card-icon stat-card-icon--blue">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-          </div>
-          <div>
-            <div className="stat-value">{connected ? keys.length : "—"}</div>
-            <div className="stat-label">Total Services</div>
-          </div>
-        </div>
-        <div className={`stat-card ${connected && healthy > 0 ? "stat-card--green" : ""}`}>
-          <div className="stat-card-icon stat-card-icon--green">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-          </div>
-          <div>
-            <div className="stat-value">{connected ? healthy : "—"}</div>
-            <div className="stat-label">Healthy</div>
-          </div>
-        </div>
-        <div className={`stat-card ${connected && errors > 0 ? "stat-card--red" : ""}`}>
-          <div className="stat-card-icon stat-card-icon--orange">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          </div>
-          <div>
-            <div className="stat-value">{connected ? totalResources : "—"}</div>
-            <div className="stat-label">Total Resources</div>
-          </div>
-        </div>
-        <div className={`stat-card ${connected ? "stat-card--green" : "stat-card--red"}`}>
-          <div className={`stat-card-icon ${connected ? "stat-card-icon--green" : "stat-card-icon--red"}`}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-          </div>
-          <div>
-            <div className="stat-value" style={{ fontSize: 22 }}>{connected ? "Online" : "Offline"}</div>
-            <div className="stat-label">KumoStack</div>
-          </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {uptime && <span style={{ fontSize: 11, color: "var(--text-faint)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "4px 10px" }}>uptime {uptime}</span>}
+          {version && <span className="version-badge">v{version}</span>}
+          <button className="btn btn-sm" onClick={() => { setLoading(true); load(); }} disabled={loading}>↺ Refresh</button>
         </div>
       </div>
 
-      {/* Service grid */}
-      <div className="section-header">
-        <h2 className="section-title">Services</h2>
-        <input
-          className="search overview-search"
-          placeholder="Filter services…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      {/* Stat pills — matches Stackport header */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }}>
+        {[
+          { label: "services",   value: totalSvcs,                    color: "var(--accent)" },
+          { label: "resources",  value: stats?.total_resources ?? "—", color: "var(--accent)" },
+          { label: "available",  value: availSvcs,                    color: "#10b981" },
+          { label: "KumoStack",  value: connected ? "Online" : "Offline", color: connected ? "#10b981" : "#ef4444" },
+          ...(health?.writes_enabled ? [{ label: "writes", value: "enabled", color: "#10b981" }] : []),
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "5px 14px", display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color, lineHeight: 1 }}>{value}</span>
+            <span style={{ fontSize: 10, color: "var(--text-faint)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</span>
+          </div>
+        ))}
+        {lastUpdated && <span style={{ fontSize: 10, color: "var(--text-faint)", alignSelf: "center", marginLeft: "auto" }}>updated {lastUpdated.toLocaleTimeString()}</span>}
       </div>
 
-      <div className="columns">
-        {COLUMNS.map((col, ci) => {
-          const visible = col.filter((section) => !q || section.services.some((s) => s.name.toLowerCase().includes(q)));
-          if (visible.length === 0) return null;
+      {/* Service table */}
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden", marginBottom: 32 }}>
+        {/* Table header */}
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 80px 1fr 60px", padding: "9px 16px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)" }}>
+          {["Service", "Status", "Resources", "Total"].map(h => (
+            <div key={h} style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{h}</div>
+          ))}
+        </div>
+        {/* Search row */}
+        <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)" }}>
+          <input className="search" placeholder="Filter services…" value={search} onChange={e => setSearch(e.target.value)} style={{ marginBottom: 0, width: "100%", maxWidth: 320 }} />
+        </div>
+
+        {loading && !stats && (
+          <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>Loading services from Stackport…</div>
+        )}
+        {!loading && !stats && (
+          <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>Stackport not reachable — run <code className="inline-code">docker compose up -d stackport</code></div>
+        )}
+
+        {svcEntries.map(([svc, data], idx) => {
+          const total = Object.values(data.resources).reduce((a, b) => a + b, 0);
+          const resEntries = Object.entries(data.resources).filter(([, n]) => n > 0);
+          const isAvail = data.status === "available";
           return (
-            <div key={ci} className="col">
-              {visible.map((section) => {
-                const visibleSvcs = section.services.filter((s) => !q || s.name.toLowerCase().includes(q));
-                return (
-                  <div key={section.label} className="col-section">
-                    <div className="category-label">{section.label}</div>
-                    <div className="service-list">
-                      {visibleSvcs.map((s) => {
-                        const status = s.healthKey ? serviceStatus[s.healthKey] : undefined;
-                        const count  = s.resourceKey ? (resourceCounts[s.resourceKey] ?? null) : null;
-                        return (
-                          <div key={s.name} className="service">
-                            <div className="service-icon-wrap">
-                              <div className="service-icon">
-                                <Image src={s.icon} alt={s.name} width={32} height={32} unoptimized />
-                              </div>
-                              {connected && status && (
-                                <span className={statusDotClass(status)} title={status} />
-                              )}
-                            </div>
-                            <div className="service-name">{s.name}</div>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
-                              {connected && count !== null && count > 0 && (
-                                <span className="resource-count">{count}</span>
-                              )}
-                              <span className={`badge ${s.badge}`}>
-                                {s.badgeText ?? (s.badge === "free" ? "Free" : "")}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
+            <div key={svc} style={{ display: "grid", gridTemplateColumns: "2fr 80px 1fr 60px", padding: "10px 16px", borderBottom: idx < svcEntries.length - 1 ? "1px solid var(--border)" : "none", alignItems: "center", transition: "background 0.1s" }}
+              onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-card-hover)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "")}>
+              {/* Service name + icon */}
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <SvcIcon svc={svc} size={24} />
+                <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text)" }}>{svc}</span>
+              </div>
+              {/* Status dot */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: isAvail ? "#10b981" : "#6b7280", display: "inline-block", flexShrink: 0 }} />
+                <span style={{ fontSize: 11, color: isAvail ? "#10b981" : "var(--text-faint)" }}>{isAvail ? "available" : data.status}</span>
+              </div>
+              {/* Resource types */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                {resEntries.length > 0
+                  ? resEntries.map(([type, count]) => (
+                      <span key={type} style={{ fontSize: 10, color: "var(--text-dim)", background: "var(--bg-elevated)", border: "1px solid var(--border)", padding: "1px 6px", borderRadius: 3 }}>{count} {type.replace(/_/g, " ")}</span>
+                    ))
+                  : <span style={{ fontSize: 10, color: "var(--text-faint)" }}>none</span>
+                }
+              </div>
+              {/* Total badge */}
+              <div>
+                <span style={{ fontSize: 11, fontWeight: 700, minWidth: 24, textAlign: "center", display: "inline-block", padding: "2px 8px", background: total > 0 ? "var(--accent-subtle, rgba(16,185,129,0.12))" : "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", color: total > 0 ? "var(--accent)" : "var(--text-faint)" }}>{total}</span>
+              </div>
             </div>
           );
         })}
       </div>
 
-      {/* Integrations */}
-      <div className="section-header" style={{ marginTop: 40 }}>
-        <h2 className="section-title">Integrations</h2>
-      </div>
-
-      {/* Grafana */}
+      {/* Grafana integration */}
       <div className="integration-card">
         <div className="integration-card-header">
           <div className="integration-card-title">
-            <svg width="20" height="20" viewBox="0 0 100 100" fill="none">
-              <circle cx="50" cy="50" r="46" stroke="#F46800" strokeWidth="6" />
-              <path d="M30 50 Q50 20 70 50 Q50 80 30 50Z" fill="#F46800" opacity="0.8" />
-            </svg>
+            <svg width="20" height="20" viewBox="0 0 100 100" fill="none"><circle cx="50" cy="50" r="46" stroke="#F46800" strokeWidth="6"/><path d="M30 50 Q50 20 70 50 Q50 80 30 50Z" fill="#F46800" opacity="0.8"/></svg>
             <span>Grafana</span>
             <span className="integration-badge">Monitoring</span>
           </div>
           <div className="integration-actions">
-            <input className="integration-input" value={grafanaInput} onChange={(e) => setGrafanaInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (setGrafanaUrl(grafanaInput), localStorage.setItem("grafanaUrl", grafanaInput))} placeholder="http://localhost:3000" />
+            <input className="integration-input" value={grafanaInput} onChange={e => setGrafanaInput(e.target.value)} onKeyDown={e => e.key === "Enter" && (setGrafanaUrl(grafanaInput), localStorage.setItem("grafanaUrl", grafanaInput))} placeholder="http://localhost:3002" />
             <button className="btn btn-sm" onClick={() => { setGrafanaUrl(grafanaInput); localStorage.setItem("grafanaUrl", grafanaInput); }}>Apply</button>
-            <button className="btn btn-sm btn-primary" onClick={() => setShowGrafana(!showGrafana)}>{showGrafana ? "Hide" : "Embed Dashboard"}</button>
+            <button className="btn btn-sm btn-primary" onClick={() => setShowGrafana(!showGrafana)}>{showGrafana ? "Hide" : "Embed"}</button>
             <a href={grafanaUrl} target="_blank" rel="noreferrer" className="btn btn-sm">Open ↗</a>
           </div>
         </div>
-        {showGrafana ? (
-          <iframe src={grafanaUrl} className="grafana-iframe" title="Grafana Dashboard" />
-        ) : (
-          <p className="integration-desc">Embed any Grafana dashboard to monitor KumoStack resources. Configure your Grafana URL above and click &ldquo;Embed Dashboard&rdquo;, or open it in a new tab.</p>
-        )}
+        {showGrafana && <iframe src={grafanaUrl} className="grafana-iframe" title="Grafana" />}
       </div>
 
-      {/* Vector.dev */}
-      <div className="integration-card">
-        <div className="integration-card-header">
-          <div className="integration-card-title">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <polygon points="12,2 22,21 2,21" stroke="#10B981" strokeWidth="2" fill="none" strokeLinejoin="round" />
-              <line x1="12" y1="8" x2="12" y2="15" stroke="#10B981" strokeWidth="2" strokeLinecap="round" />
-              <circle cx="12" cy="18" r="1.2" fill="#10B981" />
-            </svg>
-            <span>Vector.dev</span>
-            <span className="integration-badge">Log Pipeline</span>
-            <span className={`pill ${vectorHealth === "ok" ? "pill--green" : vectorHealth === "error" ? "pill--red" : "pill--dim"}`}>
-              {vectorHealth === "ok" ? "Connected" : vectorHealth === "error" ? "Not running" : "Checking…"}
-            </span>
-          </div>
-          <div className="integration-actions">
-            <input className="integration-input" value={vectorInput} onChange={(e) => setVectorInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (setVectorUrl(vectorInput), localStorage.setItem("vectorUrl", vectorInput))} placeholder="http://localhost:8686" />
-            <button className="btn btn-sm" onClick={() => { setVectorUrl(vectorInput); localStorage.setItem("vectorUrl", vectorInput); }}>Apply</button>
-          </div>
-        </div>
-        <p className="integration-desc">Route KumoStack logs through Vector for filtering, enrichment, and forwarding to any sink. Start Vector with <code className="inline-code">vector --config vector.toml</code> — see the Logs tab for a sample config.</p>
-      </div>
-
-      <div className="footer" style={{ marginTop: 40 }}>
-        <div>KumoStack · MIT License · <span className="mono">port 4566</span></div>
-        <div>
-          <a href="https://github.com/kumailr7/ministack" target="_blank" rel="noreferrer">GitHub</a>
-          {" · "}
-          <a href="https://hub.docker.com/r/ministackorg/ministack" target="_blank" rel="noreferrer">Docker Hub</a>
-        </div>
+      <div className="footer" style={{ marginTop: 32 }}>
+        <div>KumoStack · MIT License · <span className="mono">localhost:4566</span></div>
+        <div><a href="https://github.com/kumailr7/kumostack" target="_blank" rel="noreferrer">GitHub</a></div>
       </div>
     </div>
   );
+  void vectorHealth; // suppress unused warning
 }
 
 // ─── Status Tab ───────────────────────────────────────────────────────────────
@@ -1238,67 +1272,161 @@ function StatusTab({ connected, serviceStatus }: { connected: boolean; serviceSt
 
 // ─── Resource Browser Tab ─────────────────────────────────────────────────────
 
-function ResourceBrowserTab({ connected, serviceStatus, query, setQuery, region, setRegion }: {
-  connected: boolean; serviceStatus: ServiceStatus;
-  query: string; setQuery: (v: string) => void;
-  region: string; setRegion: (v: string) => void;
+interface SpResource { id: string; [key: string]: unknown }
+interface SpResourceList { service: string; resources: Record<string, SpResource[]> }
+
+function ResourceBrowserTab({ connected }: {
+  connected: boolean;
+  // legacy props kept for compat
+  serviceStatus?: ServiceStatus;
+  query?: string; setQuery?: (v: string) => void;
+  region?: string; setRegion?: (v: string) => void;
 }) {
-  const q = query.trim().toLowerCase();
+  const [stats, setStats]           = useState<SpStats | null>(null);
+  const [selSvc, setSelSvc]         = useState<string | null>(null);
+  const [selType, setSelType]       = useState<string | null>(null);
+  const [selId, setSelId]           = useState<string | null>(null);
+  const [resources, setResources]   = useState<SpResourceList | null>(null);
+  const [detail, setDetail]         = useState<Record<string, unknown> | null>(null);
+  const [loadingList, setLoadingList]   = useState(false);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [search, setSearch]         = useState("");
+
+  useEffect(() => {
+    fetch("/api/stackport/stats", { cache: "no-store" })
+      .then(r => r.ok ? r.json() : null).then(d => { if (d) setStats(d); }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!selSvc) return;
+    setLoadingList(true);
+    setResources(null); setDetail(null); setSelType(null); setSelId(null);
+    fetch(`/api/stackport/resources/${selSvc}`, { cache: "no-store" })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setResources(d); setLoadingList(false); })
+      .catch(() => setLoadingList(false));
+  }, [selSvc]);
+
+  const loadDetail = (svc: string, type: string, id: string) => {
+    setSelType(type); setSelId(id); setDetail(null); setLoadingDetail(true);
+    fetch(`/api/stackport/resources/${svc}/${type}/${encodeURIComponent(id)}`, { cache: "no-store" })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setDetail(d); setLoadingDetail(false); })
+      .catch(() => setLoadingDetail(false));
+  };
+
+  const q = search.trim().toLowerCase();
+  const svcList = Object.entries(stats?.services ?? {})
+    .filter(([k]) => !q || k.includes(q))
+    .sort(([a], [b]) => a.localeCompare(b));
+
   return (
-    <>
+    <div>
       <div className="page-header">
-        <div><h1 className="page-title">Resource Browser</h1><p className="page-subtitle">Explore your KumoStack resources</p></div>
-        <div className="header-controls">
-          <div className="control">
-            <label htmlFor="region">Region</label>
-            <select id="region" value={region} onChange={(e) => setRegion(e.target.value)}>
-              {REGIONS.map((r) => <option key={r}>{r}</option>)}
-            </select>
-          </div>
-          <div className="control">
-            <label htmlFor="account">Account ID</label>
-            <input id="account" className="mono" defaultValue="000000000000" />
-          </div>
+        <div>
+          <h1 className="page-title">Resource Browser</h1>
+          <p className="page-subtitle">Browse AWS resources powered by Stackport</p>
         </div>
       </div>
+
       {!connected && <DisconnectedNotice />}
-      <div className="search-wrap">
-        <input className="search" placeholder="Which service are you looking for?" value={query} onChange={(e) => setQuery(e.target.value)} />
-      </div>
-      <div className="columns">
-        {COLUMNS.map((col, ci) => {
-          const visible = col.filter((section) => !q || section.services.some((s) => s.name.toLowerCase().includes(q)));
-          if (visible.length === 0) return null;
-          return (
-            <div key={ci} className="col">
-              {visible.map((section) => {
-                const visibleSvcs = section.services.filter((s) => !q || s.name.toLowerCase().includes(q));
-                return (
-                  <div key={section.label} className="col-section">
-                    <div className="category-label">{section.label}</div>
-                    <div className="service-list">
-                      {visibleSvcs.map((s) => {
-                        const status = s.healthKey ? serviceStatus[s.healthKey] : undefined;
-                        return (
-                          <div key={s.name} className="service">
-                            <div className="service-icon-wrap">
-                              <div className="service-icon"><Image src={s.icon} alt={s.name} width={32} height={32} unoptimized /></div>
-                              {connected && status && <span className={statusDotClass(status)} title={status} />}
-                            </div>
-                            <div className="service-name">{s.name}</div>
-                            <span className={`badge ${s.badge}`}>{s.badgeText ?? (s.badge==="free"?"Free":"")}</span>
-                          </div>
-                        );
-                      })}
+
+      <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 0, background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden", minHeight: 500 }}>
+
+        {/* ── Service sidebar ── */}
+        <div style={{ borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: "10px 10px 8px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)" }}>
+            <input className="search" placeholder="Filter services…" value={search} onChange={e => setSearch(e.target.value)} style={{ marginBottom: 0, width: "100%", fontSize: 12 }} />
+          </div>
+          <div style={{ overflow: "auto", flex: 1 }}>
+            {svcList.map(([svc, data]) => {
+              const total = Object.values(data.resources).reduce((a, b) => a + b, 0);
+              const isSelected = svc === selSvc;
+              return (
+                <button key={svc} onClick={() => setSelSvc(svc)}
+                  style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "8px 12px", background: isSelected ? "var(--bg-elevated)" : "transparent", border: "none", borderLeft: isSelected ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer", textAlign: "left", transition: "background 0.1s" }}
+                  onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = "var(--bg-card-hover)"; }}
+                  onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}>
+                  <SvcIcon svc={svc} size={20} />
+                  <span style={{ flex: 1, fontSize: 12, fontWeight: isSelected ? 600 : 400, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{svc}</span>
+                  {total > 0 && <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--accent)", flexShrink: 0 }}>{total}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ── Resources panel ── */}
+        <div style={{ display: "grid", gridTemplateColumns: detail ? "1fr 1fr" : "1fr", overflow: "hidden" }}>
+
+          {/* Resource list */}
+          <div style={{ borderRight: detail ? "1px solid var(--border)" : "none", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            {!selSvc && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-faint)", fontSize: 13, padding: 32, textAlign: "center" }}>
+                Select a service from the sidebar to browse its resources
+              </div>
+            )}
+            {selSvc && loadingList && (
+              <div style={{ padding: 24, color: "var(--text-faint)", fontSize: 13 }}>Loading {selSvc} resources…</div>
+            )}
+            {selSvc && !loadingList && resources && (
+              <div style={{ overflow: "auto", flex: 1 }}>
+                <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)", display: "flex", alignItems: "center", gap: 8 }}>
+                  <SvcIcon svc={selSvc} size={18} />
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{selSvc}</span>
+                </div>
+                {Object.entries(resources.resources).map(([type, items]) => (
+                  <div key={type}>
+                    <div style={{ padding: "7px 14px", fontSize: 10, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em", background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)", position: "sticky", top: 0 }}>
+                      {type.replace(/_/g, " ")} <span style={{ fontWeight: 400, marginLeft: 4 }}>({items.length})</span>
                     </div>
+                    {items.length === 0 && (
+                      <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--text-faint)" }}>No {type} found</div>
+                    )}
+                    {items.map(item => {
+                      const isSelItem = selType === type && selId === item.id;
+                      return (
+                        <button key={item.id} onClick={() => loadDetail(selSvc, type, item.id)}
+                          style={{ width: "100%", display: "flex", alignItems: "center", padding: "9px 14px", background: isSelItem ? "var(--bg-elevated)" : "transparent", border: "none", borderLeft: isSelItem ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer", textAlign: "left" }}
+                          onMouseEnter={e => { if (!isSelItem) e.currentTarget.style.background = "var(--bg-card-hover)"; }}
+                          onMouseLeave={e => { if (!isSelItem) e.currentTarget.style.background = "transparent"; }}>
+                          <span style={{ fontSize: 12, color: "var(--text)", fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.id}</span>
+                        </button>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Detail panel */}
+          {detail && (
+            <div style={{ overflow: "auto", flex: 1 }}>
+              <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis" }}>{selId}</span>
+                <button onClick={() => { setDetail(null); setSelType(null); setSelId(null); }} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-faint)", fontSize: 16, lineHeight: 1 }}>✕</button>
+              </div>
+              {loadingDetail
+                ? <div style={{ padding: 16, fontSize: 12, color: "var(--text-faint)" }}>Loading…</div>
+                : (
+                  <div style={{ padding: 14 }}>
+                    {Object.entries(detail).filter(([k]) => k !== "id").map(([k, v]) => (
+                      <div key={k} style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 9, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 3 }}>{k.replace(/([A-Z])/g, " $1").trim()}</div>
+                        <div style={{ fontSize: 11, color: "var(--text)", fontFamily: typeof v === "object" ? "var(--font-mono,monospace)" : undefined, wordBreak: "break-all", background: typeof v === "object" ? "var(--bg-elevated)" : undefined, padding: typeof v === "object" ? "6px 8px" : undefined, borderRadius: 3 }}>
+                          {typeof v === "object" ? JSON.stringify(v, null, 2) : String(v ?? "")}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              }
             </div>
-          );
-        })}
+          )}
+        </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -2745,11 +2873,11 @@ export default function Dashboard() {
         activeAccount={activeAccount}
         setActiveAccount={setActiveAccount}
       />
-      <main className={`app-main${["Stackport","Diagrams"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
-        {activeTab === "Overview"       && <OverviewTab connected={connected} serviceStatus={serviceStatus} version={version} resourceCounts={resourceCounts} totalResources={totalResources} />}
+      <main className={`app-main${["Diagrams"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
+        {activeTab === "Overview"       && <OverviewTab connected={connected} version={version} />}
         {activeTab === "Organizations"  && <OrganizationsTab activeAccount={activeAccount} setActiveAccount={setActiveAccount} />}
         {activeTab === "Chaos"          && <ChaosTab connected={connected} />}
-        {activeTab === "Stackport"      && <StackportTab />}
+        {activeTab === "Stackport"      && <ResourceBrowserTab connected={connected} />}
         {activeTab === "Diagrams"       && <DiagramsTab />}
         {activeTab === "Tutorials"      && <TutorialsTab />}
         {activeTab === "Status"         && <StatusTab connected={connected} serviceStatus={serviceStatus} />}
