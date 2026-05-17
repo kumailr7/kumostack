@@ -1318,52 +1318,38 @@ function StatusTab({ connected, serviceStatus }: { connected: boolean; serviceSt
 interface SpResource { id: string; [key: string]: unknown }
 interface SpResourceList { service: string; resources: Record<string, SpResource[]> }
 
+const STACKPORT_BASE = "http://localhost:8082";
+
 function ResourceBrowserTab({ connected }: { connected: boolean }) {
-  const [stats, setStats]               = useState<SpStats | null>(null);
-  const [selSvc, setSelSvc]             = useState<string | null>(null);
-  const [selType, setSelType]           = useState<string | null>(null);
-  const [selId, setSelId]               = useState<string | null>(null);
-  const [resources, setResources]       = useState<SpResourceList | null>(null);
-  const [detail, setDetail]             = useState<Record<string, unknown> | null>(null);
-  const [loadingList, setLoadingList]   = useState(false);
-  const [loadingDetail, setLoadingDetail] = useState(false);
-  const [search, setSearch]             = useState("");
+  const [stats, setStats]   = useState<SpStats | null>(null);
+  const [selSvc, setSelSvc] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const iframeRef           = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
     fetch("/api/stackport/stats", { cache: "no-store" })
       .then(r => r.ok ? r.json() : null).then(d => { if (d) setStats(d); }).catch(() => {});
   }, []);
 
+  // Navigate the iframe to the selected service
   useEffect(() => {
-    if (!selSvc) return;
-    setLoadingList(true);
-    setResources(null); setDetail(null); setSelType(null); setSelId(null);
-    fetch(`/api/stackport/resources/${selSvc}`, { cache: "no-store" })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setResources(d); setLoadingList(false); })
-      .catch(() => setLoadingList(false));
+    if (!iframeRef.current) return;
+    const url = selSvc
+      ? `${STACKPORT_BASE}/resources/${selSvc}`
+      : `${STACKPORT_BASE}/resources`;
+    iframeRef.current.src = url;
   }, [selSvc]);
-
-  const loadDetail = (svc: string, type: string, id: string) => {
-    setSelType(type); setSelId(id); setDetail(null); setLoadingDetail(true);
-    fetch(`/api/stackport/resources/${svc}/${type}/${encodeURIComponent(id)}`, { cache: "no-store" })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setDetail(d); setLoadingDetail(false); })
-      .catch(() => setLoadingDetail(false));
-  };
 
   const q = search.trim().toLowerCase();
   const svcList = Object.entries(stats?.services ?? {})
     .filter(([k]) => !q || k.includes(q))
     .sort(([a], [b]) => a.localeCompare(b));
 
-  // full-height layout — no page-header, no padding (app-main--fullscreen handles it)
   return (
-    <div style={{ display: "flex", height: "100%", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
 
       {/* ── Service sidebar ── */}
-      <div style={{ width: 210, flexShrink: 0, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", background: "var(--bg-elevated)", height: "100%" }}>
-        {/* "SERVICES" label + search */}
+      <div style={{ width: 210, flexShrink: 0, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", background: "var(--bg-elevated)" }}>
         <div style={{ padding: "12px 12px 8px" }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-faint)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>Services</div>
           <input
@@ -1375,6 +1361,7 @@ function ResourceBrowserTab({ connected }: { connected: boolean }) {
           />
         </div>
         <div style={{ overflow: "auto", flex: 1 }}>
+          {!stats && <div style={{ padding: "16px 12px", fontSize: 12, color: "var(--text-faint)" }}>Loading…</div>}
           {svcList.map(([svc, data]) => {
             const total = Object.values(data.resources).reduce((a, b) => a + b, 0);
             const isSelected = svc === selSvc;
@@ -1384,91 +1371,27 @@ function ResourceBrowserTab({ connected }: { connected: boolean }) {
                 onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.04)"; }}
                 onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}>
                 <SvcIcon svc={svc} size={20} />
-                <span style={{ flex: 1, fontSize: 13, fontWeight: 400, color: isSelected ? "var(--text)" : "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{svc}</span>
+                <span style={{ flex: 1, fontSize: 13, color: isSelected ? "var(--text)" : "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{svc}</span>
                 {total > 0 && (
-                  <span style={{ fontSize: 11, fontWeight: 600, minWidth: 20, textAlign: "center", padding: "1px 6px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text-dim)", flexShrink: 0 }}>{total}</span>
+                  <span style={{ fontSize: 11, fontWeight: 600, padding: "1px 6px", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text-dim)", flexShrink: 0 }}>{total}</span>
                 )}
               </button>
             );
           })}
-          {!stats && (
-            <div style={{ padding: "16px 12px", fontSize: 12, color: "var(--text-faint)" }}>Loading services…</div>
-          )}
         </div>
         {!connected && (
           <div style={{ padding: "8px 12px", borderTop: "1px solid var(--border)", fontSize: 11, color: "#ef4444" }}>KumoStack offline</div>
         )}
       </div>
 
-      {/* ── Main content area ── */}
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-
-        {/* Resource list */}
-        <div style={{ width: detail ? "50%" : "100%", borderRight: detail ? "1px solid var(--border)" : "none", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          {!selSvc && (
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, color: "var(--text-faint)" }}>
-              <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.35 }}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-dim)", marginBottom: 4 }}>Select a service</div>
-                <div style={{ fontSize: 12, color: "var(--text-faint)" }}>Choose a service from the sidebar to browse its resources.</div>
-              </div>
-            </div>
-          )}
-
-          {selSvc && loadingList && (
-            <div style={{ padding: 24, color: "var(--text-faint)", fontSize: 13 }}>Loading {selSvc}…</div>
-          )}
-
-          {selSvc && !loadingList && resources && (
-            <div style={{ overflow: "auto", flex: 1 }}>
-              {Object.entries(resources.resources).map(([type, items]) => (
-                <div key={type}>
-                  <div style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em", background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)", position: "sticky", top: 0, zIndex: 1 }}>
-                    {type.replace(/_/g, " ")} <span style={{ fontWeight: 400, opacity: 0.6 }}>({items.length})</span>
-                  </div>
-                  {items.length === 0 && (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-faint)" }}>No {type}</div>
-                  )}
-                  {items.map(item => {
-                    const isSelItem = selType === type && selId === item.id;
-                    return (
-                      <button key={item.id} onClick={() => loadDetail(selSvc, type, item.id)}
-                        style={{ width: "100%", display: "flex", alignItems: "center", padding: "10px 16px", background: isSelItem ? "rgba(16,185,129,0.07)" : "transparent", border: "none", borderLeft: isSelItem ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer", textAlign: "left" }}
-                        onMouseEnter={e => { if (!isSelItem) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
-                        onMouseLeave={e => { if (!isSelItem) e.currentTarget.style.background = "transparent"; }}>
-                        <span style={{ fontSize: 13, color: isSelItem ? "var(--text)" : "var(--text-dim)", fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.id}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Detail panel */}
-        {detail && (
-          <div style={{ width: "50%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis" }}>{selId}</span>
-              <button onClick={() => { setDetail(null); setSelType(null); setSelId(null); }} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-faint)", fontSize: 18, lineHeight: 1, padding: "0 4px" }}>✕</button>
-            </div>
-            <div style={{ overflow: "auto", flex: 1, padding: 16 }}>
-              {loadingDetail
-                ? <div style={{ fontSize: 12, color: "var(--text-faint)" }}>Loading…</div>
-                : Object.entries(detail).filter(([k]) => k !== "id").map(([k, v]) => (
-                    <div key={k} style={{ marginBottom: 12 }}>
-                      <div style={{ fontSize: 9, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{k.replace(/([A-Z])/g, " $1").trim()}</div>
-                      <div style={{ fontSize: 12, color: "var(--text)", wordBreak: "break-all", fontFamily: typeof v === "object" ? "var(--font-mono,monospace)" : undefined, background: typeof v === "object" ? "var(--bg-elevated)" : undefined, padding: typeof v === "object" ? "6px 8px" : undefined, borderRadius: 3, whiteSpace: typeof v === "object" ? "pre-wrap" : undefined }}>
-                        {typeof v === "object" ? JSON.stringify(v, null, 2) : String(v ?? "")}
-                      </div>
-                    </div>
-                  ))
-              }
-            </div>
-          </div>
-        )}
-      </div>
+      {/* ── Stackport iframe — full Stackport UI ── */}
+      <iframe
+        ref={iframeRef}
+        src={`${STACKPORT_BASE}/resources`}
+        title="Stackport Resource Browser"
+        style={{ flex: 1, border: "none", height: "100%", display: "block" }}
+        allow="same-origin"
+      />
     </div>
   );
 }
