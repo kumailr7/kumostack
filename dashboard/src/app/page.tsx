@@ -1319,12 +1319,24 @@ interface SpResource { id: string; [key: string]: unknown }
 interface SpResourceList { service: string; resources: Record<string, SpResource[]> }
 
 function ResourceBrowserTab() {
+  // Stackport's own nav sidebar is w-44 (176px in Tailwind).
+  // Shift the iframe left by that amount and clip with overflow:hidden to hide it.
+  const SIDEBAR_W = 177;
   return (
-    <iframe
-      src="http://localhost:8082/resources"
-      title="Resource Browser"
-      style={{ width: "100%", height: "100%", border: "none", display: "block" }}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}>
+      <iframe
+        src="http://localhost:8082/resources"
+        title="Resource Browser"
+        style={{
+          position: "absolute",
+          top: 0,
+          left: -SIDEBAR_W,
+          width: `calc(100% + ${SIDEBAR_W}px)`,
+          height: "100%",
+          border: "none",
+        }}
+      />
+    </div>
   );
 }
 
