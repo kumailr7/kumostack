@@ -1116,7 +1116,7 @@ function OverviewTab({ connected, version }: {
       <div className="page-header">
         <div>
           <h1 className="page-title">Dashboard</h1>
-          <p className="page-subtitle">AWS Resource Browser — powered by Stackport</p>
+          <p className="page-subtitle">AWS Resource Browser</p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {uptime && <span style={{ fontSize: 11, color: "var(--text-faint)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "4px 10px" }}>uptime {uptime}</span>}
@@ -1125,21 +1125,61 @@ function OverviewTab({ connected, version }: {
         </div>
       </div>
 
-      {/* Stat pills — matches Stackport header */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }}>
-        {[
-          { label: "services",   value: totalSvcs,                    color: "var(--accent)" },
-          { label: "resources",  value: stats?.total_resources ?? "—", color: "var(--accent)" },
-          { label: "available",  value: availSvcs,                    color: "#10b981" },
-          { label: "KumoStack",  value: connected ? "Online" : "Offline", color: connected ? "#10b981" : "#ef4444" },
-          ...(health?.writes_enabled ? [{ label: "writes", value: "enabled", color: "#10b981" }] : []),
-        ].map(({ label, value, color }) => (
-          <div key={label} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "5px 14px", display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color, lineHeight: 1 }}>{value}</span>
-            <span style={{ fontSize: 10, color: "var(--text-faint)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</span>
+      {/* Stat cards */}
+      <div className="stat-cards">
+        <div className="stat-card">
+          <div className="stat-card-icon stat-card-icon--blue">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           </div>
-        ))}
-        {lastUpdated && <span style={{ fontSize: 10, color: "var(--text-faint)", alignSelf: "center", marginLeft: "auto" }}>updated {lastUpdated.toLocaleTimeString()}</span>}
+          <div>
+            <div className="stat-value">{totalSvcs || "—"}</div>
+            <div className="stat-label">Services</div>
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card-icon stat-card-icon--blue">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+          </div>
+          <div>
+            <div className="stat-value">{stats?.total_resources ?? "—"}</div>
+            <div className="stat-label">Resources</div>
+          </div>
+        </div>
+        <div className={`stat-card ${availSvcs > 0 ? "stat-card--green" : ""}`}>
+          <div className="stat-card-icon stat-card-icon--green">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
+          </div>
+          <div>
+            <div className="stat-value">{availSvcs || "—"}</div>
+            <div className="stat-label">Available</div>
+          </div>
+        </div>
+        <div className={`stat-card ${connected ? "stat-card--green" : "stat-card--red"}`}>
+          <div className={`stat-card-icon ${connected ? "stat-card-icon--green" : "stat-card-icon--red"}`}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          </div>
+          <div>
+            <div className="stat-value" style={{ fontSize: 22 }}>{connected ? "Online" : "Offline"}</div>
+            <div className="stat-label">KumoStack</div>
+          </div>
+        </div>
+        {health && (
+          <div className={`stat-card ${health.writes_enabled ? "stat-card--green" : ""}`}>
+            <div className={`stat-card-icon ${health.writes_enabled ? "stat-card-icon--green" : "stat-card-icon--orange"}`}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </div>
+            <div>
+              <div className="stat-value" style={{ fontSize: 22 }}>{health.writes_enabled ? "Enabled" : "Read-only"}</div>
+              <div className="stat-label">Writes</div>
+            </div>
+          </div>
+        )}
+        {lastUpdated && (
+          <div className="stat-card" style={{ justifyContent: "center", flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
+            <div className="stat-value" style={{ fontSize: 16 }}>{lastUpdated.toLocaleTimeString()}</div>
+            <div className="stat-label">Last updated</div>
+          </div>
+        )}
       </div>
 
       {/* Service table */}
