@@ -206,8 +206,7 @@ export default function AwsServiceNode({ data }: { data: NodeData }) {
 
       {/* Card */}
       <div
-        className="w-full rounded-xl shadow-lg overflow-hidden"
-        style={{ border: `2px solid ${cfg.border}` }}
+        style={{ width: "100%", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.5)", overflow: "hidden", border: `2px solid ${cfg.border}` }}
       >
         {/* Header with icon */}
         <div
@@ -221,20 +220,19 @@ export default function AwsServiceNode({ data }: { data: NodeData }) {
         </div>
 
         {/* Body */}
-        <div className="bg-white px-2 py-2">
+        <div style={{ background: "#1a1f2e", padding: "6px 8px" }}>
           <p
-            className="text-center font-semibold text-gray-800 leading-tight"
-            style={{ fontSize: 11, wordBreak: "break-all" }}
+            style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", textAlign: "center", lineHeight: 1.3, wordBreak: "break-all", margin: 0 }}
           >
             {data.label}
           </p>
           {data.meta && Object.keys(data.meta).length > 0 && (
-            <div className="mt-1 space-y-0.5">
+            <div style={{ marginTop: 3 }}>
               {Object.entries(data.meta)
                 .slice(0, 2)
                 .map(([k, v]) =>
                   v ? (
-                    <p key={k} className="text-gray-500 text-center leading-tight" style={{ fontSize: 9 }}>
+                    <p key={k} style={{ fontSize: 9, color: "#94a3b8", textAlign: "center", lineHeight: 1.3, margin: 0 }}>
                       {v}
                     </p>
                   ) : null
@@ -244,15 +242,9 @@ export default function AwsServiceNode({ data }: { data: NodeData }) {
         </div>
 
         {/* Status bar */}
-        <div
-          className="flex items-center justify-center gap-1 py-1"
-          style={{ background: "#f8fafc" }}
-        >
-          <span
-            className="inline-block w-2 h-2 rounded-full"
-            style={{ background: statusColor, boxShadow: `0 0 4px ${statusColor}` }}
-          />
-          <span className="text-gray-500 capitalize" style={{ fontSize: 9 }}>
+        <div style={{ background: "#141824", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "3px 6px" }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor, boxShadow: `0 0 4px ${statusColor}`, display: "inline-block", flexShrink: 0 }} />
+          <span style={{ fontSize: 9, color: "#64748b", textTransform: "capitalize" }}>
             {data.status}
           </span>
         </div>

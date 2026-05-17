@@ -100,7 +100,7 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 56px)" }}>
       {/* Header */}
       <div className="tab-header" style={{ paddingBottom: 12, paddingTop: 12 }}>
-        <h1>Architecture</h1>
+        <h1>Live Infrastructure</h1>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           {resourceCount > 0 && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--text-dim)" }}>
