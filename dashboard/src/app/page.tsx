@@ -175,6 +175,7 @@ const NAV_ITEMS = [
   { id: "State",            label: "State",            icon: <IconDatabase /> },
   { id: "App Inspector",    label: "App Inspector",    icon: <IconInspect /> },
   { id: "Logs",             label: "Logs",             icon: <IconTerminal /> },
+  { id: "Settings",         label: "Settings",         icon: <IconSettings /> },
 ];
 
 const REGIONS = ["us-east-1","us-east-2","us-west-1","us-west-2","eu-west-1","eu-central-1","ap-southeast-1"];
@@ -254,7 +255,8 @@ function IconChevron({ open }: { open: boolean }) {
   return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? "rotate(0deg)" : "rotate(180deg)", transition: "transform 0.2s" }}><polyline points="15 18 9 12 15 6"/></svg>;
 }
 function IconOrg()   { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><rect x="1" y="17" width="6" height="4" rx="1"/><rect x="9" y="17" width="6" height="4" rx="1"/><rect x="17" y="17" width="6" height="4" rx="1"/><path d="M4 17v-3a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v3M12 6v7"/></svg>; }
-function IconChaos() { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>; }
+function IconChaos()    { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>; }
+function IconSettings() { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>; }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1042,6 +1044,7 @@ interface SpStats {
 interface SpHealth {
   status: string; version: string; uptime_seconds: number;
   services_count: number; writes_enabled: boolean;
+  endpoint_url?: string; region?: string;
 }
 
 function SvcIcon({ svc, size = 28 }: { svc: string; size?: number }) {
@@ -1325,7 +1328,6 @@ function ResourceBrowserTab({ connected }: {
       <div className="page-header">
         <div>
           <h1 className="page-title">Resource Browser</h1>
-          <p className="page-subtitle">Browse AWS resources powered by Stackport</p>
         </div>
       </div>
 
@@ -2823,6 +2825,143 @@ function ChaosTab({ connected }: { connected: boolean }) {
   );
 }
 
+// ─── Settings Tab ────────────────────────────────────────────────────────────
+
+interface SpEndpoint {
+  name: string; url: string; region: string | null;
+  auth_type: string; is_default: boolean;
+}
+
+function SettingsTab() {
+  const [health, setHealth]         = useState<SpHealth | null>(null);
+  const [endpoints, setEndpoints]   = useState<SpEndpoint[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [saved, setSaved]           = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    Promise.all([
+      fetch("/api/stackport/health",    { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch("/api/stackport/endpoints", { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([h, e]) => {
+      if (h) setHealth(h);
+      if (Array.isArray(e)) setEndpoints(e);
+      setLoading(false);
+    });
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const setDefault = async (name: string) => {
+    await fetch("/api/stackport/endpoints/default", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    setSaved("Default endpoint updated");
+    setTimeout(() => setSaved(null), 2500);
+    load();
+  };
+
+  const uptime = health ? (() => {
+    const s = Math.round(health.uptime_seconds);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  })() : "—";
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Settings</h1>
+          <p className="page-subtitle">Stackport endpoint &amp; connection configuration</p>
+        </div>
+        <button className="btn btn-sm" onClick={() => { setLoading(true); load(); }}>↺ Refresh</button>
+      </div>
+
+      {saved && (
+        <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(16,185,129,0.1)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: "var(--radius-sm)", fontSize: 12, color: "#10b981" }}>
+          ✓ {saved}
+        </div>
+      )}
+
+      {/* Stackport status card */}
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "20px 24px", marginBottom: 20 }}>
+        <div className="section-header" style={{ margin: "0 0 16px" }}>STACKPORT STATUS</div>
+        {loading && <div style={{ fontSize: 13, color: "var(--text-faint)" }}>Loading…</div>}
+        {!loading && !health && (
+          <div style={{ fontSize: 13, color: "var(--text-faint)" }}>
+            Stackport not reachable. Run: <code className="inline-code">docker compose up -d stackport</code>
+          </div>
+        )}
+        {health && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
+            {[
+              { label: "Status",          value: health.status,       color: health.status === "ok" ? "#10b981" : "#ef4444" },
+              { label: "Version",         value: `v${health.version}`, color: "var(--text)" },
+              { label: "Uptime",          value: uptime,               color: "var(--text)" },
+              { label: "Services",        value: String(health.services_count), color: "var(--text)" },
+              { label: "Writes",          value: health.writes_enabled ? "Enabled" : "Read-only", color: health.writes_enabled ? "#10b981" : "#f59e0b" },
+              { label: "Connection",      value: health.endpoint_url ?? "—", color: "var(--text-dim)" },
+            ].map(({ label, value, color }) => (
+              <div key={label} style={{ background: "var(--bg-elevated)", borderRadius: "var(--radius-sm)", padding: "10px 14px" }}>
+                <div style={{ fontSize: 9, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 5 }}>{label}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={value}>{value}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Endpoints */}
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden", marginBottom: 20 }}>
+        <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div className="section-header" style={{ margin: 0 }}>AWS ENDPOINTS</div>
+          <a href="http://localhost:8082" target="_blank" rel="noreferrer" className="btn btn-sm">Open Stackport ↗</a>
+        </div>
+        {endpoints.length === 0 && !loading && (
+          <div style={{ padding: "20px 20px", fontSize: 13, color: "var(--text-faint)" }}>No endpoints configured. Open Stackport to add one.</div>
+        )}
+        {endpoints.map(ep => (
+          <div key={ep.name} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 20px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{ep.name}</span>
+                {ep.is_default && <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.3)", color: "#10b981", borderRadius: 3, letterSpacing: "0.06em" }}>DEFAULT</span>}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-faint)", fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ep.url}</div>
+              {ep.region && <div style={{ fontSize: 10, color: "var(--text-faint)", marginTop: 2 }}>{ep.region}</div>}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              {!ep.is_default && (
+                <button className="pill-btn" onClick={() => setDefault(ep.name)} style={{ fontSize: 11, padding: "3px 10px" }}>Set Default</button>
+              )}
+              <span style={{ fontSize: 10, padding: "3px 8px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", color: "var(--text-faint)" }}>{ep.auth_type}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Links */}
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "16px 20px" }}>
+        <div className="section-header" style={{ margin: "0 0 12px" }}>QUICK LINKS</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {[
+            { label: "Stackport UI",       href: "http://localhost:8082" },
+            { label: "Grafana",            href: "http://localhost:3002" },
+            { label: "Prometheus",         href: "http://localhost:9090" },
+            { label: "Loki",               href: "http://localhost:3100" },
+            { label: "Vector API",         href: "http://localhost:8686" },
+            { label: "Garage Admin",       href: "http://localhost:3903" },
+            { label: "KumoStack Health",   href: "http://localhost:4566/_kumostack/health" },
+          ].map(({ label, href }) => (
+            <a key={label} href={href} target="_blank" rel="noreferrer" className="btn btn-sm" style={{ fontSize: 12 }}>{label} ↗</a>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -2886,6 +3025,7 @@ export default function Dashboard() {
         {activeTab === "Logs"           && <LogsTab connected={connected} />}
         {activeTab === "Extensions"     && <ExtensionsTab />}
         {activeTab === "Architecture"   && <ArchitectureTab connected={connected} />}
+        {activeTab === "Settings"       && <SettingsTab />}
       </main>
     </div>
   );
