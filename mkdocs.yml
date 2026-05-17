@@ -100,6 +100,7 @@ nav:
       - draw.io Architecture Diagrams: guides/drawio.md
       - Using awslocal TUI: guides/awslocal-tui.md
       - Stackport Resource Browser: guides/stackport.md
+      - Organizations & SCPs: guides/organizations-scp.md
   - Reference:
       - Configuration: reference/configuration.md
       - Supported Services: reference/services.md

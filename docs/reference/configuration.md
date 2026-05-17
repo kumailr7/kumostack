@@ -112,6 +112,6 @@ Access key and secret are pre-set in `docker-compose.yml` via `GARAGE_ACCESS_KEY
 
 | Variable | Default | Description |
 |---|---|---|
-| `MINISTACK_CONTAINER` | `kumostack` | Container name to read logs from |
+| `KUMOSTACK_CONTAINER` | `kumostack` | Container name to read logs from |
 | `DRAWIO_ENDPOINT` | `http://kumostack-drawio:8080` | draw.io service URL (internal) |
 | `NEXT_PUBLIC_GRAFANA_URL` | `http://localhost:3002` | Grafana base URL (client-side) |
