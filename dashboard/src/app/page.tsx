@@ -2867,132 +2867,139 @@ function ChaosTab({ connected }: { connected: boolean }) {
 
 // ─── Settings Tab ────────────────────────────────────────────────────────────
 
-interface SpEndpoint {
-  name: string; url: string; region: string | null;
-  auth_type: string; is_default: boolean;
-}
-
 function SettingsTab() {
-  const [health, setHealth]         = useState<SpHealth | null>(null);
-  const [endpoints, setEndpoints]   = useState<SpEndpoint[]>([]);
-  const [loading, setLoading]       = useState(true);
-  const [saved, setSaved]           = useState<string | null>(null);
+  const [ksStatus, setKsStatus]     = useState<"checking"|"online"|"offline">("checking");
+  const [ksHealth, setKsHealth]     = useState<Record<string, unknown> | null>(null);
+  const [endpointInput, setEndpointInput] = useState("http://localhost:4566");
+  const [regionInput, setRegionInput]     = useState("us-east-1");
+  const [accountId, setAccountId]         = useState("000000000000");
+  const [accessKey, setAccessKey]         = useState("test");
+  const [secretKey, setSecretKey]         = useState("test");
+  const [testing, setTesting]     = useState(false);
+  const [testResult, setTestResult] = useState<{ok: boolean; msg: string} | null>(null);
 
-  const load = useCallback(() => {
-    Promise.all([
-      fetch("/api/stackport/health",    { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch("/api/stackport/endpoints", { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null),
-    ]).then(([h, e]) => {
-      if (h) setHealth(h);
-      if (Array.isArray(e)) setEndpoints(e);
-      setLoading(false);
-    });
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const setDefault = async (name: string) => {
-    await fetch("/api/stackport/endpoints/default", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    setSaved("Default endpoint updated");
-    setTimeout(() => setSaved(null), 2500);
-    load();
+  const testConnection = async () => {
+    setTesting(true); setTestResult(null);
+    try {
+      const r = await fetch("/api/health", { cache: "no-store" });
+      const d = await r.json();
+      if (d.services) {
+        setKsHealth(d);
+        setKsStatus("online");
+        setTestResult({ ok: true, msg: `Connected — KumoStack v${d.version ?? "?"} · ${Object.keys(d.services).length} services available` });
+      } else {
+        setKsStatus("offline");
+        setTestResult({ ok: false, msg: "KumoStack responded but health check failed" });
+      }
+    } catch {
+      setKsStatus("offline");
+      setTestResult({ ok: false, msg: "Could not reach KumoStack endpoint" });
+    }
+    setTesting(false);
   };
 
-  const uptime = health ? (() => {
-    const s = Math.round(health.uptime_seconds);
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
-  })() : "—";
+  useEffect(() => { testConnection(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const svcCount = ksHealth ? Object.keys((ksHealth as {services?: Record<string,unknown>}).services ?? {}).length : 0;
+  const version  = (ksHealth as {version?: string} | null)?.version ?? "—";
 
   return (
     <div>
       <div className="page-header">
         <div>
           <h1 className="page-title">Settings</h1>
-          <p className="page-subtitle">Stackport endpoint &amp; connection configuration</p>
+          <p className="page-subtitle">Endpoint &amp; connection configuration</p>
         </div>
-        <button className="btn btn-sm" onClick={() => { setLoading(true); load(); }}>↺ Refresh</button>
       </div>
 
-      {saved && (
-        <div style={{ marginBottom: 16, padding: "10px 14px", background: "rgba(16,185,129,0.1)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: "var(--radius-sm)", fontSize: 12, color: "#10b981" }}>
-          ✓ {saved}
+      {/* Connection status banner */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", background: ksStatus === "online" ? "rgba(16,185,129,0.08)" : ksStatus === "offline" ? "rgba(239,68,68,0.08)" : "var(--bg-card)", border: `1px solid ${ksStatus === "online" ? "rgba(16,185,129,0.3)" : ksStatus === "offline" ? "rgba(239,68,68,0.3)" : "var(--border)"}`, borderRadius: "var(--radius)", marginBottom: 20 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: ksStatus === "online" ? "#10b981" : ksStatus === "offline" ? "#ef4444" : "#6b7280", display: "inline-block", flexShrink: 0 }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+          {ksStatus === "checking" ? "Checking connection…" : ksStatus === "online" ? "KumoStack is online" : "KumoStack is offline"}
+        </span>
+        {ksStatus === "online" && <span style={{ fontSize: 12, color: "var(--text-dim)" }}>· v{version} · {svcCount} services</span>}
+        <button className="btn btn-sm" onClick={testConnection} disabled={testing} style={{ marginLeft: "auto" }}>
+          {testing ? "Testing…" : "↺ Test Connection"}
+        </button>
+      </div>
+
+      {testResult && (
+        <div style={{ marginBottom: 16, padding: "10px 14px", background: testResult.ok ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)", border: `1px solid ${testResult.ok ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)"}`, borderRadius: "var(--radius-sm)", fontSize: 12, color: testResult.ok ? "#10b981" : "#ef4444" }}>
+          {testResult.ok ? "✓" : "✗"} {testResult.msg}
         </div>
       )}
 
-      {/* Stackport status card */}
+      {/* Endpoint & Connection configuration */}
       <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "20px 24px", marginBottom: 20 }}>
-        <div className="section-header" style={{ margin: "0 0 16px" }}>STACKPORT STATUS</div>
-        {loading && <div style={{ fontSize: 13, color: "var(--text-faint)" }}>Loading…</div>}
-        {!loading && !health && (
-          <div style={{ fontSize: 13, color: "var(--text-faint)" }}>
-            Stackport not reachable. Run: <code className="inline-code">docker compose up -d stackport</code>
-          </div>
-        )}
-        {health && (
+        <div className="section-header" style={{ margin: "0 0 18px" }}>ENDPOINT CONFIGURATION</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          {[
+            { label: "Endpoint URL",       value: endpointInput,  set: setEndpointInput,  placeholder: "http://localhost:4566", mono: true },
+            { label: "Region",             value: regionInput,    set: setRegionInput,    placeholder: "us-east-1",            mono: true },
+            { label: "Account ID",         value: accountId,      set: setAccountId,      placeholder: "000000000000",         mono: true },
+            { label: "AWS Access Key ID",  value: accessKey,      set: setAccessKey,      placeholder: "test",                 mono: true },
+            { label: "AWS Secret Key",     value: secretKey,      set: setSecretKey,      placeholder: "test",                 mono: false },
+          ].map(({ label, value, set, placeholder, mono }) => (
+            <div key={label}>
+              <label style={{ display: "block", fontSize: 10, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>{label}</label>
+              <input
+                className="search"
+                value={value}
+                onChange={e => set(e.target.value)}
+                placeholder={placeholder}
+                style={{ width: "100%", marginBottom: 0, fontFamily: mono ? "var(--font-mono, monospace)" : undefined, fontSize: 12 }}
+              />
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 18, display: "flex", gap: 10 }}>
+          <button className="btn btn-sm btn-primary" onClick={testConnection} disabled={testing}>
+            {testing ? "Testing…" : "Test Connection"}
+          </button>
+          <button className="pill-btn" onClick={() => {
+            setEndpointInput("http://localhost:4566");
+            setRegionInput("us-east-1");
+            setAccountId("000000000000");
+            setAccessKey("test");
+            setSecretKey("test");
+          }} style={{ fontSize: 12 }}>Reset to defaults</button>
+        </div>
+      </div>
+
+      {/* Connection details (read-only) */}
+      {ksHealth && (
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "20px 24px", marginBottom: 20 }}>
+          <div className="section-header" style={{ margin: "0 0 16px" }}>CONNECTION DETAILS</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
             {[
-              { label: "Status",          value: health.status,       color: health.status === "ok" ? "#10b981" : "#ef4444" },
-              { label: "Version",         value: `v${health.version}`, color: "var(--text)" },
-              { label: "Uptime",          value: uptime,               color: "var(--text)" },
-              { label: "Services",        value: String(health.services_count), color: "var(--text)" },
-              { label: "Writes",          value: health.writes_enabled ? "Enabled" : "Read-only", color: health.writes_enabled ? "#10b981" : "#f59e0b" },
-              { label: "Connection",      value: health.endpoint_url ?? "—", color: "var(--text-dim)" },
-            ].map(({ label, value, color }) => (
+              { label: "Version",   value: version },
+              { label: "Services",  value: String(svcCount) },
+              { label: "Endpoint",  value: endpointInput },
+              { label: "Region",    value: regionInput },
+              { label: "Account",   value: accountId },
+            ].map(({ label, value }) => (
               <div key={label} style={{ background: "var(--bg-elevated)", borderRadius: "var(--radius-sm)", padding: "10px 14px" }}>
                 <div style={{ fontSize: 9, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 5 }}>{label}</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={value}>{value}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={value}>{value}</div>
               </div>
             ))}
           </div>
-        )}
-      </div>
-
-      {/* Endpoints */}
-      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "hidden", marginBottom: 20 }}>
-        <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div className="section-header" style={{ margin: 0 }}>AWS ENDPOINTS</div>
-          <a href="http://localhost:8082" target="_blank" rel="noreferrer" className="btn btn-sm">Open Stackport ↗</a>
         </div>
-        {endpoints.length === 0 && !loading && (
-          <div style={{ padding: "20px 20px", fontSize: 13, color: "var(--text-faint)" }}>No endpoints configured. Open Stackport to add one.</div>
-        )}
-        {endpoints.map(ep => (
-          <div key={ep.name} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 20px", borderBottom: "1px solid var(--border)" }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{ep.name}</span>
-                {ep.is_default && <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.3)", color: "#10b981", borderRadius: 3, letterSpacing: "0.06em" }}>DEFAULT</span>}
-              </div>
-              <div style={{ fontSize: 11, color: "var(--text-faint)", fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ep.url}</div>
-              {ep.region && <div style={{ fontSize: 10, color: "var(--text-faint)", marginTop: 2 }}>{ep.region}</div>}
-            </div>
-            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-              {!ep.is_default && (
-                <button className="pill-btn" onClick={() => setDefault(ep.name)} style={{ fontSize: 11, padding: "3px 10px" }}>Set Default</button>
-              )}
-              <span style={{ fontSize: 10, padding: "3px 8px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", color: "var(--text-faint)" }}>{ep.auth_type}</span>
-            </div>
-          </div>
-        ))}
-      </div>
+      )}
 
-      {/* Links */}
+      {/* Quick links */}
       <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "16px 20px" }}>
         <div className="section-header" style={{ margin: "0 0 12px" }}>QUICK LINKS</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {[
-            { label: "Stackport UI",       href: "http://localhost:8082" },
-            { label: "Grafana",            href: "http://localhost:3002" },
-            { label: "Prometheus",         href: "http://localhost:9090" },
-            { label: "Loki",               href: "http://localhost:3100" },
-            { label: "Vector API",         href: "http://localhost:8686" },
-            { label: "Garage Admin",       href: "http://localhost:3903" },
-            { label: "KumoStack Health",   href: "http://localhost:4566/_kumostack/health" },
+            { label: "KumoStack Health",  href: "http://localhost:4566/_kumostack/health" },
+            { label: "Grafana",           href: "http://localhost:3002" },
+            { label: "Prometheus",        href: "http://localhost:9090" },
+            { label: "Loki",              href: "http://localhost:3100" },
+            { label: "Vector API",        href: "http://localhost:8686" },
+            { label: "Garage Admin",      href: "http://localhost:3903" },
+            { label: "Stackport UI",      href: "http://localhost:8082" },
           ].map(({ label, href }) => (
             <a key={label} href={href} target="_blank" rel="noreferrer" className="btn btn-sm" style={{ fontSize: 12 }}>{label} ↗</a>
           ))}
