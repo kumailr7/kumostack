@@ -117,9 +117,15 @@ def random_snap_pair():
 
 # ── Core send logic (runs in thread pool) ────────────────────────────────────
 
-def _are_friends(ddb, sender, recipient) -> bool:
+# ── Shared boto3 clients (created once, reused across all threads) ────────────
+
+_DDB = boto3.client("dynamodb", **COMMON)
+_S3  = boto3.client("s3",       **COMMON)
+_CW  = boto3.client("cloudwatch", **COMMON)
+
+def _are_friends(sender, recipient) -> bool:
     try:
-        r = ddb.get_item(TableName=TBL_FRIENDS, Key={"userId": {"S": sender}})
+        r = _DDB.get_item(TableName=TBL_FRIENDS, Key={"userId": {"S": sender}})
         return recipient in r.get("Item", {}).get("friends", {}).get("SS", [])
     except Exception:
         return False
@@ -127,11 +133,9 @@ def _are_friends(ddb, sender, recipient) -> bool:
 def send_one_snap(chaos: bool = False) -> None:
     sender, recipient = random_snap_pair()
     t0 = time.time()
-    ddb  = boto3.client("dynamodb", **COMMON)
-    s3c  = boto3.client("s3",       **COMMON)
 
     # ── EKS Gateway: Friend Graph check ──
-    is_friend = _are_friends(ddb, sender, recipient)
+    is_friend = _are_friends(sender, recipient)
     fg = 1
 
     if not is_friend:
@@ -148,19 +152,19 @@ def send_one_snap(chaos: bool = False) -> None:
         if chaos and random.random() < 0.05:   # 5 % simulated S3 error
             raise ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
         payload = f"SNAP|{snap_id}|{sender}→{recipient}".encode()
-        s3c.put_object(Bucket=BUCKET, Key=f"snaps/{snap_id}.jpg",
+        _S3.put_object(Bucket=BUCKET, Key=f"snaps/{snap_id}.jpg",
                        Body=payload, ContentType="image/jpeg")
         s3 = 1
 
         # ── EKS MCS → DynamoDB ──
-        ddb.put_item(TableName=TBL_MESSAGES, Item={
+        _DDB.put_item(TableName=TBL_MESSAGES, Item={
             "messageId": {"S": message_id}, "snapId": {"S": snap_id},
             "from": {"S": sender}, "to": {"S": recipient},
             "state": {"S": "DELIVERED"}, "sentAt": {"N": str(now)},
         })
 
         # ── EKS Snap DB → DynamoDB ──
-        ddb.put_item(TableName=TBL_METADATA, Item={
+        _DDB.put_item(TableName=TBL_METADATA, Item={
             "snapId":   {"S": snap_id},
             "mediaKey": {"S": f"snaps/{snap_id}.jpg"},
             "from":     {"S": sender}, "to": {"S": recipient},
@@ -182,7 +186,6 @@ _prev_snap  = {"sent": 0, "delivered": 0, "blocked": 0,
                "s3": 0, "ddb": 0, "fg": 0, "errors": 0}
 
 def _push_cloudwatch():
-    cw  = boto3.client("cloudwatch", **COMMON)
     now = time.time()
     s   = STATS.snapshot()
 
@@ -195,24 +198,32 @@ def _push_cloudwatch():
     p95 = lats[int(len(lats)*0.95)]
     p99 = lats[int(len(lats)*0.99)]
 
+    d_sent = max(delta["sent"], 1)
+    total_ops = delta["s3"] + delta["ddb"] + delta["fg"]
+
     metrics = [
-        ("SnapsSent",         delta["sent"],      "Count"),
-        ("SnapsDelivered",    delta["delivered"], "Count"),
-        ("SnapsBlocked",      delta["blocked"],   "Count"),
-        ("SnapsErrored",      delta["errors"],    "Count"),
-        ("S3Uploads",         delta["s3"],        "Count"),
-        ("DynamoDBWrites",    delta["ddb"],       "Count"),
-        ("FriendGraphLookups",delta["fg"],        "Count"),
-        ("LatencyP50",        p50,                "Milliseconds"),
-        ("LatencyP95",        p95,                "Milliseconds"),
-        ("LatencyP99",        p99,                "Milliseconds"),
-        ("DeliveryRate",
-            round(delta["delivered"] / max(delta["sent"], 1) * 100, 2),
-            "Percent"),
+        # Raw counters
+        ("SnapsSent",          delta["sent"],                      "Count"),
+        ("SnapsDelivered",     delta["delivered"],                 "Count"),
+        ("SnapsBlocked",       delta["blocked"],                   "Count"),
+        ("SnapsErrored",       delta["errors"],                    "Count"),
+        ("S3Uploads",          delta["s3"],                        "Count"),
+        ("DynamoDBWrites",     delta["ddb"],                       "Count"),
+        ("FriendGraphLookups", delta["fg"],                        "Count"),
+        # Latency (recent window, not averages of averages)
+        ("LatencyP50",         p50,                                "Milliseconds"),
+        ("LatencyP95",         p95,                                "Milliseconds"),
+        ("LatencyP99",         p99,                                "Milliseconds"),
+        # Pre-computed rates — avoids CloudWatch math expressions
+        ("DeliveryRate",       round(delta["delivered"] / d_sent * 100, 2),   "Percent"),
+        ("ErrorRate",          round(delta["errors"]    / d_sent * 100, 2),   "Percent"),
+        ("RejectionRate",      round(delta["blocked"]   / d_sent * 100, 2),   "Percent"),
+        ("SnapsPerSec",        round(delta["sent"] / 10.0, 2),                "Count/Second"),
+        ("TotalOpsPerMin",     total_ops,                                      "Count"),
     ]
 
     try:
-        cw.put_metric_data(
+        _CW.put_metric_data(
             Namespace=NAMESPACE,
             MetricData=[{
                 "MetricName": name,
