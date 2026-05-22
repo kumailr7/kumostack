@@ -337,24 +337,6 @@ export async function GET() {
     }
   }
 
-  // CloudFront → Lambda: when CF's S3 origin is a bucket that a Lambda writes to,
-  // draw CF → Lambda "serves via CDN" so the media delivery path is visible.
-  for (const cfNode of groups.cdn.filter(n => n.data.service === "cloudfront")) {
-    const cfOriginS3Ids = new Set(
-      edges.filter(e => e.source === cfNode.id && e.label === "origin").map(e => e.target)
-    );
-    for (const lambdaNode of groups.compute.filter(n => n.data.service === "lambda")) {
-      const lambdaWritesTo = new Set(
-        edges.filter(e => e.source === lambdaNode.id && e.label === "store").map(e => e.target)
-      );
-      for (const s3Id of lambdaWritesTo) {
-        if (cfOriginS3Ids.has(s3Id)) {
-          edges.push(edge(cfNode.id, lambdaNode.id, "serves via CDN"));
-          break;
-        }
-      }
-    }
-  }
 
   // SQS → Lambda (event source mappings)
   const esms = (await tryFetch(() => lambda.send(new ListEventSourceMappingsCommand({}))))?.EventSourceMappings ?? [];
@@ -373,17 +355,50 @@ export async function GET() {
   for (const clusterName of clusterNames) {
     const cluster = (await tryFetch(() => eks.send(new DescribeClusterCommand({ name: clusterName }))))?.cluster;
     const status = cluster?.status ?? "ACTIVE";
-    const eksId = `eks-${clusterName}`;
+    const eksId  = `eks-${clusterName}`;
+    const tags   = cluster?.tags ?? {};
     groups.eks.push(node(eksId, clusterName, "eks", status.toLowerCase(), {
       endpoint: cluster?.endpoint ?? "", version: cluster?.version ?? "",
     }));
-    // ALB → EKS: load balancer forwards traffic into the cluster
-    for (const albNode of groups.networking.filter((n) => n.data.service === "alb")) {
+
+    // ALB → EKS
+    for (const albNode of groups.networking.filter(n => n.data.service === "alb"))
       edges.push(edge(albNode.id, eksId, "forwards"));
-    }
-    // EKS → RDS: direct connection (resolved after RDS block)
-    for (const rdsNode of groups.database.filter((n) => n.data.service === "rds")) {
+
+    // EKS → RDS
+    for (const rdsNode of groups.database.filter(n => n.data.service === "rds"))
       edges.push(edge(eksId, rdsNode.id, "connects"));
+
+    // EKS → DynamoDB: cluster tags declare which tables the pods use
+    // tag key format:  snap:dynamo:<alias>  value: table-name
+    for (const [k, v] of Object.entries(tags)) {
+      if (k.startsWith("snap:dynamo:") && v) {
+        const dynId = `dynamo-${v}`;
+        if (groups.database.some(n => n.id === dynId))
+          edges.push(edge(eksId, dynId, "read/write"));
+      }
+      // EKS → S3: tag key format: snap:s3:<alias>  value: bucket-name
+      if (k.startsWith("snap:s3:") && v) {
+        const s3Id = `s3-${v}`;
+        if (groups.storage.some(n => n.id === s3Id))
+          edges.push(edge(eksId, s3Id, "store"));
+      }
+    }
+
+    // CloudFront → EKS: when CF's S3 origin is a bucket the EKS cluster stores to
+    const eksS3Ids = new Set(
+      edges.filter(e => e.source === eksId && e.label === "store").map(e => e.target)
+    );
+    for (const cfNode of groups.cdn.filter(n => n.data.service === "cloudfront")) {
+      const cfOrigins = new Set(
+        edges.filter(e => e.source === cfNode.id && e.label === "origin").map(e => e.target)
+      );
+      for (const s3Id of eksS3Ids) {
+        if (cfOrigins.has(s3Id)) {
+          edges.push(edge(cfNode.id, eksId, "serves via CDN"));
+          break;
+        }
+      }
     }
   }
 
