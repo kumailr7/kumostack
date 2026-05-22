@@ -60,18 +60,20 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
       const data = await res.json();
 
       const EDGE_COLOR: Record<string, string> = {
-        publish:      "#f59e0b",
-        trigger:      "#10b981",
-        origin:       "#a78bfa",
-        "read/write": "#60a5fa",
-        send:         "#fb923c",
-        pull:         "#94a3b8",
-        protects:     "#f87171",
-        credentials:  "#f87171",
-        routes:       "#94a3b8",
-        forwards:     "#94a3b8",
-        connects:     "#60a5fa",
-        reads:        "#a78bfa",
+        publish:           "#f59e0b",
+        trigger:           "#10b981",
+        origin:            "#a78bfa",
+        "read/write":      "#60a5fa",
+        send:              "#fb923c",
+        pull:              "#94a3b8",
+        protects:          "#f87171",
+        credentials:       "#f87171",
+        routes:            "#94a3b8",
+        forwards:          "#94a3b8",
+        connects:          "#60a5fa",
+        reads:             "#a78bfa",
+        store:             "#10b981",
+        "serves via CDN":  "#e879f9",
       };
 
       const styledEdges = (data.edges as Edge[]).map((e: Edge) => {
@@ -154,7 +156,7 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
             <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
               <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, maxWidth: 340 }}>
                 {hasSnapResources
-                  ? `${resourceCount} resources live — EKS + Lambda microservices + DynamoDB + S3 + CloudFront. Refresh to watch state change.`
+                  ? `${resourceCount} resources live — EKS microservices + DynamoDB + S3 + CloudFront + ElastiCache. Refresh to watch state change.`
                   : "Run the included simulation to populate this view with a real Snapchat-like architecture."}
               </div>
               <pre style={{ margin: 0, fontSize: 10, background: "#0a120e", border: "1px solid #22c55e20", borderRadius: 6, padding: "8px 12px", color: "#86efac", lineHeight: 1.7, flexShrink: 0 }}>

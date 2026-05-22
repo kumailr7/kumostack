@@ -49,66 +49,71 @@ async function tryFetch<T>(fn: () => Promise<T>): Promise<T | null> {
   try { return await fn(); } catch { return null; }
 }
 
+// ── Layout: clean 3-column grid ──────────────────────────────────────────────
+//
+//  CDN (x=160)  │  EKS / Compute (x=480)  │  Database (x=800)
+//  CloudFront   │  EKS cluster            │  DynamoDB ×N
+//               │  ── bottom row ──        │
+//               │  S3 buckets             │
+//
+// Extra columns (Security, Networking, Messaging) appear only when populated.
+
 const TIER_X: Record<string, number> = {
-  security:    80,
-  cdn:        280,
-  networking: 460,
-  registry:   640,
-  compute:    820,   // Lambda functions
-  eks:       1010,   // EKS own column — keeps it visually separate from Lambda
-  storage:    280,   // below CDN column
-  database:  1190,
-  messaging: 1370,
-  secrets:   1190,  // below DATABASE column
+  security:    60,
+  cdn:        160,   // CloudFront — left column
+  networking: 340,
+  registry:   340,
+  compute:    480,   // Lambda (when present)
+  eks:        480,   // EKS — center column, same x as compute
+  storage:    480,   // S3  — bottom row of center column, directly under EKS
+  database:   800,   // DynamoDB / RDS — right column
+  messaging:  980,
+  secrets:    800,   // bottom of database column
 };
 
 export const TIER_LABELS_BY_X: Record<number, string> = {
-  80:   "Security",
-  280:  "CDN / Edge",
-  460:  "Networking",
-  640:  "Registry",
-  820:  "Lambda",
-  1010: "EKS",
-  1190: "Database",
-  1370: "Messaging",
+  60:  "Security",
+  160: "CDN / Edge",
+  340: "Networking / Registry",
+  480: "Compute / EKS",
+  800: "Database",
+  980: "Messaging",
 };
 
-// Tiers that render below the main horizontal flow instead of inline with it
 const BOTTOM_TIERS = new Set(["storage", "secrets"]);
 
-// Node card is ~150px tall — GAP must exceed that to prevent overlap
-const NODE_H_APPROX = 150;
-const GAP            = NODE_H_APPROX + 20;  // 170px — 20px breathing room between cards
+// AwsServiceNode card ≈ 152px tall. GAP must exceed that to prevent overlap.
+const NODE_H_APPROX = 152;
+const GAP            = NODE_H_APPROX + 24;   // 176px — 24px clear gap between cards
 
 function layoutNodes(groups: Record<string, ArchNode[]>): ArchNode[] {
-  const MAIN_Y = 340;   // vertical centre of main flow
+  const MAIN_Y = 300;
 
-  // Split into main-row and bottom-row buckets keyed by x
   const byX = new Map<number, { main: ArchNode[]; bottom: ArchNode[] }>();
   for (const [tier, nodes] of Object.entries(groups)) {
     const x = TIER_X[tier] ?? 100;
     if (!byX.has(x)) byX.set(x, { main: [], bottom: [] });
-    const bucket = BOTTOM_TIERS.has(tier) ? "bottom" : "main";
-    byX.get(x)![bucket].push(...nodes);
+    byX.get(x)![BOTTOM_TIERS.has(tier) ? "bottom" : "main"].push(...nodes);
   }
 
-  // Compute the lowest y of main-row nodes so bottom rows sit below them
-  let maxMainY = MAIN_Y;
-
+  // Place main-row nodes; track lowest y reached per column
+  const colBottom = new Map<number, number>();
   const result: ArchNode[] = [];
-  for (const [x, { main, bottom }] of byX.entries()) {
+
+  for (const [x, { main }] of byX.entries()) {
     main.forEach((n, i) => {
       const y = MAIN_Y + (i - (main.length - 1) / 2) * GAP;
-      if (y > maxMainY) maxMainY = y;
       result.push({ ...n, position: { x, y } });
+      const bot = y + NODE_H_APPROX;
+      if (!colBottom.has(x) || bot > colBottom.get(x)!) colBottom.set(x, bot);
     });
   }
 
-  // Bottom rows (storage/secrets) sit 40px below the tallest main column
-  const BOTTOM_Y = maxMainY + NODE_H_APPROX + 40;
+  // Place bottom-row nodes 32px below their column's lowest main node
   for (const [x, { bottom }] of byX.entries()) {
+    const startY = (colBottom.get(x) ?? MAIN_Y + NODE_H_APPROX) + 32;
     bottom.forEach((n, i) => {
-      result.push({ ...n, position: { x, y: BOTTOM_Y + i * GAP } });
+      result.push({ ...n, position: { x, y: startY + i * GAP } });
     });
   }
 
