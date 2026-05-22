@@ -253,6 +253,55 @@ def test_lambda_invoke_async(lam):
     )
     assert resp["StatusCode"] == 202
 
+
+@pytest.mark.serial
+def test_lambda_invoke_emits_cloudwatch_metrics(lam, cw):
+    """After invocation, AWS/Lambda namespace must carry Invocations + Duration
+    metrics dimensioned by FunctionName. Mirrors real Lambda observability —
+    the four canonical metrics (Invocations, Errors, Duration, Throttles) are
+    published per call.
+
+    Marked ``serial`` because xdist workers share one ministack container, and
+    any concurrent test calling ``/_ministack/reset`` would wipe the metric
+    store between our invoke and query. The function name is also UUID-suffixed
+    so re-runs against a persistent store don't pick up stale datapoints.
+    """
+    fname = f"lam-cw-metrics-{_uuid_mod.uuid4().hex[:8]}"
+    lam.create_function(
+        FunctionName=fname,
+        Runtime="python3.12",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Code={"ZipFile": _make_zip(_LAMBDA_CODE)},
+    )
+    try:
+        lam.invoke(FunctionName=fname, Payload=json.dumps({"x": 1}))
+        lam.invoke(FunctionName=fname, Payload=json.dumps({"x": 2}))
+
+        end = time.time()
+        start = end - 600
+        invocations = cw.get_metric_statistics(
+            Namespace="AWS/Lambda",
+            MetricName="Invocations",
+            Dimensions=[{"Name": "FunctionName", "Value": fname}],
+            StartTime=start, EndTime=end,
+            Period=60, Statistics=["Sum"],
+        )
+        total = sum(p["Sum"] for p in invocations["Datapoints"])
+        assert total >= 2, f"expected >=2 invocations, got {total}"
+
+        duration = cw.get_metric_statistics(
+            Namespace="AWS/Lambda",
+            MetricName="Duration",
+            Dimensions=[{"Name": "FunctionName", "Value": fname}],
+            StartTime=start, EndTime=end,
+            Period=60, Statistics=["Average", "Maximum"],
+        )
+        assert duration["Datapoints"], "no Duration datapoints recorded"
+        assert duration["Datapoints"][0]["Average"] > 0
+    finally:
+        lam.delete_function(FunctionName=fname)
+
 def test_lambda_update_code(lam):
     lam.update_function_code(
         FunctionName="lam-invoke-test",
@@ -1163,6 +1212,40 @@ def test_lambda_publish_version_snapshot(lam):
     version_nums = [v["Version"] for v in versions]
     assert "1" in version_nums
     assert "$LATEST" in version_nums
+
+
+def test_lambda_published_version_readiness_follows_function(lam):
+    """Published versions created during function bootstrap become Active."""
+    fn = f"qa-lam-version-ready-{_uuid_mod.uuid4().hex[:8]}"
+    lam.create_function(
+        FunctionName=fn,
+        Runtime="python3.12",
+        Role="arn:aws:iam::000000000000:role/r",
+        Handler="index.handler",
+        Code={"ZipFile": _zip_lambda("def handler(e,c): return 'v1'")},
+        Publish=True,
+    )
+
+    deadline = time.time() + 3
+    latest = version = None
+    while time.time() < deadline:
+        latest = lam.get_function_configuration(FunctionName=fn)
+        version = lam.get_function_configuration(FunctionName=fn, Qualifier="1")
+        if (
+            latest["State"] == "Active"
+            and latest["LastUpdateStatus"] == "Successful"
+            and version["State"] == "Active"
+            and version["LastUpdateStatus"] == "Successful"
+        ):
+            break
+        time.sleep(0.1)
+
+    assert latest["State"] == "Active"
+    assert latest["LastUpdateStatus"] == "Successful"
+    assert version["Version"] == "1"
+    assert version["State"] == "Active"
+    assert version["LastUpdateStatus"] == "Successful"
+
 
 def test_lambda_function_concurrency(lam):
     """PutFunctionConcurrency / GetFunctionConcurrency / DeleteFunctionConcurrency."""
@@ -3626,8 +3709,8 @@ def test_nodejs_worker_aws_sdk_v3_stub_wire_roundtrip(lam, ssm):
     router.py undetected by the resolution-only tests).
     """
     import shutil
-
     import uuid as _uuid
+
     if not shutil.which("node"):
         pytest.skip("node not found on PATH")
 

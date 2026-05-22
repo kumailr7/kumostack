@@ -297,6 +297,97 @@ def _parse_range(range_header: str, total: int):
     return start, end
 
 
+_RESPONSE_OVERRIDE_PARAMS = (
+    "response-cache-control",
+    "response-content-disposition",
+    "response-content-encoding",
+    "response-content-language",
+    "response-content-type",
+    "response-expires",
+)
+
+
+def _apply_response_overrides(resp_headers: dict, query_params: dict) -> None:
+    """Apply the six ``response-*`` GetObject query-string overrides to the
+    outgoing response headers, matching real S3:
+
+      response-cache-control       → Cache-Control
+      response-content-disposition → Content-Disposition
+      response-content-encoding    → Content-Encoding
+      response-content-language    → Content-Language
+      response-content-type        → Content-Type
+      response-expires             → Expires
+
+    Each override REPLACES the corresponding response header. Empty values
+    are ignored (boto3 doesn't send the param if you pass ``None``). The
+    signedness gate runs separately in ``_reject_response_overrides_if_unsigned``;
+    by the time this helper runs we've already accepted the request.
+    """
+    overrides = (
+        ("response-cache-control",       "Cache-Control"),
+        ("response-content-disposition", "Content-Disposition"),
+        ("response-content-encoding",    "Content-Encoding"),
+        ("response-content-language",    "Content-Language"),
+        ("response-content-type",        "Content-Type"),
+        ("response-expires",             "Expires"),
+    )
+    for qkey, hkey in overrides:
+        val = _qp(query_params, qkey, "")
+        if not val:
+            continue
+        # Replace, don't append: the put-side preserved-headers dict stores
+        # keys lowercased (cache-control, content-disposition, …) and the
+        # default headers dict uses mixed case (Cache-Control). HTTP libs
+        # serialise both, so without an explicit case-insensitive remove the
+        # client sees the override appended to the original (e.g.
+        # "max-age=600, no-store"). Strip every case variant of the target
+        # before writing the override value.
+        target_lc = hkey.lower()
+        for existing in list(resp_headers):
+            if existing.lower() == target_lc:
+                del resp_headers[existing]
+        resp_headers[hkey] = val
+
+
+def _reject_response_overrides_if_unsigned(
+    headers: dict, query_params: dict, bucket_name: str, key: str,
+):
+    """Implement the AWS rule for GetObject's six ``response-*`` query params.
+
+    Per the AWS API reference:
+
+      "When you use these parameters, you must sign the request by using
+       either an Authorization header or a presigned URL. These parameters
+       cannot be used with an unsigned (anonymous) request."
+
+    A request is considered signed if it carries an ``Authorization`` header
+    or a presigned-URL marker (``X-Amz-Signature`` / ``X-Amz-Algorithm`` in
+    the query string — boto3 lower-cases query keys when calling our
+    handlers, so check both cases). Otherwise the six ``response-*`` params
+    are rejected with ``InvalidRequest`` (400) and the AWS-canonical message
+    "Request specific response headers cannot be used for anonymous GET
+    requests."
+    """
+    has_override = any(
+        _qp(query_params, p, "") for p in _RESPONSE_OVERRIDE_PARAMS
+    )
+    if not has_override:
+        return None
+    if headers.get("authorization"):
+        return None
+    if (_qp(query_params, "X-Amz-Signature", "")
+            or _qp(query_params, "x-amz-signature", "")
+            or _qp(query_params, "X-Amz-Algorithm", "")
+            or _qp(query_params, "x-amz-algorithm", "")):
+        return None
+    return _error(
+        "InvalidRequest",
+        "Request specific response headers cannot be used for anonymous GET requests.",
+        400,
+        f"/{bucket_name}/{key}",
+    )
+
+
 def _validate_content_md5(headers: dict, body: bytes):
     md5_header = headers.get("content-md5", "")
     if not md5_header:
@@ -314,6 +405,83 @@ def _validate_content_md5(headers: dict, body: bytes):
             "The Content-MD5 you specified did not match what we received.",
             400,
         )
+    return None
+
+
+def _check_put_preconditions(headers: dict, existing_obj: dict | None):
+    """Evaluate `If-Match` and `If-None-Match` on PUT.
+
+    AWS S3 added native conditional writes on PutObject in November 2024:
+      - `If-None-Match: "*"` — succeed only when no object exists at the key.
+        Used to implement create-once semantics (idempotent writes, distributed
+        leader election via S3, two-file pair serialization).
+      - `If-None-Match: "<etag>"` — succeed only when the existing object's
+        ETag does NOT match.
+      - `If-Match: "*"` — succeed only when an object already exists.
+      - `If-Match: "<etag>"` — succeed only when the existing object's ETag
+        matches.
+
+    Returns a 412 PreconditionFailed tuple when a condition is violated;
+    otherwise returns None and the caller proceeds with the PUT.
+
+    ETag comparison strips surrounding quotes on both sides — S3 stores ETags
+    with quotes but client code is inconsistent about including them.
+    """
+    if_none_match = headers.get("if-none-match", "").strip()
+    if_match = headers.get("if-match", "").strip()
+
+    if not if_none_match and not if_match:
+        return None
+
+    existing_etag = (
+        existing_obj["etag"].strip('"') if existing_obj is not None else None
+    )
+
+    if if_none_match:
+        # "*" form: any existing object violates the condition.
+        if if_none_match == "*":
+            if existing_obj is not None:
+                return _error(
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                    412,
+                )
+        # ETag form: existing object with matching ETag violates the condition.
+        elif existing_obj is not None and if_none_match.strip('"') == existing_etag:
+            return _error(
+                "PreconditionFailed",
+                "At least one of the pre-conditions you specified did not hold",
+                412,
+            )
+
+    if if_match:
+        # "*" form: any existing object satisfies the condition; missing → 412 per RFC 7232.
+        # (AWS docs don't explicitly document If-Match:* for PutObject, but the inverse case
+        # is well-defined by RFC and real S3 follows it.)
+        if if_match == "*":
+            if existing_obj is None:
+                return _error(
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                    412,
+                )
+        elif existing_obj is None:
+            # AWS S3 specifically returns 404 (NoSuchKey) — not 412 — when If-Match: <etag>
+            # targets a key that doesn't exist (or whose current version is a delete marker).
+            # Documented under "Conditional write behavior" in the user guide:
+            # https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html#conditional-error-response
+            return _error(
+                "NoSuchKey",
+                "The specified key does not exist.",
+                404,
+            )
+        elif if_match.strip('"') != existing_etag:
+            return _error(
+                "PreconditionFailed",
+                "At least one of the pre-conditions you specified did not hold",
+                412,
+            )
+
     return None
 
 
@@ -944,9 +1112,16 @@ def _put_bucket_lifecycle(name: str, body: bytes):
         ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
         for rule_el in root.findall("Rule", ns) or root.findall("s3:Rule", ns):
             rule: dict = {}
-            _lc_text = lambda el, tag: (el.findtext(tag) or el.findtext(f"s3:{tag}", namespaces=ns) or "")
-            _lc_find = lambda el, tag: (el.find(tag) or el.find(f"s3:{tag}", ns))
-            _lc_findall = lambda el, tag: (el.findall(tag) or el.findall(f"s3:{tag}", ns))
+
+            def _lc_text(el, tag):
+                return el.findtext(tag) or el.findtext(f"s3:{tag}", namespaces=ns) or ""
+
+            def _lc_find(el, tag):
+                return el.find(tag) or el.find(f"s3:{tag}", ns)
+
+            def _lc_findall(el, tag):
+                return el.findall(tag) or el.findall(f"s3:{tag}", ns)
+
             id_val = _lc_text(rule_el, "ID")
             if id_val:
                 rule["ID"] = id_val
@@ -1730,6 +1905,10 @@ def _put_object(bucket_name: str, key: str, body: bytes, headers: dict):
     if sc_err:
         return sc_err
 
+    precondition_err = _check_put_preconditions(headers, bucket.get("objects", {}).get(key))
+    if precondition_err:
+        return precondition_err
+
     etag = f'"{md5_hash(body)}"'
     obj = _build_object_record(body, headers, etag=etag)
     bucket["objects"][key] = obj
@@ -2032,6 +2211,14 @@ def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = 
     if bucket is None:
         return _no_such_bucket(bucket_name)
 
+    # AWS rule: the six response-* override query parameters require a signed
+    # request (Authorization header or presigned URL). An unsigned/anonymous
+    # GET that carries any of them is rejected with InvalidRequest (400).
+    # See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html
+    err = _reject_response_overrides_if_unsigned(headers, query_params, bucket_name, key)
+    if err is not None:
+        return err
+
     version_id = _qp(query_params, "versionId", "")
     if version_id:
         vkey = (bucket_name, key)
@@ -2076,8 +2263,10 @@ def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = 
         slice_body = body[start : end + 1]
         resp_headers["Content-Length"] = str(len(slice_body))
         resp_headers["Content-Range"] = f"bytes {start}-{end}/{obj['size']}"
+        _apply_response_overrides(resp_headers, query_params)
         return 206, resp_headers, slice_body
 
+    _apply_response_overrides(resp_headers, query_params)
     return 200, resp_headers, body
 
 

@@ -6,7 +6,7 @@
 
 <h1 align="center">KumoStack</h1>
 <p align="center"><strong>Free, open-source local AWS emulator. Free forever.</strong></p>
-<p align="center">40+ AWS services on a single port · Terraform compatible · Real databases · MIT licensed</p>
+<p align="center">55+ AWS services on a single port · Terraform compatible · Real databases · MIT licensed</p>
 
 <p align="center">
   <a href="https://github.com/kumostackorg/kumostack/releases"><img src="https://img.shields.io/github/v/release/kumostackorg/kumostack" alt="GitHub release"></a>
@@ -28,10 +28,10 @@
 
 LocalStack recently moved its core services behind a paid plan. If you relied on LocalStack Community for local development and CI/CD pipelines, KumoStack is your free alternative.
 
-- **40+ AWS services** emulated on a single port (4566)
+- **55+ AWS services** emulated on a single port (4566)
 - **Drop-in compatible** — works with `boto3`, AWS CLI, Terraform, CDK, Pulumi, any SDK
 - **Real infrastructure** — RDS spins up actual Postgres/MySQL containers, ElastiCache spins up real Redis, Athena runs real SQL via DuckDB (full image only), ECS runs real Docker containers
-- **Tiny footprint** — ~270MB image, ~21MB RAM at idle vs LocalStack's ~1GB image and ~500MB RAM
+- **Tiny footprint** — ~270MB image, ~30MB RAM at idle vs LocalStack's ~1GB image and ~500MB RAM
 - **Fast startup** — under 2 seconds, HTTP/2 (h2c) supported
 - **MIT licensed** — use it, fork it, contribute to it
 
@@ -508,6 +508,7 @@ Unsupported resource types fail with `CREATE_FAILED` (or `ROLLBACK_COMPLETE` if 
 | **CodeBuild** | CreateProject, BatchGetProjects, ListProjects, UpdateProject, DeleteProject, StartBuild, BatchGetBuilds, StopBuild, ListBuilds, ListBuildsForProject, BatchDeleteBuilds | 11 actions; builds complete immediately with SUCCEEDED status; project and build metadata stored in-memory |
 | **AppConfig** | CreateApplication, GetApplication, ListApplications, UpdateApplication, DeleteApplication, CreateEnvironment, GetEnvironment, ListEnvironments, UpdateEnvironment, DeleteEnvironment, CreateConfigurationProfile, GetConfigurationProfile, ListConfigurationProfiles, UpdateConfigurationProfile, DeleteConfigurationProfile, CreateHostedConfigurationVersion, GetHostedConfigurationVersion, ListHostedConfigurationVersions, DeleteHostedConfigurationVersion, CreateDeploymentStrategy, GetDeploymentStrategy, ListDeploymentStrategies, UpdateDeploymentStrategy, DeleteDeploymentStrategy, StartDeployment, GetDeployment, ListDeployments, StopDeployment, TagResource, UntagResource, ListTagsForResource, StartConfigurationSession, GetLatestConfiguration | 33 operations; control plane + data plane; hosted configuration versions; deployments complete immediately; session-based configuration retrieval with token rotation |
 | **Transfer Family** | CreateServer, DescribeServer, DeleteServer, ListServers, StartServer, StopServer, CreateUser, DescribeUser, DeleteUser, ListUsers, ImportSshPublicKey, DeleteSshPublicKey | 12 operations; **real SFTP listener** on `:2222` (override with `SFTP_PORT`) backed by S3 — `ls`, `put`, `get`, `mkdir`, `rename` work end-to-end against the local S3 emulator; `SFTP_PORT_PER_SERVER=1` allocates one port per `CreateServer` from `SFTP_BASE_PORT` (default 2300); SSH key auth scans every user across every server and account; `LOGICAL` and `PATH` home-directory mappings; host key persists across restarts when `PERSIST_STATE=1` |
+| **IoT Core** | CreateThing, DescribeThing, ListThings, UpdateThing, DeleteThing, CreateThingType, CreateThingGroup, AddThingToThingGroup, ListThingsInThingGroup, CreateKeysAndCertificate, RegisterCertificate, UpdateCertificate, DeleteCertificate, AttachThingPrincipal, DetachThingPrincipal, ListThingPrincipals, ListPrincipalThings, CreatePolicy, CreatePolicyVersion, AttachPolicy, DetachPolicy, ListAttachedPolicies, ListTargetsForPolicy, DescribeEndpoint, Publish (HTTP), MQTT-over-WebSocket pub/sub | 24 operations + **real MQTT 3.1.1 over WebSocket** on the gateway port — clients use the address returned by `DescribeEndpoint`; local CA signs `CreateKeysAndCertificate` certificates (CA persists across restarts when `PERSIST_STATE=1`); multi-tenancy via transparent topic prefixing (same pattern as Transfer Family's shared SFTP listener); no plain TCP 1883 (real AWS IoT requires TLS or SigV4 on every connection); local CA cert available at `GET /_ministack/iot/ca.pem` for SDK trust configuration; IoT policies are stored but **not enforced** on the data plane |
 | **EventBridge Scheduler** | CreateSchedule, GetSchedule, UpdateSchedule, DeleteSchedule, ListSchedules, CreateScheduleGroup, GetScheduleGroup, DeleteScheduleGroup, ListScheduleGroups, TagResource, UntagResource, ListTagsForResource | 12 actions; schedule groups with cascading deletes; `rate()`, `cron()`, `at()` expressions; group/prefix/state filters on list; default group auto-created; CFN `AWS::Scheduler::Schedule` and `AWS::Scheduler::ScheduleGroup` supported |
 | **EKS** | CreateCluster, DescribeCluster, ListClusters, DeleteCluster, CreateNodegroup, DescribeNodegroup, ListNodegroups, DeleteNodegroup, TagResource, UntagResource, ListTagsForResource | 11 operations; `CreateCluster` spawns a real **k3s** container (75 MB) with a full Kubernetes API server; `kubectl`, Helm, and any K8s tooling work out of the box; cascading delete removes nodegroups and k3s container; CFN `AWS::EKS::Cluster` and `AWS::EKS::Nodegroup` supported |
 | **OpenSearch Service** | CreateDomain, DescribeDomain, DescribeDomains, DeleteDomain, ListDomainNames, UpdateDomainConfig, DescribeDomainConfig, DescribeDomainChangeProgress, ListVersions, GetCompatibleVersions, AddTags, ListTags, RemoveTags | Management plane on `/2021-01-01/*` (`boto3.client("opensearch")`, SigV4 scope `es`). Default data plane is a stub endpoint (`<domain>.kumostack.local:9200`) — set `OPENSEARCH_DATAPLANE=1` to spawn one real `opensearchproject/opensearch` container per `CreateDomain` (same pattern as ElastiCache/RDS); `DescribeDomain.Endpoint` then points at that container and `_cluster/health`/`/_search` work end-to-end. Add `OPENSEARCH_DASHBOARDS=1` (with dataplane on) to also spawn a per-domain `opensearch-dashboards` sidecar; `DescribeDomain.DashboardEndpoint` is populated. ARNs follow `arn:aws:es:<region>:<account>:domain/<name>`; Terraform `aws_opensearch_domain` resource compatible. |
@@ -983,7 +984,7 @@ Errors map to Lambda's standard error shape so async-invoke retry, DLQ, destinat
                     │  │  AppSync  Cloud Map   CodeBuild    │  │
                     │  │  AutoScaling  AppConfig     EKS    │  │
                     │  │  RDS Data  S3 Files  Scheduler     │  │
-                    │  │  Transfer Family                   │  │
+                    │  │  Transfer Family   IoT Core        │  │
                     │  └────────────────────────────────────┘  │
                     │                                          │
                     │  In-Memory Storage + Optional Docker     │
@@ -1006,7 +1007,7 @@ pip install boto3 pytest duckdb docker cbor2
 # Start KumoStack
 docker compose up -d
 
-# Run the full test suite (2,200+ tests across all services)
+# Run the full test suite (2,500+ tests across all services)
 pytest tests/ -v
 ```
 
@@ -1220,6 +1221,7 @@ See [`Testcontainers/java-testcontainers`](Testcontainers/java-testcontainers), 
 | **Cloud Map** | ✅ | ❌ | ✅ |
 | **CodeBuild** | ✅ | ✅ | ✅ |
 | **Transfer Family** | ✅ | ❌ | ❌ |
+| **IoT Core** | ✅ (control + WS data plane) | ❌ | ✅ (paid tier) |
 | **S3 Files** | ✅ | ❌ | ❌ |
 | Cost | **Free forever** | Was free, now paid | $35+/mo |
 | Docker image size | ~250MB | ~1GB | ~1GB |

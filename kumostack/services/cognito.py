@@ -171,7 +171,12 @@ def well_known_openid_configuration(pool_id: str, region: str | None = None, hos
     and /logout are actually served (added by PR #344). Real AWS serves these
     on the pool-domain host; KumoStack serves them on the gateway.
     """
-    r = region or get_region()
+    # The discovery `issuer` MUST match the JWT `iss` claim — OIDC clients that
+    # verify `iss == discovery.issuer` break otherwise. _fake_token derives `iss`
+    # from the pool's region (encoded in pool_id), so do the same here. The
+    # `region` argument from the request scope is only used as a last-resort
+    # fallback for malformed pool_ids.
+    r = _pool_region(pool_id) if pool_id else (region or get_region())
     issuer = f"https://cognito-idp.{r}.amazonaws.com/{pool_id}"
     base = f"http://{host}" if host else f"http://{_MINISTACK_HOST}:{_MINISTACK_PORT}"
     pool_base = f"{base}/{pool_id}"
@@ -313,12 +318,29 @@ def _now_epoch() -> float:
 
 
 def _pool_arn(pool_id: str) -> str:
-    return f"arn:aws:cognito-idp:{get_region()}:{get_account_id()}:userpool/{pool_id}"
+    return f"arn:aws:cognito-idp:{_pool_region(pool_id)}:{get_account_id()}:userpool/{pool_id}"
 
 
 def _pool_id() -> str:
     suffix = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(26))
     return f"{get_region()}_{suffix[:9]}"
+
+
+def _pool_region(pool_id: str) -> str:
+    """Return the region encoded in a pool_id (format ``{region}_{suffix}``).
+
+    Falls back to get_region() for empty or non-standard IDs so callers
+    never have to special-case the edge cases. The regex accepts both
+    3-segment commercial regions (e.g. ``us-east-1``, ``eu-central-1``) and
+    4-segment GovCloud / ISO regions (e.g. ``us-gov-east-1``, ``us-iso-west-1``,
+    ``eu-isoe-west-1``) — Cognito is available in GovCloud, so the parser must
+    not silently fall through and reproduce the original `iss` bug there.
+    """
+    if pool_id and "_" in pool_id:
+        candidate = pool_id.rsplit("_", 1)[0]
+        if re.match(r"^[a-z]+(-[a-z]+)+-\d+$", candidate):
+            return candidate
+    return get_region()
 
 
 def _client_id() -> str:
@@ -355,7 +377,7 @@ def _fake_token(sub: str, pool_id: str, client_id: str, token_type: str = "acces
     origin_jti = new_uuid()
     claims = {
         "sub": sub,
-        "iss": f"https://cognito-idp.{get_region()}.amazonaws.com/{pool_id}",
+        "iss": f"https://cognito-idp.{_pool_region(pool_id)}.amazonaws.com/{pool_id}",
         "token_use": token_type,
         "iat": now,
         "exp": now + 3600,
@@ -557,7 +579,7 @@ def _build_pretoken_event(pool_id: str, client_id: str, username: str,
     return {
         "version": "1",
         "triggerSource": trigger_source,
-        "region": get_region(),
+        "region": _pool_region(pool_id),
         "userPoolId": pool_id,
         "userName": username or "",
         "callerContext": {
@@ -2330,7 +2352,7 @@ def _create_user_pool_domain(data):
         return error_response_json("InvalidParameterException", f"Domain {domain} already exists.", 400)
     pool["Domain"] = domain
     _pool_domain_map[domain] = pid
-    return json_response({"CloudFrontDomain": f"{domain}.auth.{get_region()}.amazoncognito.com"})
+    return json_response({"CloudFrontDomain": f"{domain}.auth.{_pool_region(pid)}.amazoncognito.com"})
 
 
 def _delete_user_pool_domain(data):
@@ -2356,7 +2378,7 @@ def _describe_user_pool_domain(data):
             "AWSAccountId": get_account_id(),
             "Domain": domain,
             "S3Bucket": "",
-            "CloudFrontDistribution": f"{domain}.auth.{get_region()}.amazoncognito.com",
+            "CloudFrontDistribution": f"{domain}.auth.{_pool_region(pid)}.amazoncognito.com",
             "Version": "1",
             "Status": "ACTIVE",
             "CustomDomainConfig": {},
