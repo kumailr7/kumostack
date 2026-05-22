@@ -251,6 +251,7 @@ SERVICE_REGISTRY = {
     "states": {"module": "stepfunctions", "aliases": ("step-functions", "stepfunctions")},
     "sts": {"module": "sts"},
     "tagging": {"module": "tagging"},
+    "xray": {"module": "xray"},
     "transfer": {"module": "transfer"},
     "waf": {"module": "waf_v1"},
     "waf-regional": {"module": "waf_v1"},
@@ -443,6 +444,38 @@ async def _send_if_handled(send, response) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# OTLP proxy — forward traces/metrics/logs to Grafana Tempo
+# ---------------------------------------------------------------------------
+
+_TEMPO_BASE = os.environ.get("TEMPO_OTLP_URL", "http://kumostack-tempo:4318").rstrip("/")
+
+async def _handle_otlp_proxy(method: str, path: str, headers: dict, body: bytes):
+    """Proxy OTLP HTTP requests to Tempo so apps can use KumoStack as their
+    OTEL_EXPORTER_OTLP_ENDPOINT without needing a separate collector.
+
+    Supported paths: /v1/traces  /v1/metrics  /v1/logs
+    Both application/json and application/x-protobuf are forwarded as-is.
+    """
+    if method != "POST" or path not in ("/v1/traces", "/v1/metrics", "/v1/logs"):
+        return None
+
+    import urllib.request as _urlreq
+    ct = headers.get("content-type") or headers.get("Content-Type") or "application/json"
+    try:
+        req = _urlreq.Request(
+            f"{_TEMPO_BASE}{path}",
+            data=body,
+            headers={"Content-Type": ct},
+            method="POST",
+        )
+        with _urlreq.urlopen(req, timeout=5) as r:
+            return r.status, {"Content-Type": "application/json"}, r.read() or b"{}"
+    except Exception:
+        # Accept the span even if Tempo is unavailable — don't break the app
+        return 200, {"Content-Type": "application/json"}, b"{}"
+
+
 # Tier 1 — Pre-body handlers (no request body needed)
 # ---------------------------------------------------------------------------
 
@@ -718,6 +751,27 @@ async def _handle_pre_body_request(method: str, path: str, headers: dict, query_
     if response is not None:
         return response
 
+    response = await _handle_k6_request(method, path, b"")
+    if response is not None:
+        return response
+
+    # X-Ray dashboard helper endpoints
+    if path.startswith("/_kumostack/xray"):
+        mod = _get_module("xray")
+        return await mod.handle_request(method, path, {}, b"", query_params)
+
+    response = await _handle_topology_request(method, path)
+    if response is not None:
+        return response
+
+    response = await _handle_cost_report(method, path)
+    if response is not None:
+        return response
+
+    response = await _handle_iam_simulate(method, path, b"")
+    if response is not None:
+        return response
+
     return await _handle_chaos_lambda_failure(method, path, b"")
 
 
@@ -838,6 +892,11 @@ async def _handle_post_body_shortcuts(method: str, path: str, headers: dict, bod
             )
         return 200, {}, b""
 
+    # OTLP proxy — must be before AWS service routing so /v1/traces isn't misrouted
+    response = await _handle_otlp_proxy(method, path, headers, body)
+    if response is not None:
+        return response
+
     response = await _handle_cognito_body_request(method, path, headers, body, query_params)
     if response is not None:
         # See _handle_pre_body_request: browser-based OIDC clients need CORS.
@@ -872,6 +931,14 @@ async def _handle_post_body_shortcuts(method: str, path: str, headers: dict, bod
         return response
 
     response = await _handle_chaos_lambda_failure(method, path, body)
+    if response is not None:
+        return response
+
+    response = await _handle_k6_request(method, path, body)
+    if response is not None:
+        return response
+
+    response = await _handle_iam_simulate(method, path, body)
     if response is not None:
         return response
 
@@ -1526,6 +1593,9 @@ from collections import deque
 _chaos_lock = threading.Lock()
 _chaos_rules: dict[str, dict] = {}  # rule_id → rule
 
+# Session start time used by the cost estimation engine
+_COST_START_TIME: float = _time.time()
+
 # ── Request trace log ────────────────────────────────────────────────────────
 _request_log: deque = deque(maxlen=500)  # ring buffer of recent API calls
 _request_log_lock = threading.Lock()
@@ -2050,6 +2120,712 @@ async def _handle_cloudtrail_api(method: str, path: str, query_params: dict):
     return 200, {"Content-Type": "application/json"}, json.dumps({"events": events[:limit]}).encode()
 
 
+async def _handle_cost_report(method: str, path: str):
+    """GET /_kumostack/cost/report — estimate AWS costs from CloudTrail events + resource counts."""
+    if method != "GET" or path != "/_kumostack/cost/report":
+        return None
+    ct = {"Content-Type": "application/json"}
+
+    uptime_hours = max((_time.time() - _COST_START_TIME) / 3600, 1 / 3600)
+
+    # ── Collect API call counts from CloudTrail ──────────────────────────────
+    svc_actions: dict[str, dict[str, int]] = {}
+    ct_mod = _loaded_modules.get("cloudtrail")
+    if ct_mod:
+        try:
+            queue = ct_mod._events.get("events") or []
+            for ev in queue:
+                svc    = ev.get("EventSource", "").replace(".amazonaws.com", "").lower()
+                action = ev.get("EventName", "")
+                if svc and action:
+                    svc_actions.setdefault(svc, {})[action] = svc_actions.get(svc, {}).get(action, 0) + 1
+        except Exception:
+            pass
+
+    # ── Collect live resource counts ─────────────────────────────────────────
+    def _count(mod_name: str, attr: str) -> int:
+        mod = _loaded_modules.get(mod_name)
+        if not mod:
+            return 0
+        try:
+            return len(list(getattr(mod, attr).values()))
+        except Exception:
+            return 0
+
+    resource_counts = {
+        "lambda_functions": _count("lambda_svc", "_functions"),
+        "dynamodb_tables":  _count("dynamodb",   "_tables"),
+        "s3_buckets":       _count("s3",          "_buckets"),
+        "sqs_queues":       _count("sqs",         "_queues"),
+        "sns_topics":       _count("sns",         "_topics"),
+        "rds_instances":    _count("rds",         "_instances"),
+        "state_machines":   _count("stepfunctions", "_state_machines"),
+        "secrets":          _count("secretsmanager", "_secrets"),
+    }
+
+    # ── AWS pricing constants (us-east-1 on-demand) ──────────────────────────
+    PRICES = {
+        # Lambda: $0.20/1M requests + $0.0000166667/GB-s (128 MB, 200 ms avg)
+        "lambda_invoke":         0.0000002 + 0.0000004267,   # /invocation
+        # DynamoDB
+        "dynamo_write":          0.00000125,   # per WCU ($1.25/1M)
+        "dynamo_read":           0.00000025,   # per RCU ($0.25/1M)
+        # S3
+        "s3_put":                0.000005,     # per PUT/COPY/POST/LIST ($0.005/1K)
+        "s3_get":                0.0000004,    # per GET/HEAD ($0.0004/1K)
+        # SQS
+        "sqs_api":               0.0000004,    # per API call ($0.40/1M)
+        # SNS
+        "sns_publish":           0.0000005,    # per notification ($0.50/1M)
+        # CloudWatch
+        "cw_api":                0.00001,      # per 1K API calls ($0.01/1K)
+        # Secrets Manager: $0.05/10K API calls
+        "secretsmanager_api":    0.000005,
+        # KMS: $0.03/10K requests
+        "kms_api":               0.000003,
+        # EventBridge: $1.00/1M events
+        "eventbridge_api":       0.000001,
+        # Kinesis: $0.014/shard-hour + $0.04/1M records
+        "kinesis_api":           0.00000004,
+        # Step Functions: $0.025/1K state transitions
+        "stepfunctions_api":     0.000025,
+        # ECR: $0.10/GB-month storage + $0.01/GB data transfer (API call proxy)
+        "ecr_api":               0.000001,
+        # ECS/EKS: per API call proxy cost
+        "ecs_api":               0.000001,
+        "eks_api":               0.000001,
+        # IAM, STS, CloudFormation — free API but count them
+        "free_api":              0.0,
+    }
+
+    # Per-service monthly resource cost (us-east-1 on-demand, per-resource/month)
+    RESOURCE_MONTHLY = {
+        "lambda_functions": 0.0,      # charged on invocation, not existence
+        "dynamodb_tables":  0.0,      # on-demand billing
+        "s3_buckets":       0.023,    # $0.023/GB-month storage; we use $0.023 as floor
+        "sqs_queues":       0.0,
+        "sns_topics":       0.0,
+        "rds_instances":    12.41,    # db.t3.micro on-demand ~$0.017/hr
+        "state_machines":   0.0,
+        "secrets":          0.40,     # $0.40/secret/month
+    }
+
+    def _classify_calls(svc: str, actions: dict[str, int]) -> dict:
+        """Map service + actions → cost line items."""
+        items: dict[str, tuple[int, float]] = {}  # label → (count, unit_price)
+
+        if svc == "lambda":
+            inv = actions.get("Invoke", 0) + actions.get("InvokeFunction", 0)
+            items["Invocations"] = (inv, PRICES["lambda_invoke"])
+
+        elif svc in ("dynamodb", "dynamodb2"):
+            writes = sum(actions.get(k, 0) for k in ("PutItem","DeleteItem","UpdateItem","BatchWriteItem","TransactWriteItems"))
+            reads  = sum(actions.get(k, 0) for k in ("GetItem","Query","Scan","BatchGetItem","TransactGetItems"))
+            if writes: items["Write Requests"] = (writes, PRICES["dynamo_write"])
+            if reads:  items["Read Requests"]  = (reads,  PRICES["dynamo_read"])
+
+        elif svc == "s3":
+            puts = sum(actions.get(k, 0) for k in ("PutObject","CreateBucket","CopyObject","ListObjects","ListObjectsV2","ListBuckets"))
+            gets = sum(actions.get(k, 0) for k in ("GetObject","HeadObject","HeadBucket"))
+            if puts: items["PUT/LIST Requests"] = (puts, PRICES["s3_put"])
+            if gets: items["GET Requests"]      = (gets, PRICES["s3_get"])
+
+        elif svc == "sqs":
+            total = sum(actions.values())
+            items["API Requests"] = (total, PRICES["sqs_api"])
+
+        elif svc == "sns":
+            total = sum(actions.values())
+            items["Notifications"] = (total, PRICES["sns_publish"])
+
+        elif svc in ("monitoring", "cloudwatch", "logs"):
+            total = sum(actions.values())
+            items["API Requests"] = (total, PRICES["cw_api"])
+
+        elif svc == "secretsmanager":
+            total = sum(actions.values())
+            items["API Calls"] = (total, PRICES["secretsmanager_api"])
+
+        elif svc == "kms":
+            total = sum(actions.values())
+            items["Cryptographic Ops"] = (total, PRICES["kms_api"])
+
+        elif svc == "events":
+            total = sum(actions.values())
+            items["Events"] = (total, PRICES["eventbridge_api"])
+
+        elif svc == "kinesis":
+            total = sum(actions.values())
+            items["Data Records"] = (total, PRICES["kinesis_api"])
+
+        elif svc == "states":
+            total = sum(actions.values())
+            items["State Transitions"] = (total, PRICES["stepfunctions_api"])
+
+        else:
+            # IAM, STS, CloudFormation, EC2 control-plane, etc. — free
+            total = sum(actions.values())
+            items["API Requests"] = (total, PRICES["free_api"])
+
+        return items
+
+    # ── Build line items ──────────────────────────────────────────────────────
+    SVC_DISPLAY = {
+        "lambda": "Lambda", "dynamodb": "DynamoDB", "s3": "S3",
+        "sqs": "SQS", "sns": "SNS", "monitoring": "CloudWatch",
+        "logs": "CloudWatch Logs", "secretsmanager": "Secrets Manager",
+        "kms": "KMS", "events": "EventBridge", "kinesis": "Kinesis",
+        "states": "Step Functions", "iam": "IAM", "sts": "STS",
+        "cloudformation": "CloudFormation", "ec2": "EC2",
+        "ecs": "ECS", "eks": "EKS", "rds": "RDS", "ecr": "ECR",
+        "elasticache": "ElastiCache", "xray": "X-Ray",
+    }
+
+    line_items: list[dict] = []
+    total_api_calls = 0
+
+    for svc, actions in svc_actions.items():
+        svc_total_calls = sum(actions.values())
+        total_api_calls += svc_total_calls
+        classified = _classify_calls(svc, actions)
+        svc_cost = sum(count * price for _, (count, price) in classified.items())
+
+        line_items.append({
+            "service":        SVC_DISPLAY.get(svc, svc.upper()),
+            "service_key":    svc,
+            "total_calls":    svc_total_calls,
+            "breakdown":      [
+                {"label": lbl, "count": cnt, "unit_price": prc, "cost": cnt * prc}
+                for lbl, (cnt, prc) in classified.items()
+            ],
+            "estimated_cost": round(svc_cost, 8),
+            "cost_driver":    "api",
+        })
+
+    # Resource-hour costs (RDS, Secrets Manager, etc.)
+    for res_key, count in resource_counts.items():
+        if count == 0:
+            continue
+        monthly_per = RESOURCE_MONTHLY.get(res_key, 0.0)
+        if monthly_per == 0.0:
+            continue
+        session_cost = count * monthly_per * (uptime_hours / 730)
+        svc_label = res_key.replace("_", " ").replace("rds instances", "RDS").replace("secrets", "Secrets Manager").title()
+        line_items.append({
+            "service":        svc_label,
+            "service_key":    res_key,
+            "total_calls":    0,
+            "breakdown":      [{"label": "Resource Hours", "count": count, "unit_price": monthly_per / 730, "cost": session_cost}],
+            "estimated_cost": round(session_cost, 8),
+            "cost_driver":    "resource",
+        })
+
+    # Sort by cost descending
+    line_items.sort(key=lambda x: x["estimated_cost"], reverse=True)
+
+    session_total = sum(i["estimated_cost"] for i in line_items)
+    monthly_proj  = (session_total / uptime_hours) * 730 if uptime_hours > 0 else 0
+
+    return 200, ct, json.dumps({
+        "uptime_hours":           round(uptime_hours, 4),
+        "total_api_calls":        total_api_calls,
+        "resource_counts":        resource_counts,
+        "estimated_session_cost": round(session_total, 8),
+        "monthly_projection":     round(monthly_proj, 4),
+        "line_items":             line_items,
+        "pricing_region":         "us-east-1",
+        "pricing_model":          "on-demand",
+    }).encode()
+
+
+async def _handle_iam_simulate(method: str, path: str, body: bytes):
+    """IAM Policy Simulator — /_kumostack/iam/simulate and /_kumostack/iam/principals."""
+    if not path.startswith("/_kumostack/iam"):
+        return None
+    ct = {"Content-Type": "application/json"}
+
+    iam = _loaded_modules.get("iam") or _get_module("iam")
+
+    # ── GET /_kumostack/iam/principals — list all principals ─────────────────
+    if method == "GET" and path == "/_kumostack/iam/principals":
+        principals = []
+        try:
+            for name, role in iam._roles.items():
+                principals.append({"type": "role", "name": name, "arn": role.get("Arn", "")})
+        except Exception:
+            pass
+        try:
+            for name, user in iam._users.items():
+                principals.append({"type": "user", "name": name, "arn": user.get("Arn", "")})
+        except Exception:
+            pass
+        return 200, ct, json.dumps({"principals": principals}).encode()
+
+    # ── POST /_kumostack/iam/simulate ────────────────────────────────────────
+    if method == "POST" and path == "/_kumostack/iam/simulate":
+        data       = json.loads(body or b"{}")
+        principal  = data.get("principal", "")    # role name, user name, or full ARN
+        actions    = data.get("actions", [])      # list of "service:Action"
+        resource   = data.get("resource", "*")
+        context    = data.get("context", {})      # optional condition context (future)
+
+        if not principal or not actions:
+            return 400, ct, json.dumps({"error": "principal and actions are required"}).encode()
+
+        if isinstance(actions, str):
+            actions = [actions]
+
+        # ── Collect all policy documents for the principal ────────────────
+        def _resolve_policy_doc(pol_arn_or_doc):
+            """Return parsed dict from an ARN or raw document string/dict."""
+            if isinstance(pol_arn_or_doc, dict):
+                return pol_arn_or_doc
+            if isinstance(pol_arn_or_doc, str):
+                # Could be a policy ARN or a raw JSON string
+                try:
+                    return json.loads(pol_arn_or_doc)
+                except Exception:
+                    pass
+            return None
+
+        def _get_managed_doc(arn: str) -> dict | None:
+            try:
+                rec = iam._policies.get(arn)
+                if rec:
+                    vid = rec.get("DefaultVersionId", "v1")
+                    raw = rec["Versions"][vid]["Document"]
+                    return _resolve_policy_doc(raw)
+            except Exception:
+                pass
+            try:
+                rec = iam._aws_managed_policies.get(arn)
+                if rec:
+                    vid = rec.get("DefaultVersionId", "v1")
+                    raw = rec["Versions"][vid]["Document"]
+                    return _resolve_policy_doc(raw)
+            except Exception:
+                pass
+            return None
+
+        policies_for_eval: list[dict] = []  # each: {name, source, document}
+
+        def _collect_principal_policies(pname: str, ptype: str, pdata: dict):
+            # Inline policies
+            inline_store = {}
+            if ptype == "role":
+                inline_store = pdata.get("InlinePolicies", {})
+            elif ptype == "user":
+                try:
+                    inline_store = iam._user_inline_policies.get(pname) or {}
+                except Exception:
+                    pass
+
+            for pol_name, pol_doc in inline_store.items():
+                doc = _resolve_policy_doc(pol_doc)
+                if doc:
+                    policies_for_eval.append({
+                        "name": pol_name, "source": f"Inline on {ptype}/{pname}",
+                        "arn": None, "document": doc,
+                    })
+
+            # Attached managed policies
+            for pol_arn in pdata.get("AttachedPolicies", []):
+                doc = _get_managed_doc(pol_arn)
+                pol_name = pol_arn.split("/")[-1]
+                policies_for_eval.append({
+                    "name": pol_name, "source": f"Managed ({pol_arn})",
+                    "arn": pol_arn, "document": doc,  # doc may be None if unresolvable
+                })
+
+        # Find the principal
+        principal_found = False
+        try:
+            # Try as role name
+            role = iam._roles.get(principal)
+            if role:
+                _collect_principal_policies(principal, "role", role)
+                principal_found = True
+            else:
+                # Try as role ARN — extract name from ARN
+                if ":role/" in principal:
+                    role_name = principal.split(":role/")[-1].split("/")[-1]
+                    role = iam._roles.get(role_name)
+                    if role:
+                        _collect_principal_policies(role_name, "role", role)
+                        principal_found = True
+        except Exception:
+            pass
+
+        if not principal_found:
+            try:
+                user = iam._users.get(principal)
+                if user:
+                    _collect_principal_policies(principal, "user", user)
+                    principal_found = True
+                elif ":user/" in principal:
+                    user_name = principal.split(":user/")[-1]
+                    user = iam._users.get(user_name)
+                    if user:
+                        _collect_principal_policies(user_name, "user", user)
+                        principal_found = True
+            except Exception:
+                pass
+
+        if not principal_found:
+            # No IAM entity found — still evaluate with empty policies (implicit deny)
+            pass
+
+        # ── IAM evaluation engine ────────────────────────────────────────────
+
+        import fnmatch as _fnmatch
+
+        def _action_matches(pattern: str, action: str) -> bool:
+            """Match IAM action pattern (supports * and ? wildcards, case-insensitive)."""
+            return _fnmatch.fnmatch(action.lower(), pattern.lower())
+
+        def _resource_matches(pattern: str, res: str) -> bool:
+            return _fnmatch.fnmatch(res, pattern)
+
+        def _eval_statement(stmt: dict, action: str, resource: str) -> str | None:
+            """Return 'Allow', 'Deny', or None (no match)."""
+            effect = stmt.get("Effect", "Allow")
+
+            # Action matching
+            actions_field = stmt.get("Action") or stmt.get("NotAction")
+            not_action    = "NotAction" in stmt
+            if actions_field is None:
+                return None
+            if isinstance(actions_field, str):
+                actions_field = [actions_field]
+
+            action_match = any(_action_matches(a, action) for a in actions_field)
+            if not_action:
+                action_match = not action_match
+            if not action_match:
+                return None
+
+            # Resource matching
+            resources_field = stmt.get("Resource") or stmt.get("NotResource")
+            not_resource    = "NotResource" in stmt
+            if resources_field is None:
+                return None
+            if isinstance(resources_field, str):
+                resources_field = [resources_field]
+
+            resource_match = any(_resource_matches(r, resource) for r in resources_field)
+            if not_resource:
+                resource_match = not resource_match
+            if not resource_match:
+                return None
+
+            return effect
+
+        results = []
+        for action in actions:
+            evaluation_steps = []
+            decision         = "implicitDeny"
+            reason           = "No policy grants access to this action and resource."
+            matched_stmt     = None
+            matched_policy   = None
+
+            explicit_deny_found = False
+
+            for pol in policies_for_eval:
+                doc = pol.get("document")
+                if not doc:
+                    evaluation_steps.append({
+                        "policy": pol["name"], "source": pol["source"],
+                        "result": "skip", "reason": "Policy document not resolvable",
+                    })
+                    continue
+
+                statements = doc.get("Statement", [])
+                if isinstance(statements, dict):
+                    statements = [statements]
+
+                for i, stmt in enumerate(statements):
+                    effect = _eval_statement(stmt, action, resource)
+                    sid    = stmt.get("Sid", f"Statement{i+1}")
+                    if effect is None:
+                        evaluation_steps.append({
+                            "policy": pol["name"], "source": pol["source"],
+                            "statement": sid, "result": "noMatch",
+                            "reason": "Action or Resource did not match",
+                        })
+                        continue
+
+                    if effect == "Deny":
+                        evaluation_steps.append({
+                            "policy": pol["name"], "source": pol["source"],
+                            "statement": sid, "result": "explicitDeny",
+                            "reason": f"Explicit Deny on action '{action}' / resource '{resource}'",
+                            "statement_detail": stmt,
+                        })
+                        explicit_deny_found = True
+                        matched_stmt   = stmt
+                        matched_policy = pol
+                        break
+                    elif effect == "Allow" and decision != "allow":
+                        decision = "allow"
+                        reason   = f"Explicit Allow in statement '{sid}' of policy '{pol['name']}'"
+                        matched_stmt   = stmt
+                        matched_policy = pol
+                        evaluation_steps.append({
+                            "policy": pol["name"], "source": pol["source"],
+                            "statement": sid, "result": "allow",
+                            "reason": f"Allow on action '{action}' / resource '{resource}'",
+                            "statement_detail": stmt,
+                        })
+                    else:
+                        evaluation_steps.append({
+                            "policy": pol["name"], "source": pol["source"],
+                            "statement": sid, "result": "noMatch",
+                            "reason": "Action or Resource did not match",
+                        })
+
+                if explicit_deny_found:
+                    break
+
+            if explicit_deny_found:
+                decision = "explicitDeny"
+                reason   = f"Explicit Deny in statement '{matched_stmt.get('Sid', '')}' of policy '{matched_policy['name'] if matched_policy else '?'}'"
+
+            results.append({
+                "action":           action,
+                "resource":         resource,
+                "decision":         decision,
+                "reason":           reason,
+                "policies_checked": len(policies_for_eval),
+                "matched_statement": matched_stmt,
+                "matched_policy":    matched_policy["name"] if matched_policy else None,
+                "matched_source":    matched_policy["source"] if matched_policy else None,
+                "evaluation_steps":  evaluation_steps,
+            })
+
+        overall = (
+            "explicitDeny" if any(r["decision"] == "explicitDeny" for r in results)
+            else "allow"   if all(r["decision"] == "allow" for r in results)
+            else "implicitDeny"
+        )
+
+        return 200, ct, json.dumps({
+            "principal":          principal,
+            "resource":           resource,
+            "overall_decision":   overall,
+            "policies_evaluated": len(policies_for_eval),
+            "results":            results,
+        }).encode()
+
+    return None
+
+
+async def _handle_topology_request(method: str, path: str):
+    """GET /_kumostack/topology — build resource dependency graph from live service state."""
+    if method != "GET" or path != "/_kumostack/topology":
+        return None
+    ct = {"Content-Type": "application/json"}
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    seen_nodes: set[str] = set()
+
+    def _node(node_id: str, label: str, service: str, arn: str = "") -> dict:
+        return {"id": node_id, "label": label, "service": service, "arn": arn}
+
+    def _edge(source: str, target: str, label: str = "") -> dict:
+        return {"id": f"{source}→{target}", "source": source, "target": target, "label": label}
+
+    def _add_node(n: dict) -> None:
+        if n["id"] not in seen_nodes:
+            nodes.append(n)
+            seen_nodes.add(n["id"])
+
+    def _add_edge(e: dict) -> None:
+        if e["source"] in seen_nodes and e["target"] in seen_nodes:
+            edges.append(e)
+
+    try:
+        # ── Lambda functions ────────────────────────────────────────────────
+        lambda_mod = _loaded_modules.get("lambda_svc")
+        if lambda_mod:
+            for fn_name, fn in lambda_mod._functions.items():
+                nid = f"lambda:{fn_name}"
+                _add_node(_node(nid, fn_name, "lambda",
+                                fn.get("FunctionArn", f"arn:aws:lambda:us-east-1:000000000000:function:{fn_name}")))
+
+            # Event Source Mappings → Lambda triggers
+            for esm_id, esm in lambda_mod._esms.items():
+                src_arn = esm.get("EventSourceArn", "")
+                fn_arn  = esm.get("FunctionArn",  "")
+                fn_name = fn_arn.split(":")[-1] if fn_arn else ""
+                fn_nid  = f"lambda:{fn_name}"
+                if not fn_name:
+                    continue
+
+                if ":sqs:" in src_arn or "sqs" in src_arn.lower():
+                    q_name  = src_arn.split(":")[-1]
+                    q_nid   = f"sqs:{q_name}"
+                    _add_node(_node(q_nid, q_name, "sqs", src_arn))
+                    _add_edge(_edge(q_nid, fn_nid, "trigger"))
+
+                elif ":kinesis:" in src_arn:
+                    s_name  = src_arn.split("/")[-1]
+                    s_nid   = f"kinesis:{s_name}"
+                    _add_node(_node(s_nid, s_name, "kinesis", src_arn))
+                    _add_edge(_edge(s_nid, fn_nid, "trigger"))
+
+                elif ":dynamodb:" in src_arn and "/stream/" in src_arn:
+                    t_name  = src_arn.split("/")[1] if "/" in src_arn else src_arn.split(":")[-1]
+                    t_nid   = f"dynamodb:{t_name}"
+                    _add_node(_node(t_nid, t_name, "dynamodb", src_arn))
+                    _add_edge(_edge(t_nid, fn_nid, "stream"))
+
+    except Exception:
+        pass
+
+    try:
+        # ── SNS topics + subscriptions ──────────────────────────────────────
+        sns_mod = _loaded_modules.get("sns")
+        if sns_mod:
+            for topic_arn, topic in sns_mod._topics.items():
+                t_name = topic_arn.split(":")[-1]
+                t_nid  = f"sns:{t_name}"
+                _add_node(_node(t_nid, t_name, "sns", topic_arn))
+
+            for sub_arn, sub in sns_mod._sub_arn_to_topic.items():
+                topic_arn = sub.get("topic_arn", "")
+                t_name    = topic_arn.split(":")[-1]
+                t_nid     = f"sns:{t_name}"
+                protocol  = sub.get("protocol", "")
+                endpoint  = sub.get("endpoint", "")
+
+                if protocol == "lambda":
+                    fn_name = endpoint.split(":")[-1]
+                    fn_nid  = f"lambda:{fn_name}"
+                    _add_node(_node(fn_nid, fn_name, "lambda", endpoint))
+                    _add_edge(_edge(t_nid, fn_nid, "subscribe"))
+
+                elif protocol == "sqs":
+                    q_name = endpoint.split(":")[-1]
+                    q_nid  = f"sqs:{q_name}"
+                    _add_node(_node(q_nid, q_name, "sqs", endpoint))
+                    _add_edge(_edge(t_nid, q_nid, "subscribe"))
+
+                elif protocol in ("http", "https"):
+                    ep_nid = f"http:{endpoint[:40]}"
+                    _add_node(_node(ep_nid, endpoint[:30] + "…" if len(endpoint) > 30 else endpoint, "http", endpoint))
+                    _add_edge(_edge(t_nid, ep_nid, "subscribe"))
+
+    except Exception:
+        pass
+
+    try:
+        # ── EventBridge rules + targets ─────────────────────────────────────
+        eb_mod = _loaded_modules.get("eventbridge")
+        if eb_mod:
+            for rule_name, rule in eb_mod._rules.items():
+                r_nid = f"eventbridge:{rule_name}"
+                _add_node(_node(r_nid, rule_name, "eventbridge",
+                                rule.get("Arn", f"arn:aws:events:us-east-1:000000000000:rule/{rule_name}")))
+
+            for rule_name, targets_list in eb_mod._targets.items():
+                r_nid   = f"eventbridge:{rule_name}"
+                targets = targets_list if isinstance(targets_list, list) else list((targets_list or {}).values())
+                for tgt in targets:
+                    tgt_arn = tgt.get("Arn", "")
+                    if not tgt_arn:
+                        continue
+                    if ":lambda:" in tgt_arn or "/function:" in tgt_arn:
+                        fn_name = tgt_arn.split(":")[-1]
+                        fn_nid  = f"lambda:{fn_name}"
+                        _add_node(_node(fn_nid, fn_name, "lambda", tgt_arn))
+                        _add_edge(_edge(r_nid, fn_nid, "target"))
+                    elif ":sqs:" in tgt_arn:
+                        q_name = tgt_arn.split(":")[-1]
+                        q_nid  = f"sqs:{q_name}"
+                        _add_node(_node(q_nid, q_name, "sqs", tgt_arn))
+                        _add_edge(_edge(r_nid, q_nid, "target"))
+                    elif ":sns:" in tgt_arn:
+                        t_name = tgt_arn.split(":")[-1]
+                        t_nid  = f"sns:{t_name}"
+                        _add_node(_node(t_nid, t_name, "sns", tgt_arn))
+                        _add_edge(_edge(r_nid, t_nid, "target"))
+                    elif ":states:" in tgt_arn:
+                        sm_name = tgt_arn.split(":")[-1]
+                        sm_nid  = f"stepfunctions:{sm_name}"
+                        _add_node(_node(sm_nid, sm_name, "stepfunctions", tgt_arn))
+                        _add_edge(_edge(r_nid, sm_nid, "target"))
+
+    except Exception:
+        pass
+
+    try:
+        # ── Step Functions → Lambda ─────────────────────────────────────────
+        sf_mod = _loaded_modules.get("stepfunctions")
+        if sf_mod:
+            for sm_arn, sm in sf_mod._state_machines.items():
+                sm_name = sm_arn.split(":")[-1]
+                sm_nid  = f"stepfunctions:{sm_name}"
+                _add_node(_node(sm_nid, sm_name, "stepfunctions", sm_arn))
+                # Parse definition for Lambda Resource ARNs
+                try:
+                    defn = json.loads(sm.get("definition", "{}"))
+                    for state in defn.get("States", {}).values():
+                        resource = state.get("Resource", "")
+                        if ":lambda:" in resource or "/function:" in resource:
+                            fn_name = resource.split(":")[-1].split("/")[-1]
+                            fn_nid  = f"lambda:{fn_name}"
+                            _add_node(_node(fn_nid, fn_name, "lambda", resource))
+                            _add_edge(_edge(sm_nid, fn_nid, "invoke"))
+                except Exception:
+                    pass
+
+    except Exception:
+        pass
+
+    try:
+        # ── Standalone SQS queues (not yet in graph) ────────────────────────
+        sqs_mod = _loaded_modules.get("sqs")
+        if sqs_mod:
+            for q_url, q in sqs_mod._queues.items():
+                q_name = q_url.split("/")[-1]
+                q_nid  = f"sqs:{q_name}"
+                _add_node(_node(q_nid, q_name, "sqs",
+                                f"arn:aws:sqs:us-east-1:000000000000:{q_name}"))
+
+    except Exception:
+        pass
+
+    try:
+        # ── DynamoDB tables (standalone) ────────────────────────────────────
+        ddb_mod = _loaded_modules.get("dynamodb")
+        if ddb_mod:
+            for t_name, tbl in ddb_mod._tables.items():
+                t_nid = f"dynamodb:{t_name}"
+                _add_node(_node(t_nid, t_name, "dynamodb",
+                                tbl.get("TableArn", f"arn:aws:dynamodb:us-east-1:000000000000:table/{t_name}")))
+
+    except Exception:
+        pass
+
+    try:
+        # ── S3 buckets ──────────────────────────────────────────────────────
+        s3_mod = _loaded_modules.get("s3")
+        if s3_mod:
+            for b_name in list(s3_mod._buckets.keys()):
+                b_nid = f"s3:{b_name}"
+                _add_node(_node(b_nid, b_name, "s3",
+                                f"arn:aws:s3:::{b_name}"))
+
+    except Exception:
+        pass
+
+    # Only include edges where both nodes exist
+    valid_edges = [e for e in edges if e["source"] in seen_nodes and e["target"] in seen_nodes]
+
+    return 200, ct, json.dumps({"nodes": nodes, "edges": valid_edges}).encode()
+
+
 async def _handle_pumba_jobs(method: str, path: str):
     """GET /_kumostack/chaos/pumba-jobs — list running Pumba jobs."""
     if method != "GET" or path != "/_kumostack/chaos/pumba-jobs":
@@ -2058,6 +2834,153 @@ async def _handle_pumba_jobs(method: str, path: str):
     with _chaos_lock:
         jobs = list(_pumba_jobs.values())
     return 200, ct, json.dumps({"jobs": jobs}).encode()
+
+
+# ---------------------------------------------------------------------------
+# K6 Load Testing control
+# ---------------------------------------------------------------------------
+
+_k6_lock = threading.Lock()
+_k6_job: dict = {}  # single running job: {id, scenario, vus, duration, status, started_at, container_id}
+
+
+async def _handle_k6_request(method: str, path: str, body: bytes):
+    """Handle /_kumostack/k6/* requests — run/stop/status k6 load tests via Docker."""
+    if not path.startswith("/_kumostack/k6"):
+        return None
+    ct = {"Content-Type": "application/json"}
+
+    # GET /_kumostack/k6/status
+    if method == "GET" and path == "/_kumostack/k6/status":
+        with _k6_lock:
+            job = dict(_k6_job)
+        # Refresh container status if running
+        if job.get("container_id"):
+            dc = _get_docker_client()
+            if dc:
+                try:
+                    c = dc.containers.get(job["container_id"])
+                    job["status"] = c.status  # running / exited / …
+                    if c.status == "exited":
+                        job["exit_code"] = c.wait(timeout=0).get("StatusCode", -1)
+                except Exception:
+                    job["status"] = "unknown"
+        return 200, ct, json.dumps(job).encode()
+
+    # POST /_kumostack/k6/run
+    if method == "POST" and path == "/_kumostack/k6/run":
+        with _k6_lock:
+            if _k6_job.get("status") == "running":
+                return 409, ct, json.dumps({"error": "A k6 run is already in progress"}).encode()
+
+        data = json.loads(body or b"{}")
+        scenario  = data.get("scenario", "mixed")
+        vus       = int(data.get("vus", 10))
+        duration  = str(data.get("duration", "60s"))
+
+        valid_scenarios = {"s3", "sqs", "dynamodb", "lambda", "mixed"}
+        if scenario not in valid_scenarios:
+            return 400, ct, json.dumps({"error": f"scenario must be one of {sorted(valid_scenarios)}"}).encode()
+
+        dc = _get_docker_client()
+        if not dc:
+            return 503, ct, json.dumps({"error": "Docker not available"}).encode()
+
+        job_id = f"k6-{scenario}-{int(_time.time())}"
+        script_path = f"/k6/scenarios/{scenario}.js"
+
+        prom_url = "http://kumostack-prometheus:9090/api/v1/write"
+
+        def _run_k6():
+            try:
+                container = dc.containers.run(
+                    "grafana/k6:latest",
+                    command=[
+                        "run",
+                        "--out", "experimental-prometheus-rw",
+                        "--vus",      str(vus),
+                        "--duration", duration,
+                        script_path,
+                    ],
+                    environment={
+                        "KUMOSTACK_ENDPOINT":       "http://kumostack:4566",
+                        "AWS_ACCESS_KEY_ID":        "test",
+                        "AWS_SECRET_ACCESS_KEY":    "test",
+                        "AWS_REGION":               "us-east-1",
+                        "K6_VUS":                   str(vus),
+                        "K6_DURATION":              duration,
+                        "K6_PROMETHEUS_RW_SERVER_URL":   prom_url,
+                        "K6_PROMETHEUS_RW_TREND_STATS":  "p(50),p(95),p(99),avg,min,max",
+                    },
+                    volumes={
+                        "/k6": {"bind": "/k6", "mode": "ro"},
+                    },
+                    network="kumostack_default",
+                    name=f"kumostack-{job_id}",
+                    detach=True,
+                    remove=False,
+                )
+                with _k6_lock:
+                    _k6_job["container_id"] = container.id
+                    _k6_job["status"]       = "running"
+                logger.info("K6 job %s started (container %s)", job_id, container.short_id)
+                container.wait()
+                with _k6_lock:
+                    _k6_job["status"] = "completed"
+                logger.info("K6 job %s completed", job_id)
+            except Exception as exc:
+                with _k6_lock:
+                    _k6_job["status"] = "error"
+                    _k6_job["error"]  = str(exc)
+                logger.exception("K6 job %s failed: %s", job_id, exc)
+
+        with _k6_lock:
+            _k6_job.clear()
+            _k6_job.update({
+                "id":           job_id,
+                "scenario":     scenario,
+                "vus":          vus,
+                "duration":     duration,
+                "status":       "starting",
+                "started_at":   _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                "container_id": None,
+            })
+
+        threading.Thread(target=_run_k6, daemon=True, name=f"k6-{job_id}").start()
+        return 202, ct, json.dumps({"id": job_id, "status": "starting"}).encode()
+
+    # POST /_kumostack/k6/stop
+    if method == "POST" and path == "/_kumostack/k6/stop":
+        with _k6_lock:
+            cid = _k6_job.get("container_id")
+        if not cid:
+            return 404, ct, json.dumps({"error": "No running k6 job"}).encode()
+        dc = _get_docker_client()
+        if dc:
+            try:
+                dc.containers.get(cid).stop(timeout=5)
+            except Exception:
+                pass
+        with _k6_lock:
+            _k6_job["status"] = "stopped"
+        return 200, ct, json.dumps({"status": "stopped"}).encode()
+
+    # DELETE /_kumostack/k6/cleanup — remove exited container
+    if method == "DELETE" and path == "/_kumostack/k6/cleanup":
+        with _k6_lock:
+            cid = _k6_job.get("container_id")
+        if cid:
+            dc = _get_docker_client()
+            if dc:
+                try:
+                    dc.containers.get(cid).remove(force=True)
+                except Exception:
+                    pass
+        with _k6_lock:
+            _k6_job.clear()
+        return 200, ct, json.dumps({"status": "cleared"}).encode()
+
+    return None
 
 
 # ---------------------------------------------------------------------------

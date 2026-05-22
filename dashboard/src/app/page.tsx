@@ -16,6 +16,30 @@ const ArchitectureTab = dynamic(
   }
 );
 
+const TopologyTab = dynamic(
+  () => import("../components/TopologyTab"),
+  {
+    ssr: false,
+    loading: () => (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "60vh", color: "var(--text-faint)", fontSize: 13 }}>
+        Loading topology…
+      </div>
+    ),
+  }
+);
+
+const ArchitectureGallery = dynamic(
+  () => import("../components/ArchitectureGallery"),
+  {
+    ssr: false,
+    loading: () => (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "60vh", color: "var(--text-faint)", fontSize: 13 }}>
+        Loading gallery…
+      </div>
+    ),
+  }
+);
+
 const CDN = "/svg";
 
 interface Service {
@@ -166,6 +190,12 @@ const NAV_ITEMS = [
   { id: "Overview",         label: "Dashboard",        icon: <IconGrid /> },
   { id: "Organizations",    label: "Organizations",    icon: <IconOrg /> },
   { id: "Chaos",            label: "Chaos Engineering", icon: <IconChaos />, highlight: true },
+  { id: "LoadTest",         label: "Load Testing",      icon: <IconK6 />,    highlight: true },
+  { id: "Traces",           label: "X-Ray Traces",      icon: <IconXray /> },
+  { id: "Topology",         label: "Resource Graph",    icon: <IconTopology /> },
+  { id: "IAMSimulator",    label: "IAM Simulator",     icon: <IconIAM /> },
+  { id: "CostExplorer",   label: "Cost Explorer",     icon: <IconCost /> },
+  { id: "ArchGallery",    label: "Large Scale Systems", icon: <IconDiagram /> },
   { id: "Stackport",        label: "Resource Browser", icon: <IconStackport /> },
   { id: "Diagrams",         label: "Diagrams",         icon: <IconDrawio /> },
   { id: "Tutorials",        label: "Tutorials",        icon: <IconBook /> },
@@ -259,6 +289,11 @@ function IconOrg()   { return <svg width="16" height="16" viewBox="0 0 24 24" fi
 function IconChaos()    { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>; }
 function IconSettings() { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>; }
 function IconCloudTrail() { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>; }
+function IconK6()         { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 7 13 7 18 2 22 7"/><path d="M3 22V12a9 9 0 0 1 9-9"/><path d="M22 7v9a2 2 0 0 1-2 2H2"/><line x1="6" y1="17" x2="10" y2="13"/><line x1="10" y1="17" x2="6" y2="13"/></svg>; }
+function IconXray()       { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M3 12h3M18 12h3M12 3v3M12 18v3"/><path d="M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>; }
+function IconTopology()   { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="12" cy="12" r="2"/><line x1="7" y1="12" x2="10" y2="12"/><line x1="14" y1="12" x2="17" y2="6"/><line x1="14" y1="12" x2="17" y2="18"/></svg>; }
+function IconIAM()        { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>; }
+function IconCost()       { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>; }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -2897,6 +2932,1270 @@ function ChaosTab({ connected }: { connected: boolean }) {
   );
 }
 
+// ─── Cost Explorer Tab ───────────────────────────────────────────────────────
+
+interface PriceMetric { label: string; price: string; unit: string; detail: string }
+interface ServicePrice {
+  service: string; key: string; description: string;
+  metrics: PriceMetric[]; free_tier: string;
+  pricing_url: string; calculator_url: string;
+  source: "aws-live" | "curated";
+}
+
+interface CostBreakdown { label: string; count: number; unit_price: number; cost: number }
+interface CostLineItem {
+  service: string; service_key: string;
+  total_calls: number; estimated_cost: number;
+  cost_driver: "api" | "resource";
+  breakdown: CostBreakdown[];
+}
+interface CostReport {
+  uptime_hours: number; total_api_calls: number;
+  estimated_session_cost: number; monthly_projection: number;
+  resource_counts: Record<string, number>;
+  line_items: CostLineItem[];
+  pricing_region: string; pricing_model: string;
+}
+
+const SVC_COLORS: Record<string, string> = {
+  Lambda: "#8b5cf6", DynamoDB: "#f97316", S3: "#f59e0b",
+  SQS: "#3b82f6", SNS: "#10b981", CloudWatch: "#06b6d4",
+  "CloudWatch Logs": "#06b6d4", "Secrets Manager": "#ec4899",
+  KMS: "#6366f1", EventBridge: "#ec4899", Kinesis: "#6366f1",
+  "Step Functions": "#06b6d4", IAM: "#6b7280", STS: "#6b7280",
+  EC2: "#10b981", RDS: "#f97316", EKS: "#8b5cf6",
+};
+
+function fmt$(n: number): string {
+  if (n === 0) return "$0.00";
+  if (n < 0.000001) return `$${n.toExponential(2)}`;
+  if (n < 0.01)     return `$${n.toFixed(6)}`;
+  if (n < 1)        return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function fmtBig$(n: number): string {
+  if (n < 0.01)  return `$${n.toFixed(4)}`;
+  if (n < 1)     return `$${n.toFixed(3)}`;
+  if (n < 100)   return `$${n.toFixed(2)}`;
+  return `$${n.toFixed(0)}`;
+}
+
+function CostBar({ item, max }: { item: CostLineItem; max: number }) {
+  const pct   = max > 0 ? (item.estimated_cost / max) * 100 : 0;
+  const color = SVC_COLORS[item.service] ?? "#6b7280";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
+      <div style={{ width: 110, fontSize: 12, color: "var(--text)", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.service}>{item.service}</div>
+      <div style={{ flex: 1, height: 18, background: "var(--bg-elevated)", borderRadius: 4, overflow: "hidden", position: "relative" }}>
+        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${Math.max(pct, 0.5)}%`, background: color, borderRadius: 4, transition: "width 0.4s ease" }} />
+      </div>
+      <div style={{ width: 80, fontSize: 12, color, fontWeight: 700, textAlign: "right", flexShrink: 0, fontFamily: "monospace" }}>{fmt$(item.estimated_cost)}</div>
+    </div>
+  );
+}
+
+function PricingReference() {
+  const [prices,   setPrices]  = useState<ServicePrice[]>([]);
+  const [loading,  setLoading] = useState(true);
+  const [fetchedAt, setFetchedAt] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/pricing", { cache: "no-store" })
+      .then(r => r.json())
+      .then(d => { setPrices(d.services || []); setFetchedAt(d.fetched_at || ""); })
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>Fetching prices from AWS…</div>;
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ fontSize: 12, color: "var(--text-faint)" }}>
+          Prices: us-east-1 on-demand · {fetchedAt ? `updated ${new Date(fetchedAt).toLocaleTimeString()}` : ""}
+          {prices.some(p => p.source === "aws-live") && (
+            <span style={{ marginLeft: 8, fontSize: 10, padding: "2px 7px", borderRadius: 4, background: "#10b98120", color: "#10b981", border: "1px solid #10b98140" }}>Lambda: live from AWS</span>
+          )}
+        </div>
+        <a href="https://calculator.aws/#/" target="_blank" rel="noreferrer"
+          style={{ padding: "6px 16px", fontSize: 12, background: "linear-gradient(135deg,#f59e0b,#f97316)", color: "#fff", borderRadius: 6, fontWeight: 700, textDecoration: "none" }}>
+          Open AWS Calculator ↗
+        </a>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 14 }}>
+        {prices.map(svc => {
+          const color = SVC_COLORS[svc.service] ?? "#6b7280";
+          const isOpen = selected === svc.key;
+          return (
+            <div key={svc.key} style={{ background: "var(--bg-card)", border: `1px solid ${isOpen ? color + "60" : "var(--border)"}`, borderRadius: 10, overflow: "hidden", transition: "border-color 0.2s" }}>
+              <button onClick={() => setSelected(isOpen ? null : svc.key)}
+                style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}>
+                <div style={{ width: 10, height: 10, borderRadius: 3, background: color, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{svc.service}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 2, lineHeight: 1.4 }}>{svc.description}</div>
+                </div>
+                <div style={{ flexShrink: 0, fontSize: 11, color: "var(--text-faint)" }}>{isOpen ? "▲" : "▼"}</div>
+              </button>
+
+              {isOpen && (
+                <div style={{ borderTop: "1px solid var(--border)", padding: "12px 16px" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginBottom: 10 }}>
+                    <thead>
+                      <tr>
+                        {["Charge", "Price", "Unit"].map(h => (
+                          <th key={h} style={{ padding: "4px 6px", textAlign: "left", fontSize: 9, fontWeight: 700, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {svc.metrics.map(m => (
+                        <tr key={m.label} style={{ borderTop: "1px solid var(--border-subtle)" }}>
+                          <td style={{ padding: "5px 6px", color: "var(--text)" }}>{m.label}</td>
+                          <td style={{ padding: "5px 6px", fontFamily: "monospace", fontWeight: 700, color }}>
+                            {m.price === "$0.00" ? <span style={{ color: "var(--text-faint)" }}>Free</span> : m.price}
+                          </td>
+                          <td style={{ padding: "5px 6px", color: "var(--text-muted)", fontSize: 11 }}>
+                            {m.unit}
+                            {m.detail && <div style={{ color: "var(--text-faint)", fontSize: 10 }}>{m.detail}</div>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div style={{ fontSize: 11, color: "#10b981", background: "#10b98110", borderRadius: 5, padding: "5px 10px", marginBottom: 10 }}>
+                    ✓ Free tier: {svc.free_tier}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <a href={svc.pricing_url} target="_blank" rel="noreferrer"
+                      style={{ flex: 1, textAlign: "center", padding: "6px 0", fontSize: 11, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", textDecoration: "none" }}>
+                      Full Pricing ↗
+                    </a>
+                    <a href={svc.calculator_url} target="_blank" rel="noreferrer"
+                      style={{ flex: 1, textAlign: "center", padding: "6px 0", fontSize: 11, background: color + "20", border: `1px solid ${color}40`, borderRadius: 6, color, textDecoration: "none", fontWeight: 600 }}>
+                      Calculator ↗
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CostExplorerTab() {
+  const [report,    setReport]    = useState<CostReport | null>(null);
+  const [loading,   setLoading]   = useState(true);
+  const [expanded,  setExpanded]  = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [costView,  setCostView]  = useState<"usage" | "pricing">("usage");
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch("/api/cost", { cache: "no-store" });
+      setReport(await r.json());
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const id = setInterval(load, 15000);
+    return () => clearInterval(id);
+  }, [autoRefresh, load]);
+
+  const maxCost = report ? Math.max(...report.line_items.map(i => i.estimated_cost), 0.000001) : 1;
+  const uptimeFmt = report
+    ? report.uptime_hours < 1
+      ? `${Math.round(report.uptime_hours * 60)} min`
+      : `${report.uptime_hours.toFixed(1)} hr`
+    : "—";
+
+  return (
+    <div style={{ padding: "24px 32px", height: "100%", overflowY: "auto" }}>
+
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
+        <div>
+          <h2 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Cost Explorer</h2>
+          <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 0" }}>
+            Estimated AWS spend if this workload ran on real infrastructure — based on live API call counts and resource inventory.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {costView === "usage" && <>
+            <label style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} style={{ accentColor: "#3b82f6" }} />
+              Auto-refresh
+            </label>
+            <button onClick={load} style={{ padding: "5px 14px", fontSize: 12, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer" }}>Refresh</button>
+          </>}
+          <a href="https://calculator.aws/#/" target="_blank" rel="noreferrer"
+            style={{ padding: "5px 14px", fontSize: 12, background: "#f59e0b20", border: "1px solid #f59e0b40", borderRadius: 6, color: "#f59e0b", fontWeight: 600, textDecoration: "none" }}>
+            AWS Calculator ↗
+          </a>
+        </div>
+      </div>
+
+      {/* Tab switcher */}
+      <div style={{ display: "flex", gap: 0, marginBottom: 20, background: "var(--bg-elevated)", borderRadius: 8, padding: 3, width: "fit-content", border: "1px solid var(--border)" }}>
+        {(["usage", "pricing"] as const).map(v => (
+          <button key={v} onClick={() => setCostView(v)}
+            style={{ padding: "5px 18px", fontSize: 12, fontWeight: costView === v ? 700 : 400, borderRadius: 6, border: "none", cursor: "pointer", background: costView === v ? "var(--bg-card)" : "transparent", color: costView === v ? "var(--text)" : "var(--text-muted)", transition: "all 0.15s" }}>
+            {v === "usage" ? "Usage & Cost" : "Pricing Reference"}
+          </button>
+        ))}
+      </div>
+
+      {costView === "pricing" && <PricingReference />}
+
+      {costView === "usage" && loading && <div style={{ color: "var(--text-muted)", fontSize: 13 }}>Loading cost data…</div>}
+      {costView === "usage" && !loading && !report && <div style={{ color: "var(--text-muted)", fontSize: 13 }}>No data yet.</div>}
+
+      {costView === "usage" && report && (
+        <>
+          {/* KPI row */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, marginBottom: 24 }}>
+            {[
+              { label: "Session Cost",       value: fmtBig$(report.estimated_session_cost), sub: `${uptimeFmt} uptime`,          color: "#f59e0b" },
+              { label: "Monthly Projection", value: fmtBig$(report.monthly_projection),     sub: "at current rate",              color: "#ef4444" },
+              { label: "API Calls",          value: report.total_api_calls.toLocaleString(), sub: "CloudTrail events",           color: "#3b82f6" },
+              { label: "Pricing",            value: report.pricing_region,                  sub: report.pricing_model + " rates", color: "#10b981" },
+            ].map(k => (
+              <div key={k.label} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 18px" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>{k.label}</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: k.color, fontFamily: "monospace" }}>{k.value}</div>
+                <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 3 }}>{k.sub}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 20, alignItems: "start" }}>
+
+            {/* Service breakdown table */}
+            <div>
+              <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", marginBottom: 16 }}>
+                <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", background: "var(--bg-elevated)" }}>
+                  <div className="section-header" style={{ margin: 0 }}>COST BY SERVICE</div>
+                </div>
+
+                {report.line_items.length === 0 ? (
+                  <div style={{ padding: "40px 20px", textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+                    No API calls recorded yet. Start using KumoStack services to see cost estimates.
+                  </div>
+                ) : (
+                  <div>
+                    {/* Bar chart */}
+                    <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--border)" }}>
+                      {report.line_items.slice(0, 10).map(item => (
+                        <CostBar key={item.service_key} item={item} max={maxCost} />
+                      ))}
+                    </div>
+
+                    {/* Detailed table */}
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)" }}>
+                          {["Service", "API Calls", "Driver", "Session Cost", "Monthly (proj.)", ""].map(h => (
+                            <th key={h} style={{ padding: "8px 14px", textAlign: "left", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {report.line_items.map((item, i) => {
+                          const monthlyItem = report.uptime_hours > 0
+                            ? (item.estimated_cost / report.uptime_hours) * 730
+                            : 0;
+                          const color = SVC_COLORS[item.service] ?? "#6b7280";
+                          const isExpanded = expanded === item.service_key;
+                          return (
+                            <>
+                              <tr key={item.service_key}
+                                style={{ borderBottom: "1px solid var(--border-subtle)", background: i % 2 === 0 ? "transparent" : "var(--bg-elevated)08", cursor: "pointer" }}
+                                onClick={() => setExpanded(isExpanded ? null : item.service_key)}>
+                                <td style={{ padding: "9px 14px" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                    <div style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
+                                    <span style={{ fontWeight: 600, color: "var(--text)" }}>{item.service}</span>
+                                  </div>
+                                </td>
+                                <td style={{ padding: "9px 14px", color: "var(--text-muted)", fontFamily: "monospace" }}>{item.total_calls.toLocaleString()}</td>
+                                <td style={{ padding: "9px 14px" }}>
+                                  <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: item.cost_driver === "api" ? "#3b82f620" : "#f9731620", color: item.cost_driver === "api" ? "#60a5fa" : "#fb923c", border: `1px solid ${item.cost_driver === "api" ? "#3b82f640" : "#f9731640"}` }}>
+                                    {item.cost_driver === "api" ? "API calls" : "Resource hrs"}
+                                  </span>
+                                </td>
+                                <td style={{ padding: "9px 14px", fontWeight: 700, color, fontFamily: "monospace" }}>{fmt$(item.estimated_cost)}</td>
+                                <td style={{ padding: "9px 14px", color: "var(--text-muted)", fontFamily: "monospace" }}>{fmt$(monthlyItem)}/mo</td>
+                                <td style={{ padding: "9px 14px", color: "var(--text-faint)", fontSize: 11 }}>
+                                  {isExpanded ? "▲" : "▼"}
+                                </td>
+                              </tr>
+                              {isExpanded && (
+                                <tr key={`${item.service_key}-detail`} style={{ background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)" }}>
+                                  <td colSpan={6} style={{ padding: "10px 24px 14px" }}>
+                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                                      <thead>
+                                        <tr>
+                                          {["Charge Type", "Count", "Unit Price", "Cost"].map(h => (
+                                            <th key={h} style={{ padding: "4px 10px", textAlign: "left", color: "var(--text-faint)", fontWeight: 700, textTransform: "uppercase", fontSize: 9, letterSpacing: "0.07em" }}>{h}</th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {item.breakdown.map(b => (
+                                          <tr key={b.label}>
+                                            <td style={{ padding: "4px 10px", color: "var(--text)" }}>{b.label}</td>
+                                            <td style={{ padding: "4px 10px", fontFamily: "monospace", color: "var(--text-muted)" }}>{b.count.toLocaleString()}</td>
+                                            <td style={{ padding: "4px 10px", fontFamily: "monospace", color: "var(--text-faint)" }}>{b.unit_price === 0 ? "Free" : `$${b.unit_price.toFixed(8)}`}</td>
+                                            <td style={{ padding: "4px 10px", fontFamily: "monospace", color, fontWeight: 600 }}>{fmt$(b.cost)}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </td>
+                                </tr>
+                              )}
+                            </>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right column */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+              {/* Monthly breakdown pie summary */}
+              <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px 18px" }}>
+                <div className="section-header" style={{ marginBottom: 12 }}>MONTHLY PROJECTION BY SERVICE</div>
+                {report.line_items.slice(0, 8).map(item => {
+                  const monthly = report.uptime_hours > 0 ? (item.estimated_cost / report.uptime_hours) * 730 : 0;
+                  const pct     = report.monthly_projection > 0 ? (monthly / report.monthly_projection) * 100 : 0;
+                  const color   = SVC_COLORS[item.service] ?? "#6b7280";
+                  return (
+                    <div key={item.service_key} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
+                      <div style={{ fontSize: 11, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.service}</div>
+                      <div style={{ width: 60, height: 6, background: "var(--bg-elevated)", borderRadius: 3, overflow: "hidden", flexShrink: 0 }}>
+                        <div style={{ height: "100%", width: `${Math.max(pct, 1)}%`, background: color, borderRadius: 3 }} />
+                      </div>
+                      <div style={{ fontSize: 11, color, fontFamily: "monospace", width: 64, textAlign: "right", flexShrink: 0 }}>{fmt$(monthly)}</div>
+                    </div>
+                  );
+                })}
+                <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                  <span style={{ color: "var(--text-muted)" }}>Total monthly</span>
+                  <span style={{ fontWeight: 700, color: "#ef4444", fontFamily: "monospace" }}>{fmtBig$(report.monthly_projection)}</span>
+                </div>
+              </div>
+
+              {/* Resource inventory */}
+              <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px 18px" }}>
+                <div className="section-header" style={{ marginBottom: 10 }}>RESOURCE INVENTORY</div>
+                {Object.entries(report.resource_counts).filter(([, v]) => v > 0).map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--border-subtle)", fontSize: 12 }}>
+                    <span style={{ color: "var(--text-muted)" }}>{k.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}</span>
+                    <span style={{ fontWeight: 600, color: "var(--text)", fontFamily: "monospace" }}>{v}</span>
+                  </div>
+                ))}
+                {Object.values(report.resource_counts).every(v => v === 0) && (
+                  <div style={{ fontSize: 12, color: "var(--text-faint)", fontStyle: "italic" }}>No resources created yet</div>
+                )}
+              </div>
+
+              {/* Disclaimer */}
+              <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 18px" }}>
+                <div className="section-header" style={{ marginBottom: 8 }}>ABOUT THESE ESTIMATES</div>
+                <p style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6, margin: 0 }}>
+                  Prices are on-demand us-east-1 rates for {new Date().getFullYear()}. Lambda duration assumes 200 ms avg at 128 MB. DynamoDB assumes 1 KB average item size. Resource costs (RDS, Secrets Manager) are prorated by session uptime. Free-tier allowances are not applied.
+                </p>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── IAM Policy Simulator Tab ────────────────────────────────────────────────
+
+interface IamPrincipal { type: "role" | "user"; name: string; arn: string }
+
+interface EvalStep {
+  policy: string; source: string; statement?: string;
+  result: "allow" | "explicitDeny" | "noMatch" | "skip";
+  reason: string;
+  statement_detail?: Record<string, unknown>;
+}
+
+interface ActionResult {
+  action: string; resource: string;
+  decision: "allow" | "explicitDeny" | "implicitDeny";
+  reason: string;
+  policies_checked: number;
+  matched_policy: string | null;
+  matched_source: string | null;
+  matched_statement: Record<string, unknown> | null;
+  evaluation_steps: EvalStep[];
+}
+
+interface SimResult {
+  principal: string; resource: string;
+  overall_decision: "allow" | "explicitDeny" | "implicitDeny";
+  policies_evaluated: number;
+  results: ActionResult[];
+}
+
+const PRESET_ACTIONS = [
+  "s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
+  "lambda:InvokeFunction", "lambda:CreateFunction",
+  "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan",
+  "sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage",
+  "sns:Publish", "sns:Subscribe",
+  "iam:CreateUser", "iam:AttachRolePolicy",
+  "ec2:RunInstances", "ec2:DescribeInstances",
+  "secretsmanager:GetSecretValue",
+  "kms:Decrypt", "kms:Encrypt",
+  "*",
+];
+
+function DecisionBadge({ decision }: { decision: string }) {
+  if (decision === "allow")
+    return <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 14px", borderRadius: 8, background: "#10b98120", color: "#10b981", border: "1px solid #10b98150", fontWeight: 700, fontSize: 13 }}>✓ Allow</span>;
+  if (decision === "explicitDeny")
+    return <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 14px", borderRadius: 8, background: "#ef444420", color: "#ef4444", border: "1px solid #ef444450", fontWeight: 700, fontSize: 13 }}>✗ Explicit Deny</span>;
+  return <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 14px", borderRadius: 8, background: "#6b728020", color: "#9ca3af", border: "1px solid #6b728050", fontWeight: 700, fontSize: 13 }}>⊘ Implicit Deny</span>;
+}
+
+function StepRow({ step }: { step: EvalStep }) {
+  const colors: Record<string, string> = { allow: "#10b981", explicitDeny: "#ef4444", noMatch: "#6b7280", skip: "#6b7280" };
+  const icons:  Record<string, string> = { allow: "✓", explicitDeny: "✗", noMatch: "—", skip: "⊘" };
+  const c = colors[step.result] ?? "#6b7280";
+  return (
+    <div style={{ display: "flex", gap: 10, padding: "6px 0", borderBottom: "1px solid var(--border-subtle)", alignItems: "flex-start" }}>
+      <span style={{ fontSize: 12, color: c, fontWeight: 700, width: 14, flexShrink: 0, paddingTop: 1 }}>{icons[step.result]}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
+          {step.policy}
+          {step.statement && <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 400, marginLeft: 6 }}>→ {step.statement}</span>}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{step.source}</div>
+        <div style={{ fontSize: 11, color: c, marginTop: 2 }}>{step.reason}</div>
+        {step.statement_detail && (
+          <details style={{ marginTop: 4 }}>
+            <summary style={{ fontSize: 10, color: "var(--text-faint)", cursor: "pointer" }}>Statement JSON</summary>
+            <pre style={{ fontSize: 10, background: "var(--bg-elevated)", borderRadius: 4, padding: "6px 8px", overflowX: "auto", margin: "4px 0 0", color: "var(--text-muted)", lineHeight: 1.5 }}>
+              {JSON.stringify(step.statement_detail, null, 2)}
+            </pre>
+          </details>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IamSimulatorTab() {
+  const [principals, setPrincipals]   = useState<IamPrincipal[]>([]);
+  const [principal,  setPrincipal]    = useState("");
+  const [actionsRaw, setActionsRaw]   = useState("s3:GetObject");
+  const [resource,   setResource]     = useState("*");
+  const [running,    setRunning]       = useState(false);
+  const [result,     setResult]        = useState<SimResult | null>(null);
+  const [error,      setError]         = useState("");
+  const [expandedAction, setExpandedAction] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/iam?type=principals", { cache: "no-store" })
+      .then(r => r.json())
+      .then(d => {
+        const ps: IamPrincipal[] = d.principals || [];
+        setPrincipals(ps);
+        if (ps.length > 0) setPrincipal(ps[0].name);
+      })
+      .catch(() => {});
+  }, []);
+
+  const run = async () => {
+    const actions = actionsRaw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    if (!principal || !actions.length) return;
+    setRunning(true); setResult(null); setError(""); setExpandedAction(null);
+    try {
+      const r = await fetch("/api/iam", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ principal, actions, resource }),
+      });
+      const d = await r.json();
+      if (d.error) { setError(d.error); } else { setResult(d); setExpandedAction(d.results?.[0]?.action ?? null); }
+    } catch (e) { setError(String(e)); }
+    setRunning(false);
+  };
+
+  const overallColor = !result ? "#6b7280"
+    : result.overall_decision === "allow" ? "#10b981"
+    : result.overall_decision === "explicitDeny" ? "#ef4444"
+    : "#9ca3af";
+
+  return (
+    <div style={{ padding: "24px 32px", height: "100%", overflowY: "auto" }}>
+
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>IAM Policy Simulator</h2>
+        <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 0" }}>
+          Test whether a principal can perform actions — shows evaluation trace, matching statement, and exact decision path.
+        </p>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "380px 1fr", gap: 20, alignItems: "start" }}>
+
+        {/* ── Config panel ────────────────────────────────────────────────── */}
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "20px 22px" }}>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", display: "block", marginBottom: 6 }}>
+              Principal (Role or User)
+            </label>
+            {principals.length > 0 ? (
+              <select value={principal} onChange={e => setPrincipal(e.target.value)}
+                style={{ width: "100%", padding: "8px 12px", fontSize: 13, background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)" }}>
+                <optgroup label="Roles">
+                  {principals.filter(p => p.type === "role").map(p => (
+                    <option key={p.name} value={p.name}>{p.name}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="Users">
+                  {principals.filter(p => p.type === "user").map(p => (
+                    <option key={p.name} value={p.name}>{p.name}</option>
+                  ))}
+                </optgroup>
+              </select>
+            ) : (
+              <input value={principal} onChange={e => setPrincipal(e.target.value)} placeholder="role-name or user-name"
+                style={{ width: "100%", padding: "8px 12px", fontSize: 13, background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)", outline: "none", boxSizing: "border-box" }} />
+            )}
+            {principals.length === 0 && (
+              <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 4 }}>No IAM roles/users found — type a name manually</div>
+            )}
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", display: "block", marginBottom: 6 }}>
+              Actions <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(one per line or comma-separated)</span>
+            </label>
+            <textarea value={actionsRaw} onChange={e => setActionsRaw(e.target.value)} rows={4}
+              style={{ width: "100%", padding: "8px 12px", fontSize: 12, background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)", outline: "none", resize: "vertical", fontFamily: "monospace", boxSizing: "border-box" }} />
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+              {["s3:GetObject","lambda:InvokeFunction","dynamodb:PutItem","sqs:SendMessage","iam:CreateUser","*"].map(a => (
+                <button key={a} onClick={() => setActionsRaw(prev => prev ? prev + "\n" + a : a)}
+                  style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer" }}>
+                  + {a}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", display: "block", marginBottom: 6 }}>
+              Resource ARN
+            </label>
+            <input value={resource} onChange={e => setResource(e.target.value)}
+              style={{ width: "100%", padding: "8px 12px", fontSize: 12, background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)", outline: "none", fontFamily: "monospace", boxSizing: "border-box" }}
+              placeholder="* or arn:aws:s3:::my-bucket/*" />
+            <div style={{ display: "flex", gap: 4, marginTop: 5, flexWrap: "wrap" }}>
+              {["*","arn:aws:s3:::*","arn:aws:lambda:us-east-1:000000000000:function:*","arn:aws:dynamodb:us-east-1:000000000000:table/*"].map(r => (
+                <button key={r} onClick={() => setResource(r)}
+                  style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", fontFamily: "monospace" }}>
+                  {r.length > 24 ? r.slice(0, 22) + "…" : r}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button onClick={run} disabled={running || !principal}
+            style={{ width: "100%", padding: "10px 0", fontSize: 14, fontWeight: 700, borderRadius: 8, border: "none", cursor: running || !principal ? "not-allowed" : "pointer", background: running || !principal ? "var(--bg-elevated)" : "linear-gradient(135deg,#3b82f6,#6366f1)", color: running || !principal ? "var(--text-muted)" : "#fff", opacity: running || !principal ? 0.6 : 1 }}>
+            {running ? "Evaluating…" : "Simulate"}
+          </button>
+        </div>
+
+        {/* ── Results panel ────────────────────────────────────────────────── */}
+        <div>
+          {error && (
+            <div style={{ padding: "12px 16px", background: "#ef444415", border: "1px solid #ef444440", borderRadius: 8, color: "#ef4444", fontSize: 13, marginBottom: 14 }}>{error}</div>
+          )}
+
+          {!result && !error && !running && (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "60px 20px", color: "var(--text-muted)", textAlign: "center" }}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>🛡️</div>
+              <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6, color: "var(--text)" }}>Configure and run a simulation</div>
+              <div style={{ fontSize: 13, maxWidth: 360, lineHeight: 1.6 }}>
+                Select a principal, enter one or more IAM actions, set a resource ARN, and click Simulate to see the full evaluation trace.
+              </div>
+            </div>
+          )}
+
+          {result && (
+            <>
+              {/* Overall verdict */}
+              <div style={{ background: "var(--bg-card)", border: `1px solid ${overallColor}40`, borderRadius: 10, padding: "16px 20px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                <DecisionBadge decision={result.overall_decision} />
+                <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                  <strong style={{ color: "var(--text)" }}>{result.principal}</strong>
+                  {" → "}
+                  <code style={{ fontSize: 12, background: "var(--bg-elevated)", padding: "1px 6px", borderRadius: 3 }}>{result.resource}</code>
+                </div>
+                <div style={{ marginLeft: "auto", fontSize: 12, color: "var(--text-faint)" }}>
+                  {result.policies_evaluated} {result.policies_evaluated === 1 ? "policy" : "policies"} evaluated
+                </div>
+              </div>
+
+              {/* Per-action results */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {result.results.map(r => (
+                  <div key={r.action} style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+                    {/* Action header */}
+                    <button
+                      onClick={() => setExpandedAction(expandedAction === r.action ? null : r.action)}
+                      style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}>
+                      <DecisionBadge decision={r.decision} />
+                      <code style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", flex: 1 }}>{r.action}</code>
+                      {r.matched_policy && (
+                        <span style={{ fontSize: 11, color: "var(--text-faint)" }}>matched: {r.matched_policy}</span>
+                      )}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: expandedAction === r.action ? "rotate(180deg)" : "none", transition: "transform 0.2s", flexShrink: 0, color: "var(--text-muted)" }}>
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </button>
+
+                    {expandedAction === r.action && (
+                      <div style={{ borderTop: "1px solid var(--border)", padding: "14px 16px" }}>
+                        {/* Reason */}
+                        <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12, padding: "8px 12px", background: "var(--bg-elevated)", borderRadius: 6, lineHeight: 1.5 }}>
+                          {r.reason}
+                        </div>
+
+                        {/* Matched statement */}
+                        {r.matched_statement && (
+                          <div style={{ marginBottom: 14 }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Matched Statement — {r.matched_source}</div>
+                            <pre style={{ fontSize: 11, background: "var(--bg-elevated)", borderRadius: 6, padding: "10px 12px", overflowX: "auto", margin: 0, color: "var(--text-dim)", lineHeight: 1.5 }}>
+                              {JSON.stringify(r.matched_statement, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+
+                        {/* Evaluation trace */}
+                        {r.evaluation_steps.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>
+                              Evaluation Trace ({r.evaluation_steps.length} steps)
+                            </div>
+                            <div style={{ maxHeight: 260, overflowY: "auto" }}>
+                              {r.evaluation_steps.map((step, i) => <StepRow key={i} step={step} />)}
+                            </div>
+                          </div>
+                        )}
+
+                        {r.evaluation_steps.length === 0 && (
+                          <div style={{ fontSize: 12, color: "var(--text-faint)", fontStyle: "italic" }}>
+                            No policies were evaluated — principal has no attached or inline policies.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── X-Ray Traces Tab ────────────────────────────────────────────────────────
+
+interface TraceSummary {
+  Id:           string;
+  Duration:     number;
+  HasError:     boolean;
+  HasFault:     boolean;
+  HasThrottle:  boolean;
+  ResponseTime: number;
+  Http: { HttpMethod: string; HttpUrl: string; HttpStatus: number };
+  ServiceIds: { Name: string; Type: string }[];
+}
+
+const TEMPO_EXPLORE = "http://localhost:3002/explore?orgId=1&left=" + encodeURIComponent(JSON.stringify({
+  datasource: "kumostack-tempo",
+  queries: [{ refId: "A", queryType: "traceql", query: "{}" }],
+  range: { from: "now-1h", to: "now" },
+}));
+
+function ServiceTypePill({ type }: { type: string }) {
+  const map: Record<string, { label: string; color: string }> = {
+    "AWS::Lambda::Function":  { label: "Lambda",    color: "#8b5cf6" },
+    "AWS::DynamoDB::Table":   { label: "DynamoDB",  color: "#f97316" },
+    "AWS::SQS::Queue":        { label: "SQS",       color: "#3b82f6" },
+    "AWS::S3::Bucket":        { label: "S3",        color: "#f59e0b" },
+    "AWS::EC2::Instance":     { label: "EC2",       color: "#10b981" },
+    "AWS::Other":             { label: "Service",   color: "#6b7280" },
+  };
+  const m = map[type] || { label: type.split("::").pop() || type, color: "#6b7280" };
+  return (
+    <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: m.color + "20", color: m.color, border: `1px solid ${m.color}40`, whiteSpace: "nowrap" }}>
+      {m.label}
+    </span>
+  );
+}
+
+function XRayTab() {
+  const [traces, setTraces]       = useState<TraceSummary[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [search, setSearch]       = useState("");
+  const [filterErr, setFilterErr] = useState(false);
+
+  const load = useCallback(() => {
+    fetch("/api/xray?limit=200", { cache: "no-store" })
+      .then(r => r.json())
+      .then(d => { setTraces(d.traces || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const id = setInterval(load, 8000);
+    return () => clearInterval(id);
+  }, [autoRefresh, load]);
+
+  const handleClear = async () => {
+    await fetch("/api/xray", { method: "DELETE" });
+    setTraces([]);
+  };
+
+  const filtered = traces.filter(t => {
+    if (filterErr && !t.HasError && !t.HasFault) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return t.Id.includes(q) ||
+        t.Http.HttpUrl?.toLowerCase().includes(q) ||
+        t.ServiceIds.some(s => s.Name.toLowerCase().includes(q));
+    }
+    return true;
+  });
+
+  const durColor = (ms: number) =>
+    ms < 100 ? "#10b981" : ms < 500 ? "#f59e0b" : "#ef4444";
+
+  const statusColor = (code: number) =>
+    code < 400 ? "#10b981" : code < 500 ? "#f59e0b" : "#ef4444";
+
+  return (
+    <div style={{ padding: "24px 32px", height: "100%", overflowY: "auto" }}>
+
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>X-Ray — Distributed Traces</h2>
+          <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 0" }}>
+            Segments received via PutTraceSegments → forwarded to Grafana Tempo for full waterfall view
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <a href={TEMPO_EXPLORE} target="_blank" rel="noreferrer" className="btn btn-sm" style={{ fontSize: 12 }}>
+            Open Tempo ↗
+          </a>
+          <a href="http://localhost:3200" target="_blank" rel="noreferrer" className="btn btn-sm" style={{ fontSize: 12 }}>
+            Tempo API ↗
+          </a>
+        </div>
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+        {[
+          { label: "Total Traces",  value: traces.length,                                color: "var(--text)" },
+          { label: "With Errors",   value: traces.filter(t => t.HasError || t.HasFault).length, color: "#ef4444" },
+          { label: "Avg Duration",  value: traces.length ? (traces.reduce((a,t) => a + t.Duration * 1000, 0) / traces.length).toFixed(0) + " ms" : "—", color: "#f59e0b" },
+          { label: "Services Seen", value: new Set(traces.flatMap(t => t.ServiceIds.map(s => s.Name))).size, color: "#3b82f6" },
+        ].map(s => (
+          <div key={s.label} style={{ flex: 1, background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 16px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{s.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Filters */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "center" }}>
+        <input
+          placeholder="Search trace ID, URL, service…"
+          value={search} onChange={e => setSearch(e.target.value)}
+          style={{ flex: 1, padding: "8px 12px", fontSize: 13, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-primary)", outline: "none" }}
+        />
+        <label style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, cursor: "pointer", whiteSpace: "nowrap" }}>
+          <input type="checkbox" checked={filterErr} onChange={e => setFilterErr(e.target.checked)} style={{ accentColor: "#ef4444" }} />
+          Errors only
+        </label>
+        <label style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, cursor: "pointer", whiteSpace: "nowrap" }}>
+          <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} style={{ accentColor: "#3b82f6" }} />
+          Auto-refresh
+        </label>
+        <button onClick={load} style={{ padding: "6px 14px", fontSize: 12, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer" }}>Refresh</button>
+        <button onClick={handleClear} style={{ padding: "6px 14px", fontSize: 12, background: "var(--bg-elevated)", border: "1px solid #ef444440", borderRadius: 6, color: "#ef4444", cursor: "pointer" }}>Clear</button>
+      </div>
+
+      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
+        {loading ? "Loading…" : `${filtered.length} traces${search || filterErr ? " (filtered)" : ""}`}
+      </div>
+
+      {/* ADOT/OTel notice banner */}
+      <div style={{ marginBottom: 14, padding: "10px 16px", background: "#6366f115", border: "1px solid #6366f140", borderRadius: 8, display: "flex", alignItems: "center", gap: 12 }}>
+        <span style={{ fontSize: 16 }}>⚡</span>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+          <strong style={{ color: "#818cf8" }}>AWS moved X-Ray to OpenTelemetry.</strong>{" "}
+          X-Ray SDK is in maintenance mode. Use{" "}
+          <strong>ADOT (AWS Distro for OpenTelemetry)</strong> or the standard OTel SDK —
+          set <code style={{ background: "var(--bg-elevated)", padding: "1px 6px", borderRadius: 3, fontSize: 11 }}>OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4566</code> and traces flow directly to Grafana Tempo.
+        </div>
+      </div>
+
+      {/* Trace table */}
+      {!loading && filtered.length === 0 ? (
+        <div style={{ color: "var(--text-muted)" }}>
+          <div style={{ textAlign: "center", padding: "32px 20px" }}>
+            <div style={{ fontSize: 32, marginBottom: 10 }}>🔭</div>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6, color: "var(--text)" }}>No traces yet</div>
+            <div style={{ fontSize: 13, maxWidth: 500, margin: "0 auto", lineHeight: 1.6 }}>
+              Instrument your app with ADOT or the OTel SDK — both route through KumoStack to Grafana Tempo automatically.
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, maxWidth: 900, margin: "0 auto" }}>
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "16px 18px" }}>
+              <div className="section-header" style={{ marginBottom: 10 }}>ADOT / OTEL SDK — Python</div>
+              <pre style={{ fontSize: 11, background: "#0d1117", borderRadius: 6, padding: "12px 14px", overflowX: "auto", margin: 0, lineHeight: 1.8, color: "#e2e8f0" }}>{`pip install opentelemetry-distro opentelemetry-exporter-otlp
+
+# Auto-instrument (traces boto3, requests, Flask, Django…)
+opentelemetry-bootstrap -a install
+
+OTEL_SERVICE_NAME=my-service \\
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4566 \\
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \\
+opentelemetry-instrument python app.py`}</pre>
+              <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 8 }}>Works with Flask, FastAPI, Django, boto3 — zero code changes</div>
+            </div>
+
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "16px 18px" }}>
+              <div className="section-header" style={{ marginBottom: 10 }}>ADOT / OTEL SDK — Node.js</div>
+              <pre style={{ fontSize: 11, background: "#0d1117", borderRadius: 6, padding: "12px 14px", overflowX: "auto", margin: 0, lineHeight: 1.8, color: "#e2e8f0" }}>{`npm install @opentelemetry/sdk-node \\
+  @opentelemetry/auto-instrumentations-node \\
+  @opentelemetry/exporter-trace-otlp-http
+
+# tracing.js
+const { NodeSDK } = require('@opentelemetry/sdk-node');
+const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-http');
+const sdk = new NodeSDK({
+  serviceName: 'my-service',
+  traceExporter: new OTLPTraceExporter({
+    url: 'http://localhost:4566/v1/traces',
+  }),
+});
+sdk.start();
+
+# Run: node -r ./tracing.js app.js`}</pre>
+            </div>
+
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "16px 18px" }}>
+              <div className="section-header" style={{ marginBottom: 10 }}>ADOT COLLECTOR (Docker)</div>
+              <pre style={{ fontSize: 11, background: "#0d1117", borderRadius: 6, padding: "12px 14px", overflowX: "auto", margin: 0, lineHeight: 1.8, color: "#e2e8f0" }}>{`# docker-compose.yml — add alongside your app
+  otel-collector:
+    image: public.ecr.aws/aws-observability/aws-otel-collector:latest
+    environment:
+      - AWS_REGION=us-east-1
+    command: ["--config", "/etc/otel-config.yaml"]
+    volumes:
+      - ./otel-config.yaml:/etc/otel-config.yaml
+
+# otel-config.yaml
+exporters:
+  otlphttp:
+    endpoint: http://kumostack:4566
+
+service:
+  pipelines:
+    traces:
+      exporters: [otlphttp]`}</pre>
+            </div>
+
+            <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "16px 18px" }}>
+              <div className="section-header" style={{ marginBottom: 10 }}>LEGACY X-RAY SDK (still supported)</div>
+              <pre style={{ fontSize: 11, background: "#0d1117", borderRadius: 6, padding: "12px 14px", overflowX: "auto", margin: 0, lineHeight: 1.8, color: "#e2e8f0" }}>{`pip install aws-xray-sdk
+
+from aws_xray_sdk.core import xray_recorder, patch_all
+
+xray_recorder.configure(
+    service="my-service",
+    daemon_address="localhost:4566",
+)
+patch_all()  # patches boto3, requests, …
+
+# Query via CLI
+aws xray get-trace-summaries \\
+  --start-time $(date -d '1h ago' +%s) \\
+  --end-time $(date +%s) \\
+  --endpoint-url http://localhost:4566`}</pre>
+              <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 8 }}>⚠ X-Ray SDK is in maintenance — prefer ADOT above</div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)" }}>
+                {["Trace ID", "Duration", "Services", "HTTP", "Status", "Tempo"].map(h => (
+                  <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((t, i) => {
+                const durMs = Math.round(t.Duration * 1000);
+                const traceUrl = `http://localhost:3002/explore?orgId=1&left=${encodeURIComponent(JSON.stringify({
+                  datasource: "kumostack-tempo",
+                  queries: [{ refId: "A", queryType: "traceql", query: `{trace.id="${t.Id}"}` }],
+                  range: { from: "now-1h", to: "now" },
+                }))}`;
+                return (
+                  <tr key={t.Id} style={{ borderBottom: "1px solid var(--border-subtle)", background: i % 2 === 0 ? "transparent" : "var(--bg-elevated)05" }}>
+                    <td style={{ padding: "8px 12px", fontFamily: "monospace", fontSize: 11, color: "var(--text-muted)" }}>
+                      {(t.HasError || t.HasFault) && <span style={{ color: "#ef4444", marginRight: 6 }}>●</span>}
+                      {t.Id.slice(0, 26)}…
+                    </td>
+                    <td style={{ padding: "8px 12px", fontWeight: 600, color: durColor(durMs), whiteSpace: "nowrap" }}>
+                      {durMs} ms
+                    </td>
+                    <td style={{ padding: "8px 12px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {t.ServiceIds.slice(0, 4).map(s => <ServiceTypePill key={s.Name + s.Type} type={s.Type} />)}
+                      </div>
+                    </td>
+                    <td style={{ padding: "8px 12px", color: "var(--text-muted)", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {t.Http.HttpMethod && <span style={{ fontWeight: 600, marginRight: 6 }}>{t.Http.HttpMethod}</span>}
+                      <span title={t.Http.HttpUrl}>{t.Http.HttpUrl?.replace(/^https?:\/\/[^/]+/, "") || "—"}</span>
+                    </td>
+                    <td style={{ padding: "8px 12px" }}>
+                      {t.Http.HttpStatus ? (
+                        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, background: statusColor(t.Http.HttpStatus) + "20", color: statusColor(t.Http.HttpStatus), border: `1px solid ${statusColor(t.Http.HttpStatus)}40` }}>
+                          {t.Http.HttpStatus}
+                        </span>
+                      ) : "—"}
+                    </td>
+                    <td style={{ padding: "8px 12px" }}>
+                      <a href={traceUrl} target="_blank" rel="noreferrer"
+                        style={{ fontSize: 11, color: "#3b82f6", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        View ↗
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Instrument reference */}
+      {filtered.length > 0 && (
+        <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px" }}>
+            <div className="section-header" style={{ marginBottom: 8 }}>OTEL PYTHON</div>
+            <pre style={{ fontSize: 10, background: "#0d1117", borderRadius: 6, padding: "8px 10px", overflowX: "auto", margin: 0, lineHeight: 1.6, color: "#e2e8f0" }}>{`OTEL_SERVICE_NAME=svc \\
+OTEL_EXPORTER_OTLP_ENDPOINT=\\
+  http://localhost:4566 \\
+opentelemetry-instrument python app.py`}</pre>
+          </div>
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px" }}>
+            <div className="section-header" style={{ marginBottom: 8 }}>OTEL NODE.JS</div>
+            <pre style={{ fontSize: 10, background: "#0d1117", borderRadius: 6, padding: "8px 10px", overflowX: "auto", margin: 0, lineHeight: 1.6, color: "#e2e8f0" }}>{`new OTLPTraceExporter({
+  url: 'http://localhost:4566/v1/traces'
+})`}</pre>
+          </div>
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px" }}>
+            <div className="section-header" style={{ marginBottom: 8 }}>CLI QUERY</div>
+            <pre style={{ fontSize: 10, background: "#0d1117", borderRadius: 6, padding: "8px 10px", overflowX: "auto", margin: 0, lineHeight: 1.6, color: "#e2e8f0" }}>{`aws xray get-trace-summaries \\
+  --start-time $(date -d '1h ago' +%s) \\
+  --end-time $(date +%s) \\
+  --endpoint-url http://localhost:4566`}</pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── K6 Load Testing Tab ─────────────────────────────────────────────────────
+
+type K6Status = {
+  id?:           string;
+  scenario?:     string;
+  vus?:          number;
+  duration?:     string;
+  status?:       string;
+  started_at?:   string;
+  container_id?: string;
+  error?:        string;
+};
+
+const SCENARIOS = [
+  { value: "mixed",    label: "Mixed (S3 + SQS + DynamoDB)", description: "Weighted mix across three services — best for overall stress testing" },
+  { value: "s3",       label: "S3 — Object Storage",          description: "PUT then GET objects; tests throughput and latency of S3" },
+  { value: "sqs",      label: "SQS — Message Queue",          description: "Send + Receive messages; reveals queue backpressure" },
+  { value: "dynamodb", label: "DynamoDB — NoSQL",              description: "PutItem + GetItem; exposes read/write latency under concurrency" },
+  { value: "lambda",   label: "Lambda — Serverless",           description: "Repeated invocations; highlights cold start and concurrency limits" },
+];
+
+const PROM_BASE = "http://localhost:9091";
+
+function K6StatusBadge({ status }: { status?: string }) {
+  if (!status || status === "idle")      return <span className="pill pill--dim">Idle</span>;
+  if (status === "starting")             return <span className="pill" style={{ background: "#1d4ed820", color: "#60a5fa", border: "1px solid #3b82f640" }}>Starting…</span>;
+  if (status === "running")              return <span className="pill pill--green" style={{ animation: "pulse 2s infinite" }}>Running</span>;
+  if (status === "completed" || status === "exited") return <span className="pill" style={{ background: "#10b98120", color: "#10b981", border: "1px solid #10b98140" }}>Completed</span>;
+  if (status === "stopped")              return <span className="pill pill--dim">Stopped</span>;
+  if (status === "error")                return <span className="pill pill--red">Error</span>;
+  return <span className="pill pill--dim">{status}</span>;
+}
+
+function K6MetricLink({ query, label, color }: { query: string; label: string; color: string }) {
+  const href = `${PROM_BASE}/graph?g0.expr=${encodeURIComponent(query)}&g0.tab=0`;
+  return (
+    <a href={href} target="_blank" rel="noreferrer"
+      style={{ display: "flex", flexDirection: "column", padding: "12px 16px", background: "var(--bg-elevated)", border: `1px solid ${color}30`, borderRadius: 8, textDecoration: "none", gap: 4, flex: 1, minWidth: 140 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{query}</div>
+      <div style={{ fontSize: 10, color: "var(--text-faint)", marginTop: 2 }}>Open in Prometheus ↗</div>
+    </a>
+  );
+}
+
+function K6LoadTestTab() {
+  const [scenario, setScenario]   = useState("mixed");
+  const [vus, setVus]             = useState(10);
+  const [duration, setDuration]   = useState("60s");
+  const [job, setJob]             = useState<K6Status>({});
+  const [loading, setLoading]     = useState(false);
+  const [polling, setPolling]     = useState(false);
+
+  const isActive = job.status === "running" || job.status === "starting";
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/api/k6", { cache: "no-store" });
+      const d = await r.json();
+      setJob(d);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+
+  useEffect(() => {
+    if (!polling) return;
+    const id = setInterval(fetchStatus, 3000);
+    return () => clearInterval(id);
+  }, [polling, fetchStatus]);
+
+  useEffect(() => {
+    setPolling(isActive);
+  }, [isActive]);
+
+  const handleRun = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch("/api/k6", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ scenario, vus, duration }),
+      });
+      const d = await r.json();
+      setJob(d);
+      setPolling(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStop = async () => {
+    await fetch("/api/k6?stop=1", { method: "POST" });
+    fetchStatus();
+  };
+
+  const handleCleanup = async () => {
+    await fetch("/api/k6", { method: "DELETE" });
+    setJob({});
+  };
+
+  const selectedScenario = SCENARIOS.find(s => s.value === scenario)!;
+
+  const grafanaUrl = "http://localhost:3002/d/kumostack-k6/k6-e28094-load-testing?orgId=1&refresh=5s";
+
+  return (
+    <div style={{ padding: "24px 32px", height: "100%", overflowY: "auto" }}>
+
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
+        <div>
+          <h2 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Load Testing — K6</h2>
+          <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "4px 0 0" }}>
+            Run K6 load scenarios against KumoStack services. Metrics are pushed to Prometheus and available in Grafana.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <a href={grafanaUrl} target="_blank" rel="noreferrer" className="btn btn-sm" style={{ fontSize: 12 }}>Open Grafana ↗</a>
+          <a href={PROM_BASE} target="_blank" rel="noreferrer" className="btn btn-sm" style={{ fontSize: 12 }}>Prometheus ↗</a>
+        </div>
+      </div>
+
+      {/* Current Job Status */}
+      {job.id && (
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px 20px", marginBottom: 20, display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <K6StatusBadge status={job.status} />
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{job.scenario} scenario</span>
+          </div>
+          <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--text-muted)" }}>
+            <span>{job.vus} VUs</span>
+            <span>{job.duration}</span>
+            {job.started_at && <span>Started {new Date(job.started_at).toLocaleTimeString()}</span>}
+          </div>
+          {job.error && <span style={{ fontSize: 12, color: "#ef4444" }}>{job.error}</span>}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            {isActive && (
+              <button onClick={handleStop}
+                style={{ padding: "5px 14px", fontSize: 12, background: "#ef444420", border: "1px solid #ef444440", borderRadius: 6, color: "#ef4444", cursor: "pointer" }}>
+                Stop
+              </button>
+            )}
+            {!isActive && (
+              <button onClick={handleCleanup}
+                style={{ padding: "5px 14px", fontSize: 12, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer" }}>
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 20, alignItems: "start" }}>
+
+        {/* Config panel */}
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "20px 24px" }}>
+          <div className="section-header" style={{ marginBottom: 16 }}>SCENARIO</div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 24 }}>
+            {SCENARIOS.map(s => (
+              <label key={s.value}
+                style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "12px 14px", borderRadius: 8, border: `1px solid ${scenario === s.value ? "#3b82f6" : "var(--border)"}`, background: scenario === s.value ? "#3b82f610" : "var(--bg-elevated)", cursor: "pointer" }}>
+                <input type="radio" name="scenario" value={s.value} checked={scenario === s.value} onChange={() => setScenario(s.value)}
+                  style={{ marginTop: 2, accentColor: "#3b82f6" }} disabled={isActive} />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: scenario === s.value ? "#60a5fa" : "var(--text)" }}>{s.label}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}>{s.description}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+
+          <div className="section-header" style={{ marginBottom: 12 }}>PARAMETERS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+            <div>
+              <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>
+                Virtual Users (VUs)
+              </label>
+              <input type="number" min={1} max={200} value={vus} onChange={e => setVus(Number(e.target.value))}
+                disabled={isActive}
+                style={{ width: "100%", padding: "8px 12px", fontSize: 13, background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)", outline: "none" }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 5 }}>
+                Duration
+              </label>
+              <select value={duration} onChange={e => setDuration(e.target.value)} disabled={isActive}
+                style={{ width: "100%", padding: "8px 12px", fontSize: 13, background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)" }}>
+                {["30s","60s","2m","5m","10m"].map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <button onClick={handleRun} disabled={isActive || loading}
+            style={{ width: "100%", padding: "10px 0", fontSize: 14, fontWeight: 700, borderRadius: 8, border: "none", cursor: isActive || loading ? "not-allowed" : "pointer", background: isActive ? "var(--bg-elevated)" : "linear-gradient(135deg, #3b82f6, #6366f1)", color: isActive ? "var(--text-muted)" : "#fff", transition: "opacity 0.2s", opacity: isActive || loading ? 0.6 : 1 }}>
+            {loading ? "Starting…" : isActive ? "Test Running…" : `Run ${selectedScenario?.label ?? "Test"}`}
+          </button>
+        </div>
+
+        {/* Right column: metrics quick links + run command */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+          {/* Metric quick links */}
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px 20px" }}>
+            <div className="section-header" style={{ marginBottom: 12 }}>PROMETHEUS METRICS</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <K6MetricLink label="p95 Latency" query="http_req_duration{quantile='0.95'}" color="#3b82f6" />
+              <K6MetricLink label="Requests/sec" query="rate(http_reqs_total[1m])" color="#10b981" />
+              <K6MetricLink label="Error Rate" query="rate(http_req_failed_total[1m])" color="#ef4444" />
+              <K6MetricLink label="Active VUs" query="vus" color="#8b5cf6" />
+            </div>
+          </div>
+
+          {/* CLI shortcut */}
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px 20px" }}>
+            <div className="section-header" style={{ marginBottom: 10 }}>RUN FROM CLI</div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8 }}>Run directly without the dashboard:</div>
+            <pre style={{ fontSize: 10, background: "var(--bg-elevated)", borderRadius: 6, padding: "10px 12px", overflowX: "auto", color: "var(--text-dim)", margin: 0, lineHeight: 1.6 }}>{`docker run --rm \\
+  --network kumostack_default \\
+  -v ./k6:/k6:ro \\
+  -e KUMOSTACK_ENDPOINT=http://kumostack:4566 \\
+  -e AWS_ACCESS_KEY_ID=test \\
+  -e AWS_SECRET_ACCESS_KEY=test \\
+  -e K6_PROMETHEUS_RW_SERVER_URL=http://kumostack-prometheus:9090/api/v1/write \\
+  grafana/k6:latest run \\
+  --out experimental-prometheus-rw \\
+  --vus ${vus} --duration ${duration} \\
+  /k6/scenarios/${scenario}.js`}</pre>
+          </div>
+
+          {/* Scenarios reference */}
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px 20px" }}>
+            <div className="section-header" style={{ marginBottom: 10 }}>SCRIPT LOCATIONS</div>
+            {SCENARIOS.map(s => (
+              <div key={s.value} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--border-subtle)" }}>
+                <span style={{ fontSize: 12, color: "var(--text)" }}>{s.label.split(" — ")[0]}</span>
+                <code style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "monospace" }}>k6/scenarios/{s.value}.js</code>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── CloudTrail Tab ──────────────────────────────────────────────────────────
 
 type CTEvent = {
@@ -3166,7 +4465,9 @@ function SettingsTab() {
           {[
             { label: "KumoStack Health",  href: "http://localhost:4566/_kumostack/health" },
             { label: "Grafana",           href: "http://localhost:3002" },
-            { label: "Prometheus",        href: "http://localhost:9090" },
+            { label: "K6 Dashboard",      href: "http://localhost:3002/d/kumostack-k6/k6-e28094-load-testing" },
+            { label: "Tempo (traces)",    href: "http://localhost:3200" },
+            { label: "Prometheus",        href: "http://localhost:9091" },
             { label: "Loki",              href: "http://localhost:3100" },
             { label: "Vector API",        href: "http://localhost:8686" },
             { label: "Garage Admin",      href: "http://localhost:3903" },
@@ -3230,10 +4531,16 @@ export default function Dashboard() {
         activeAccount={activeAccount}
         setActiveAccount={setActiveAccount}
       />
-      <main className={`app-main${["Diagrams","Stackport"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
+      <main className={`app-main${["Diagrams","Stackport","Topology","ArchGallery"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
         {activeTab === "Overview"       && <OverviewTab connected={connected} version={version} serviceStatus={serviceStatus} />}
         {activeTab === "Organizations"  && <OrganizationsTab activeAccount={activeAccount} setActiveAccount={setActiveAccount} />}
         {activeTab === "Chaos"          && <ChaosTab connected={connected} />}
+        {activeTab === "LoadTest"       && <K6LoadTestTab />}
+        {activeTab === "Traces"         && <XRayTab />}
+        {activeTab === "Topology"       && <TopologyTab />}
+        {activeTab === "IAMSimulator"   && <IamSimulatorTab />}
+        {activeTab === "CostExplorer"   && <CostExplorerTab />}
+        {activeTab === "ArchGallery"    && <ArchitectureGallery />}
         {activeTab === "Stackport"      && <ResourceBrowserTab />}
         {activeTab === "Diagrams"       && <DiagramsTab />}
         {activeTab === "Tutorials"      && <TutorialsTab />}

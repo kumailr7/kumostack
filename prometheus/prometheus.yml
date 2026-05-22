@@ -16,3 +16,10 @@ scrape_configs:
     scrape_interval: 5s
     static_configs:
       - targets: ["cadvisor:8080"]
+
+  # k6 pushes metrics here via experimental-prometheus-rw output.
+  # The remote_write receiver is enabled via --web.enable-remote-write-receiver.
+  # This job is a placeholder so k6 metrics appear under a named job in Grafana.
+  - job_name: k6
+    static_configs:
+      - targets: []

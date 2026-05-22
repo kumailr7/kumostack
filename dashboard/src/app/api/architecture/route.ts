@@ -50,27 +50,25 @@ async function tryFetch<T>(fn: () => Promise<T>): Promise<T | null> {
 }
 
 const TIER_X: Record<string, number> = {
-  internet:   80,
-  security:   280,
-  cdn:        480,
-  networking: 680,
-  registry:   860,
-  compute:    1060,
-  storage:    480,   // below CDN column
-  database:   1280,
-  messaging:  1480,
-  secrets:    1280,  // below DATABASE column — renders in bottom row directly under RDS
+  security:   80,
+  cdn:        280,
+  networking: 480,
+  registry:   660,
+  compute:    860,
+  storage:    280,   // below CDN column
+  database:   1080,
+  messaging:  1280,
+  secrets:    1080,  // below DATABASE column — renders in bottom row directly under RDS
 };
 
 export const TIER_LABELS_BY_X: Record<number, string> = {
-  80:   "Internet",
-  280:  "Security",
-  480:  "CDN / Edge",
-  680:  "Networking",
-  860:  "Registry",
-  1060: "Compute",
-  1280: "Database",
-  1480: "Messaging",
+  80:   "Security",
+  280:  "CDN / Edge",
+  480:  "Networking",
+  660:  "Registry",
+  860:  "Compute",
+  1080: "Database",
+  1280: "Messaging",
 };
 
 // Tiers that render below the main horizontal flow instead of inline with it
@@ -113,13 +111,10 @@ function edge(source: string, target: string, label?: string): ArchEdge {
 export async function GET() {
   const edges: ArchEdge[] = [];
   const groups: Record<string, ArchNode[]> = {
-    internet: [], security: [], cdn: [], networking: [], registry: [],
+    security: [], cdn: [], networking: [], registry: [],
     compute: [], storage: [], database: [], messaging: [], secrets: [],
   };
   const snsArnToNodeId = new Map<string, string>();
-
-  // Internet entry node — always present as the user/traffic source
-  groups.internet.push(node("internet", "Internet", "internet", "active"));
 
   // Internal KumoStack buckets that belong to the observability stack, not user workloads
   const INFRA_BUCKETS = new Set(["ministack-logs", "kumostack-logs", "logs-cold-archive", "logs-rds-archive"]);
@@ -380,28 +375,23 @@ export async function GET() {
     }
   }
 
-  // Internet entry wiring — connect to the leftmost service tier
+  // WAF → CDN/ALB wiring
   const cdnNodes  = groups.cdn.filter((n) => n.data.service === "cloudfront");
   const albNodes  = groups.networking.filter((n) => n.data.service === "alb");
   const wafNodes  = groups.security.filter((n) => n.data.service === "wafv2");
   if (cdnNodes.length > 0) {
-    for (const cdn of cdnNodes) {
-      edges.push(edge("internet", cdn.id));
-      // CloudFront → ALB (dynamic /api/* origin)
-      for (const alb of albNodes) edges.push(edge(cdn.id, alb.id, "origin"));
+    // CloudFront → ALB (dynamic /api/* origin)
+    for (const alb of albNodes) {
+      for (const cdn of cdnNodes) edges.push(edge(cdn.id, alb.id, "origin"));
     }
     // WAF protects CDN
     for (const waf of wafNodes) {
       for (const cdn of cdnNodes) edges.push(edge(waf.id, cdn.id, "protects"));
     }
   } else if (albNodes.length > 0) {
-    for (const alb of albNodes) edges.push(edge("internet", alb.id));
     for (const waf of wafNodes) {
       for (const alb of albNodes) edges.push(edge(waf.id, alb.id, "protects"));
     }
-  } else {
-    // No CDN/ALB — connect internet to first compute node
-    for (const n of groups.compute.slice(0, 1)) edges.push(edge("internet", n.id));
   }
 
   // Layout + dedup edges

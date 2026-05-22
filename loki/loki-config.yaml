@@ -1,6 +1,6 @@
 auth_enabled: false
 
-target: all,memberlist-kv
+target: all
 
 server:
   http_listen_port: 3100
@@ -17,7 +17,7 @@ common:
   replication_factor: 1
   ring:
     kvstore:
-      store: memberlist
+      store: inmemory
 
 memberlist:
   bind_port: 7946
