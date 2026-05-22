@@ -28,6 +28,7 @@ interface ArchPattern {
   company:     string;
   tag:         string;
   tagColor:    string;
+  arrowColor?: string;  // override arrow/edge color (defaults to tagColor)
   scale:       string;
   problem:     string;
   description: string;
@@ -77,48 +78,42 @@ const PATTERNS: ArchPattern[] = [
     company: "Snap Inc. on AWS",
     tag: "Real Case Study",
     tagColor: "#f59e0b",
+    arrowColor: "#e879f9",
     scale: "300M+ DAU · 5B+ Snaps/day · 10M TPS · 900+ EKS nodes · 400TB DynamoDB",
     problem: "Deliver 5 billion Snaps daily to 300M+ daily active users with real-time friend graph lookups, low-latency media delivery, and cost-effective storage — rebuilt entirely on AWS managed services.",
     description: "Snap rebuilt their messaging infrastructure on AWS to eliminate undifferentiated heavy lifting. At 300M+ DAU and 10M+ TPS, a Kubernetes cluster (900+ nodes, 1000+ pods) hosts four internal microservices behind a single gateway: Media Service (stores/retrieves media via S3 + CloudFront), MCS — Message Content Service (tracks message state in DynamoDB), Friend Graph (caches social relationships in ElastiCache Redis across 900+ cache nodes), and Snap DB (persists snap metadata in DynamoDB — 400TB+, growing at 2B+ rows/month). CloudFront serves media from 400+ edge PoPs, giving recipients their Snaps from the nearest cache rather than reaching back to S3. The rebuild delivered a 24% reduction in median latency for image Snap sends.",
     services: [
-      // Clients
-      { id: "snap-mobile", label: "iOS / Android",      color: "#9ca3af", col: 0, row: 1 },
-      // CDN + origin storage (left of cluster)
-      { id: "snap-cf",     label: "CloudFront",          color: "#f59e0b", col: 1, row: 0 },
-      { id: "snap-s3",     label: "S3 (media)",          color: "#f59e0b", col: 1, row: 2 },
-      // EKS gateway
-      { id: "snap-gw",     label: "EKS + GW",            color: "#8b5cf6", col: 2, row: 1 },
-      // Four microservices inside the EKS cluster
-      { id: "snap-media",  label: "Media Service",       color: "#06b6d4", col: 3, row: 0 },
-      { id: "snap-mcs",    label: "MCS",                 color: "#3b82f6", col: 3, row: 1 },
-      { id: "snap-fg",     label: "Friend Graph",        color: "#10b981", col: 3, row: 2 },
-      { id: "snap-snapdb", label: "Snap DB",             color: "#ec4899", col: 3, row: 3 },
-      // Data stores (right of cluster)
-      { id: "snap-dynamo", label: "DynamoDB",            color: "#f97316", col: 4, row: 1 },
-      { id: "snap-cache",  label: "ElastiCache",         color: "#6366f1", col: 4, row: 2 },
+      // Clients — col 0
+      { id: "snap-mobile", label: "iOS / Android",  color: "#94a3b8", col: 0, row: 2 },
+      // CDN + origin storage — col 1
+      { id: "snap-cf",     label: "CloudFront",     color: "#f59e0b", col: 1, row: 1 },
+      { id: "snap-s3",     label: "S3 (media)",     color: "#eab308", col: 1, row: 4 },
+      // EKS Gateway — col 2, center of cluster
+      { id: "snap-gw",     label: "EKS Gateway",    color: "#8b5cf6", col: 2, row: 2 },
+      // Four microservices — col 3, rows 1-4
+      { id: "snap-media",  label: "Media Service",  color: "#06b6d4", col: 3, row: 1 },
+      { id: "snap-mcs",    label: "MCS",            color: "#3b82f6", col: 3, row: 2 },
+      { id: "snap-fg",     label: "Friend Graph",   color: "#10b981", col: 3, row: 3 },
+      { id: "snap-snapdb", label: "Snap DB",        color: "#ec4899", col: 3, row: 4 },
+      // Data stores — col 5, clearly outside cluster (skip col 4 for gap)
+      { id: "snap-dynamo", label: "DynamoDB",       color: "#f97316", col: 5, row: 2 },
+      { id: "snap-cache",  label: "ElastiCache",    color: "#6366f1", col: 5, row: 3 },
     ],
     groups: [
-      // EKS cluster boundary — wraps gateway + all 4 microservices
-      { label: "EKS Cluster", color: "#8b5cf6", cols: [2, 3], rows: [0, 3] },
+      { label: "EKS Cluster — 900+ nodes, 1000+ pods", color: "#8b5cf6", cols: [2, 3], rows: [1, 4] },
     ],
     edges: [
-      // Client → CDN + cluster
-      { from: "snap-mobile", to: "snap-cf",     label: "media request" },
-      { from: "snap-mobile", to: "snap-gw",     label: "API call" },
-      // CDN ↔ origin
+      { from: "snap-mobile", to: "snap-cf",     label: "media" },
+      { from: "snap-mobile", to: "snap-gw",     label: "API" },
       { from: "snap-cf",     to: "snap-s3",     label: "origin fetch" },
-      // Gateway → microservices
-      { from: "snap-gw",     to: "snap-media",  label: "route" },
-      { from: "snap-gw",     to: "snap-mcs",    label: "route" },
-      { from: "snap-gw",     to: "snap-fg",     label: "route" },
-      { from: "snap-gw",     to: "snap-snapdb", label: "route" },
-      // Media service → storage
-      { from: "snap-media",  to: "snap-s3",     label: "store" },
-      { from: "snap-media",  to: "snap-cf",     label: "serve via CDN" },
-      // Microservices → data stores
-      { from: "snap-mcs",    to: "snap-dynamo", label: "message state" },
+      { from: "snap-media",  to: "snap-s3",     label: "store media" },
+      { from: "snap-gw",     to: "snap-media" },
+      { from: "snap-gw",     to: "snap-mcs" },
+      { from: "snap-gw",     to: "snap-fg" },
+      { from: "snap-gw",     to: "snap-snapdb" },
+      { from: "snap-mcs",    to: "snap-dynamo", label: "msg state" },
       { from: "snap-fg",     to: "snap-cache",  label: "social graph" },
-      { from: "snap-snapdb", to: "snap-dynamo", label: "snap metadata" },
+      { from: "snap-snapdb", to: "snap-dynamo", label: "metadata" },
     ],
     whyItWorks: [
       { service: "EKS + Gateway", reason: "900+ nodes and 1000+ pods in a single Kubernetes cluster host all four microservices behind one internal gateway. EKS handles pod autoscaling, service discovery, and rolling deployments — Snap scales individual services independently under burst load (Super Bowl, celebrity posts) without touching the client-facing API." },
@@ -133,44 +128,39 @@ const PATTERNS: ArchPattern[] = [
       "ElastiCache (Redis) is the latency key. Friend Graph does NOT call DynamoDB on every Snap send — it reads from a warm Redis SET. The cache is updated asynchronously when friendships change. Cache-aside pattern with 30-minute TTL.",
       "EKS gateway pattern: a single ingress point routes to all internal services. Clients only know one endpoint. Independent deployments, per-service circuit breakers, and rate limiting happen inside the cluster without SDK changes.",
     ],
-    simulate: `# Scale: 300M DAU · 5B+ Snaps/day · 10M TPS · 900+ EKS nodes · 400TB DynamoDB
+    simulate: `# Full simulation — run the script in examples/snapchat-architecture/
+# It creates every service and exercises the complete data-flow.
 
-# 1. EKS cluster (KumoStack simulates the control plane)
-aws eks create-cluster --name snap-cluster \\
-  --kubernetes-version 1.29 \\
-  --resources-vpc-config subnetIds=subnet-0001,securityGroupIds=sg-0001 \\
+cd examples/snapchat-architecture
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate          # Windows: .venv\\Scripts\\activate
+pip install boto3
+
+python3 simulate.py                # full demo
+python3 simulate.py --reset        # tear down then re-run
+python3 simulate.py --teardown     # clean up
+
+# ── What the script creates ───────────────────────────────────────
+#  EKS cluster      snap-demo-cluster
+#  S3 bucket        snap-media-demo
+#  DynamoDB         snap-mcs-messages   (message delivery state)
+#  DynamoDB         snap-snap-metadata  (per-snap info + CDN URL)
+#  DynamoDB         snap-friend-graph   (social graph cache)
+#  ElastiCache      snap-friend-cache   (Redis — friend lookups)
+#  CloudFront       ETYCGNLM….cloudfront.net  (CDN → S3 origin)
+#  Lambda x4        snap-media-service, snap-mcs,
+#                   snap-friend-graph, snap-snapdb
+
+# ── What the script simulates ─────────────────────────────────────
+#  alice → bob    DELIVERED → OPENED   (friends: allowed)
+#  bob   → diana  DELIVERED → OPENED   (friends: allowed)
+#  charlie → diana                     (not friends: blocked)
+#  alice → eve                         (not friends: blocked)
+
+# ── Inspect afterwards ────────────────────────────────────────────
+aws dynamodb scan --table-name snap-mcs-messages \\
   --endpoint-url http://localhost:4566
-
-# 2. DynamoDB tables (MCS message state + Snap DB metadata)
-#    Production: 400TB+, growing 2B+ rows/month, on-demand billing
-aws dynamodb create-table --table-name mcs-messages \\
-  --attribute-definitions AttributeName=messageId,AttributeType=S \\
-  --key-schema AttributeName=messageId,KeyType=HASH \\
-  --billing-mode PAY_PER_REQUEST \\
-  --endpoint-url http://localhost:4566
-
-aws dynamodb create-table --table-name snap-metadata \\
-  --attribute-definitions AttributeName=snapId,AttributeType=S \\
-  --key-schema AttributeName=snapId,KeyType=HASH \\
-  --billing-mode PAY_PER_REQUEST \\
-  --endpoint-url http://localhost:4566
-
-# 3. S3 bucket for media blobs (CloudFront origin)
-aws s3 mb s3://snap-media --endpoint-url http://localhost:4566
-
-# 4. ElastiCache cluster (Friend Graph — 900+ nodes in prod)
-aws elasticache create-cache-cluster \\
-  --cache-cluster-id snap-friend-graph \\
-  --cache-node-type cache.r6g.large \\
-  --engine redis --num-cache-nodes 1 \\
-  --endpoint-url http://localhost:4566
-
-# 5. Simulate a Snap send: media to S3 + metadata to DynamoDB
-aws s3 cp ./snap.jpg s3://snap-media/snaps/snap-001.jpg \\
-  --endpoint-url http://localhost:4566
-
-aws dynamodb put-item --table-name snap-metadata \\
-  --item '{"snapId":{"S":"snap-001"},"from":{"S":"alice"},"to":{"S":"bob"},"mediaKey":{"S":"snaps/snap-001.jpg"},"ttl":{"N":"1798000000"}}' \\
+aws s3 ls s3://snap-media-demo/snaps/ \\
   --endpoint-url http://localhost:4566`,
     learnMore: "https://aws.amazon.com/video/watch/a8aefa9c875/",
   },
@@ -187,6 +177,7 @@ const AWS_ICONS: Record<string, string> = {
   dynamo:    "/svg/Database/DynamoDB.svg",
   s3:        "/svg/Storage/Simple-Storage-Service.svg",
   cf:        "/svg/Networking-Content-Delivery/CloudFront.svg",
+  mobile:    "/svg/Front-End-Web-Mobile/Device-Farm.svg",
   apigw:     "/svg/App-Integration/API-Gateway.svg",
   eb:        "/svg/App-Integration/EventBridge.svg",
   kinesis:   "/svg/Analytics/Kinesis-Data-Streams.svg",
@@ -225,117 +216,187 @@ function _iconKey(id: string): string {
     "lam-a": "lambda", "lam-b": "lambda",
     glue: "glue",
     kin: "kinesis",
+    // Snapchat pattern nodes
+    gw: "eks", media: "ecs", mcs: "ecs", fg: "ecs", snapdb: "ecs",
+    mobile: "",  // text-only, no AWS icon for client devices
   };
   return aliases[stripped] ?? stripped.replace(/\d+$/, "");
 }
 
-function FlowDiagram({ services, edges, groups }: {
-  services: ServiceNode[];
-  edges:    FlowEdge[];
-  groups?:  DiagramGroup[];
+function FlowDiagram({ services, edges, groups, accentColor = "#7dd3fc" }: {
+  services:     ServiceNode[];
+  edges:        FlowEdge[];
+  groups?:      DiagramGroup[];
+  accentColor?: string;
 }) {
-  const COL_W = 200, ROW_H = 105, NODE_W = 160, NODE_H = 68, ICON = 32;
-  const PAD   = 16;
+  const COL_W = 210, ROW_H = 115, NODE_W = 168, NODE_H = 72, ICON = 34;
+  const PAD   = 36;
 
   const maxCol = Math.max(...services.map(s => s.col));
   const maxRow = Math.max(...services.map(s => s.row));
-  const svgW   = (maxCol + 1) * COL_W + PAD * 2;
-  const svgH   = (maxRow + 1) * ROW_H + PAD * 2;
+  const hasBackward = edges.some(e => {
+    const a = services.find(s => s.id === e.from);
+    const b = services.find(s => s.id === e.to);
+    return a && b && a.col > b.col;
+  });
+  const svgW   = (maxCol + 1) * COL_W + NODE_W + PAD * 2;
+  // Extra bottom padding when backward arcs route below the last row
+  const svgH   = (maxRow + 1) * ROW_H + PAD * 2 + (hasBackward ? 80 : 0);
 
-  // Explicit grid position for each node
-  const pos: Record<string, { x: number; y: number }> = {};
+  const pos: Record<string, { x: number; y: number; col: number; row: number }> = {};
   for (const s of services) {
-    pos[s.id] = { x: PAD + s.col * COL_W, y: PAD + s.row * ROW_H };
+    pos[s.id] = { x: PAD + s.col * COL_W, y: PAD + s.row * ROW_H, col: s.col, row: s.row };
   }
 
-  // Unique marker id per diagram to avoid cross-diagram collision
-  const markerId = `arr-${services.map(s => s.id).join("")}`.slice(0, 40);
+  const markerId    = `arr-${services.map(s => s.id).join("").slice(0, 30)}`;
+  const markerIdRev = `arrrev-${services.map(s => s.id).join("").slice(0, 28)}`;
 
   return (
     <svg width={svgW} height={svgH} style={{ display: "block", minWidth: svgW }}>
       <defs>
-        <marker id={markerId} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-          <path d="M0,0 L0,8 L8,4 z" fill="#6b7280" />
+        {/* Forward arrow (right / down) */}
+        <marker id={markerId} markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+          <path d="M0,1 L0,9 L9,5 z" fill={accentColor} />
         </marker>
+        {/* Reverse arrow (left / up — for backward edges) */}
+        <marker id={markerIdRev} markerWidth="10" markerHeight="10" refX="1" refY="5" orient="auto">
+          <path d="M9,1 L9,9 L0,5 z" fill={accentColor + "99"} />
+        </marker>
+        {/* Glow filter for nodes */}
+        <filter id="node-glow" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="3" result="blur" />
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
       </defs>
 
-      {/* Group boundaries — drawn first so everything sits on top */}
+      {/* ── Group boundaries ── */}
       {(groups ?? []).map((g, gi) => {
-        const GRP_PAD = 12;
+        const GRP_PAD = 14;
         const x = PAD + g.cols[0] * COL_W - GRP_PAD;
         const y = PAD + g.rows[0] * ROW_H - GRP_PAD;
-        const w = (g.cols[1] - g.cols[0] + 1) * COL_W + NODE_W + GRP_PAD * 2;
-        const h = (g.rows[1] - g.rows[0] + 1) * ROW_H + NODE_H - (ROW_H - NODE_H) + GRP_PAD * 2;
+        // Fixed formula: only span to the RIGHT edge of cols[1], not one column beyond
+        const w = (g.cols[1] - g.cols[0]) * COL_W + NODE_W + GRP_PAD * 2;
+        const h = (g.rows[1] - g.rows[0]) * ROW_H + NODE_H + GRP_PAD * 2;
         return (
           <g key={gi}>
-            <rect x={x} y={y} width={w} height={h} rx="14"
-              fill={g.color + "08"} stroke={g.color + "50"}
-              strokeWidth="1.5" strokeDasharray="8 4" />
-            <rect x={x + 10} y={y - 9} width={g.label.length * 7 + 16} height={18} rx="4"
-              fill="#0f172a" />
-            <text x={x + 18} y={y + 4}
-              fontSize="10" fontWeight="700" fill={g.color}>{g.label}</text>
+            {/* Subtle fill */}
+            <rect x={x} y={y} width={w} height={h} rx="16"
+              fill={g.color + "0d"} stroke={g.color + "60"}
+              strokeWidth="1.5" strokeDasharray="10 5" />
+            {/* Label pill */}
+            <rect x={x + 12} y={y - 11} width={g.label.length * 6.8 + 18} height={22} rx="5"
+              fill="#0f172a" stroke={g.color + "50"} strokeWidth="1" />
+            <text x={x + 21} y={y + 5}
+              fontSize="10" fontWeight="800" fill={g.color} letterSpacing="0.04em">{g.label}</text>
           </g>
         );
       })}
 
-      {/* Edges — drawn behind nodes */}
+      {/* ── Edges — drawn behind nodes ── */}
       {edges.map(e => {
         const a = pos[e.from], b = pos[e.to];
         if (!a || !b || e.from === e.to) return null;
-        const ax = a.x + NODE_W, ay = a.y + NODE_H / 2;
-        const bx = b.x,         by = b.y + NODE_H / 2;
-        // Use a gentle bezier — horizontal control points
-        const cp1x = ax + (bx - ax) * 0.5, cp1y = ay;
-        const cp2x = ax + (bx - ax) * 0.5, cp2y = by;
-        const midX = (ax + bx) / 2;
-        const midY = (ay + by) / 2 - 8;
+
+        const sameCol = a.col === b.col;
+        const goingLeft = a.col > b.col;
+
+        let ax: number, ay: number, bx: number, by: number;
+        let d: string;
+        let midX: number, midY: number;
+
+        if (sameCol) {
+          // Vertical edge: center-bottom → center-top
+          ax = a.x + NODE_W / 2; ay = a.y + NODE_H;
+          bx = b.x + NODE_W / 2; by = b.y;
+          const cp1x = ax, cp1y = ay + (by - ay) * 0.4;
+          const cp2x = bx, cp2y = ay + (by - ay) * 0.6;
+          d = `M${ax},${ay} C${cp1x},${cp1y} ${cp2x},${cp2y} ${bx},${by}`;
+          midX = (ax + bx) / 2 + 20;
+          midY = (ay + by) / 2;
+        } else if (goingLeft) {
+          // Backward (right→left): route BELOW nodes so label never overlaps group header
+          ax = a.x;            ay = a.y + NODE_H;
+          bx = b.x + NODE_W;   by = b.y + NODE_H;
+          const arcH = Math.max(55, Math.abs(a.col - b.col) * 32);
+          const botY = Math.max(ay, by) + arcH;
+          const cp1x = ax + (bx - ax) * 0.15, cp1y = botY;
+          const cp2x = ax + (bx - ax) * 0.85, cp2y = botY;
+          d = `M${ax},${ay} C${cp1x},${cp1y} ${cp2x},${cp2y} ${bx},${by}`;
+          midX = (ax + bx) / 2;
+          midY = botY - 8;
+        } else {
+          // Normal left→right
+          ax = a.x + NODE_W; ay = a.y + NODE_H / 2;
+          bx = b.x;          by = b.y + NODE_H / 2;
+          const dx = bx - ax;
+          const cp1x = ax + dx * 0.45, cp1y = ay;
+          const cp2x = ax + dx * 0.55, cp2y = by;
+          d = `M${ax},${ay} C${cp1x},${cp1y} ${cp2x},${cp2y} ${bx},${by}`;
+          midX = (ax + bx) / 2;
+          // Push label below the line when going right on same row, above otherwise
+          midY = ay === by ? ay + 14 : (ay + by) / 2 - 10;
+        }
+
+        const marker = goingLeft
+          ? `url(#${markerIdRev})`
+          : `url(#${markerId})`;
+        const strokeColor = goingLeft ? accentColor + "80" : accentColor;
+        const strokeW     = goingLeft ? "1.5" : "2";
+
         return (
           <g key={`${e.from}→${e.to}`}>
-            <path d={`M${ax},${ay} C${cp1x},${cp1y} ${cp2x},${cp2y} ${bx},${by}`}
-              stroke="#4b5563" strokeWidth="1.5" fill="none" strokeDasharray="6 3"
-              markerEnd={`url(#${markerId})`} />
+            {/* Glow layer */}
+            <path d={d} stroke={accentColor} strokeWidth="5" fill="none"
+              opacity="0.12" strokeLinecap="round" />
+            {/* Main arrow */}
+            <path d={d} stroke={strokeColor} strokeWidth={strokeW} fill="none"
+              strokeLinecap="round" markerEnd={marker} />
             {e.label && (
-              <>
+              <g>
                 <rect
-                  x={midX - e.label.length * 2.9} y={midY - 8}
-                  width={e.label.length * 5.8}    height={13} rx="3"
-                  fill="#111827" fillOpacity="0.9" />
-                <text x={midX} y={midY}
-                  fontSize="8" fill="#9ca3af" textAnchor="middle">{e.label}</text>
-              </>
+                  x={midX - e.label.length * 3.1 - 4} y={midY - 9}
+                  width={e.label.length * 6.2 + 8}    height={15} rx="4"
+                  fill="#0d1117" fillOpacity="0.92" stroke={accentColor + "30"} strokeWidth="1" />
+                <text x={midX} y={midY + 2}
+                  fontSize="9" fontWeight="600" fill={accentColor + "cc"} textAnchor="middle">
+                  {e.label}
+                </text>
+              </g>
             )}
           </g>
         );
       })}
 
-      {/* Nodes */}
+      {/* ── Nodes ── */}
       {services.map(s => {
         const p = pos[s.id];
         if (!p) return null;
         const iconSrc = AWS_ICONS[_iconKey(s.id)] ?? null;
-        const hasIcon = !!iconSrc;
+        const hasIcon = !!iconSrc && iconSrc !== "";
         const iconX   = p.x + 10;
         const iconY   = p.y + (NODE_H - ICON) / 2;
         const textX   = hasIcon ? p.x + 10 + ICON + 8 : p.x + NODE_W / 2;
         const anchor  = hasIcon ? "start" : "middle";
         const textY   = p.y + NODE_H / 2 + 4;
-        // Wrap long labels: split at space for two-line render
         const words   = s.label.split(" ");
         const line1   = words.slice(0, 2).join(" ");
         const line2   = words.slice(2).join(" ");
         return (
           <g key={s.id}>
+            {/* Node glow */}
+            <rect x={p.x - 1} y={p.y - 1} width={NODE_W + 2} height={NODE_H + 2} rx="11"
+              fill="none" stroke={s.color + "40"} strokeWidth="4" />
+            {/* Node body */}
             <rect x={p.x} y={p.y} width={NODE_W} height={NODE_H} rx="10"
-              fill={s.color + "18"} stroke={s.color + "70"} strokeWidth="1.5" />
+              fill={s.color + "1a"} stroke={s.color + "90"} strokeWidth="1.5" />
             {hasIcon && (
               <image href={iconSrc} x={iconX} y={iconY} width={ICON} height={ICON} />
             )}
             <text x={textX} y={line2 ? textY - 7 : textY}
-              fontSize="10" fontWeight="700" fill={s.color} textAnchor={anchor}>{line1}</text>
+              fontSize="11" fontWeight="700" fill={s.color} textAnchor={anchor}>{line1}</text>
             {line2 && (
-              <text x={textX} y={textY + 5}
-                fontSize="9" fill={s.color + "cc"} textAnchor={anchor}>{line2}</text>
+              <text x={textX} y={textY + 6}
+                fontSize="9" fill={s.color + "bb"} textAnchor={anchor}>{line2}</text>
             )}
           </g>
         );
@@ -425,7 +486,12 @@ function DetailPanel({ pattern }: { pattern: ArchPattern }) {
           <div>
             {/* SVG flow diagram */}
             <div style={{ background: "var(--bg-elevated)", borderRadius: 10, padding: "16px", marginBottom: 20, overflowX: "auto" }}>
-              <FlowDiagram services={pattern.services} edges={pattern.edges} groups={pattern.groups} />
+              <FlowDiagram
+                services={pattern.services}
+                edges={pattern.edges}
+                groups={pattern.groups}
+                accentColor={pattern.arrowColor ?? pattern.tagColor}
+              />
             </div>
 
             {/* Why it works */}
