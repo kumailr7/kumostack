@@ -16,17 +16,6 @@ const ArchitectureTab = dynamic(
   }
 );
 
-const TopologyTab = dynamic(
-  () => import("../components/TopologyTab"),
-  {
-    ssr: false,
-    loading: () => (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "60vh", color: "var(--text-faint)", fontSize: 13 }}>
-        Loading topology…
-      </div>
-    ),
-  }
-);
 
 const ArchitectureGallery = dynamic(
   () => import("../components/ArchitectureGallery"),
@@ -192,7 +181,6 @@ const NAV_ITEMS = [
   { id: "Chaos",            label: "Chaos Engineering", icon: <IconChaos />, highlight: true },
   { id: "LoadTest",         label: "Load Testing",      icon: <IconK6 />,    highlight: true },
   { id: "Traces",           label: "X-Ray Traces",      icon: <IconXray /> },
-  { id: "Topology",         label: "Resource Graph",    icon: <IconTopology /> },
   { id: "IAMSimulator",    label: "IAM Simulator",     icon: <IconIAM /> },
   { id: "CostExplorer",   label: "Cost Explorer",     icon: <IconCost /> },
   { id: "ArchGallery",    label: "Large Scale Systems", icon: <IconDiagram /> },
@@ -4531,13 +4519,12 @@ export default function Dashboard() {
         activeAccount={activeAccount}
         setActiveAccount={setActiveAccount}
       />
-      <main className={`app-main${["Diagrams","Stackport","Topology","ArchGallery"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
+      <main className={`app-main${["Diagrams","Stackport","ArchGallery"].includes(activeTab) ? " app-main--fullscreen" : ""}`}>
         {activeTab === "Overview"       && <OverviewTab connected={connected} version={version} serviceStatus={serviceStatus} />}
         {activeTab === "Organizations"  && <OrganizationsTab activeAccount={activeAccount} setActiveAccount={setActiveAccount} />}
         {activeTab === "Chaos"          && <ChaosTab connected={connected} />}
         {activeTab === "LoadTest"       && <K6LoadTestTab />}
         {activeTab === "Traces"         && <XRayTab />}
-        {activeTab === "Topology"       && <TopologyTab />}
         {activeTab === "IAMSimulator"   && <IamSimulatorTab />}
         {activeTab === "CostExplorer"   && <CostExplorerTab />}
         {activeTab === "ArchGallery"    && <ArchitectureGallery />}
