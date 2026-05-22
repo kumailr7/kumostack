@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
   sync:
@@ -23,15 +25,180 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Sync with upstream
+      - name: Fetch upstream tags and branches
         run: |
           git remote add upstream https://github.com/ministackorg/ministack.git
-          git fetch upstream
+          git fetch upstream --tags
 
-          git checkout main
+      # ── Detect whether a new upstream release exists ──────────────────────
+      - name: Detect new upstream release
+        id: detect
+        run: |
+          # Latest semver tag present anywhere (upstream fetched them all)
+          LATEST_TAG=$(git tag --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -1)
+          echo "upstream_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
-          # Merge upstream changes — allow merge commits since fork has diverged
-          # If there are conflicts this step will fail and alert the owner
-          git merge upstream/main --no-edit
+          # Is that tag's commit already an ancestor of our main?
+          if git merge-base --is-ancestor "$LATEST_TAG" HEAD 2>/dev/null; then
+            echo "already_synced=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "already_synced=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          git push origin main
+      - name: Nothing to do — already at ${{ steps.detect.outputs.upstream_tag }}
+        if: steps.detect.outputs.already_synced == 'true'
+        run: echo "Fork is already up to date with ${{ steps.detect.outputs.upstream_tag }}."
+
+      # ── Attempt the merge on a dedicated branch ───────────────────────────
+      - name: Attempt merge
+        if: steps.detect.outputs.already_synced == 'false'
+        id: merge
+        run: |
+          TAG="${{ steps.detect.outputs.upstream_tag }}"
+          BRANCH="upstream-sync/$TAG"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          git checkout -b "$BRANCH"
+
+          if git merge upstream/main \
+               --no-edit \
+               -m "merge: sync upstream $TAG into kumostack"; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            # Capture conflicting file list before aborting
+            CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "conflict_files<<__EOF__"
+              echo "$CONFLICT_FILES"
+              echo "__EOF__"
+            } >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+
+      # ── Clean merge: push branch and open a review PR ────────────────────
+      - name: Push sync branch
+        if: >
+          steps.detect.outputs.already_synced == 'false' &&
+          steps.merge.outputs.success == 'true'
+        run: git push origin "${{ steps.merge.outputs.branch }}"
+
+      - name: Open review PR (clean merge)
+        if: >
+          steps.detect.outputs.already_synced == 'false' &&
+          steps.merge.outputs.success == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag    = '${{ steps.detect.outputs.upstream_tag }}';
+            const branch = '${{ steps.merge.outputs.branch }}';
+
+            // Skip if a PR for this branch already exists
+            const existing = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              head:  `${context.repo.owner}:${branch}`,
+              state: 'open',
+            });
+            if (existing.data.length > 0) {
+              console.log('PR already exists — skipping.');
+              return;
+            }
+
+            await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `⬆️ Sync upstream ${tag}`,
+              head:  branch,
+              base:  'main',
+              body: [
+                `## Upstream sync — ${tag}`,
+                '',
+                `Upstream released **${tag}**. This PR was created automatically by the sync workflow.`,
+                'The merge completed **without conflicts** — review the diff and merge when ready.',
+                '',
+                '### Checklist',
+                '- [ ] Review changed files for kumostack-specific renames',
+                '- [ ] Check that new services use `kumostack/` paths, not `ministack/`',
+                '- [ ] Merge this PR into `main`',
+              ].join('\n'),
+            });
+
+      # ── Conflict: open/update a GitHub Issue with details ─────────────────
+      - name: Open conflict issue (merge failed)
+        if: >
+          steps.detect.outputs.already_synced == 'false' &&
+          steps.merge.outputs.success == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag   = '${{ steps.detect.outputs.upstream_tag }}';
+            const files = `${{ steps.merge.outputs.conflict_files }}`;
+            const title = `⚠️ Manual merge needed: upstream ${tag}`;
+
+            // Avoid duplicate issues for the same release
+            const existing = await github.rest.issues.listForRepo({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              state:  'open',
+              labels: 'upstream-sync-conflict',
+            });
+            const dupe = existing.data.find(i => i.title === title);
+            if (dupe) {
+              console.log(`Issue already open: #${dupe.number}`);
+              return;
+            }
+
+            // Ensure label exists
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                name:  'upstream-sync-conflict',
+                color: 'e4e669',
+                description: 'Auto-merge from upstream failed due to conflicts',
+              });
+            } catch (_) { /* label already exists */ }
+
+            const fileList = files.trim().split('\n')
+              .filter(Boolean)
+              .map(f => `- \`${f}\``)
+              .join('\n');
+
+            await github.rest.issues.create({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              title,
+              labels: ['upstream-sync-conflict'],
+              body: [
+                `## Upstream ${tag} — merge conflicts detected`,
+                '',
+                `The sync workflow tried to merge **${tag}** from [ministackorg/ministack](https://github.com/ministackorg/ministack) but hit conflicts in the following files:`,
+                '',
+                fileList,
+                '',
+                '## How to resolve',
+                '',
+                '```bash',
+                '# 1. Make sure upstream remote is set',
+                'git remote add upstream https://github.com/ministackorg/ministack.git || true',
+                'git fetch upstream --tags',
+                '',
+                '# 2. Merge and resolve conflicts manually',
+                'git checkout main',
+                `git merge upstream/main`,
+                '# ... fix each conflicted file ...',
+                '# Remember: keep kumostack/ paths, not ministack/',
+                '',
+                '# 3. Commit and push',
+                'git add <resolved-files>',
+                `git commit -m "merge: sync upstream ${tag}"`,
+                'git push origin main',
+                '```',
+                '',
+                `> This issue was opened automatically by the [Sync Upstream workflow](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/sync-upstream.yml).`,
+                '> Close this issue once the merge is done.',
+              ].join('\n'),
+            });
