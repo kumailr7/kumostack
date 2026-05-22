@@ -50,34 +50,38 @@ async function tryFetch<T>(fn: () => Promise<T>): Promise<T | null> {
 }
 
 const TIER_X: Record<string, number> = {
-  security:   80,
+  security:    80,
   cdn:        280,
-  networking: 480,
-  registry:   660,
-  compute:    860,
+  networking: 460,
+  registry:   640,
+  compute:    820,   // Lambda functions
+  eks:       1010,   // EKS own column — keeps it visually separate from Lambda
   storage:    280,   // below CDN column
-  database:   1080,
-  messaging:  1280,
-  secrets:    1080,  // below DATABASE column — renders in bottom row directly under RDS
+  database:  1190,
+  messaging: 1370,
+  secrets:   1190,  // below DATABASE column
 };
 
 export const TIER_LABELS_BY_X: Record<number, string> = {
   80:   "Security",
   280:  "CDN / Edge",
-  480:  "Networking",
-  660:  "Registry",
-  860:  "Compute",
-  1080: "Database",
-  1280: "Messaging",
+  460:  "Networking",
+  640:  "Registry",
+  820:  "Lambda",
+  1010: "EKS",
+  1190: "Database",
+  1370: "Messaging",
 };
 
 // Tiers that render below the main horizontal flow instead of inline with it
 const BOTTOM_TIERS = new Set(["storage", "secrets"]);
 
+// Node card is ~150px tall — GAP must exceed that to prevent overlap
+const NODE_H_APPROX = 150;
+const GAP            = NODE_H_APPROX + 20;  // 170px — 20px breathing room between cards
+
 function layoutNodes(groups: Record<string, ArchNode[]>): ArchNode[] {
-  const GAP      = 130;   // tighter vertical spacing — prevents nodes going off-screen
-  const MAIN_Y   = 260;   // vertical centre of main flow
-  const BOTTOM_Y = 430;   // vertical centre of bottom row (storage / origins)
+  const MAIN_Y = 340;   // vertical centre of main flow
 
   // Split into main-row and bottom-row buckets keyed by x
   const byX = new Map<number, { main: ArchNode[]; bottom: ArchNode[] }>();
@@ -88,15 +92,26 @@ function layoutNodes(groups: Record<string, ArchNode[]>): ArchNode[] {
     byX.get(x)![bucket].push(...nodes);
   }
 
+  // Compute the lowest y of main-row nodes so bottom rows sit below them
+  let maxMainY = MAIN_Y;
+
   const result: ArchNode[] = [];
   for (const [x, { main, bottom }] of byX.entries()) {
     main.forEach((n, i) => {
-      result.push({ ...n, position: { x, y: MAIN_Y + (i - (main.length - 1) / 2) * GAP } });
+      const y = MAIN_Y + (i - (main.length - 1) / 2) * GAP;
+      if (y > maxMainY) maxMainY = y;
+      result.push({ ...n, position: { x, y } });
     });
+  }
+
+  // Bottom rows (storage/secrets) sit 40px below the tallest main column
+  const BOTTOM_Y = maxMainY + NODE_H_APPROX + 40;
+  for (const [x, { bottom }] of byX.entries()) {
     bottom.forEach((n, i) => {
       result.push({ ...n, position: { x, y: BOTTOM_Y + i * GAP } });
     });
   }
+
   return result;
 }
 
@@ -112,7 +127,7 @@ export async function GET() {
   const edges: ArchEdge[] = [];
   const groups: Record<string, ArchNode[]> = {
     security: [], cdn: [], networking: [], registry: [],
-    compute: [], storage: [], database: [], messaging: [], secrets: [],
+    compute: [], eks: [], storage: [], database: [], messaging: [], secrets: [],
   };
   const snsArnToNodeId = new Map<string, string>();
 
@@ -306,6 +321,10 @@ export async function GET() {
         const dynId = `dynamo-${v}`;
         if (groups.database.some(n => n.id === dynId)) edges.push(edge(nid, dynId, "read/write"));
       }
+      if ((k === "BUCKET" || k.endsWith("_BUCKET")) && v) {
+        const s3Id = `s3-${v}`;
+        if (groups.storage.some(n => n.id === s3Id)) edges.push(edge(nid, s3Id, "store"));
+      }
       if ((k.includes("TOPIC") || k.includes("SNS")) && v.startsWith("arn:aws:sns")) {
         const snsDst = snsArnToNodeId.get(v);
         if (snsDst) edges.push(edge(nid, snsDst, "publish"));
@@ -314,6 +333,25 @@ export async function GET() {
         const queueName = v.split("/").pop() ?? "";
         const sqsDst = `sqs-${queueName}`;
         if (groups.messaging.some(n => n.id === sqsDst)) edges.push(edge(nid, sqsDst, "send"));
+      }
+    }
+  }
+
+  // CloudFront → Lambda: when CF's S3 origin is a bucket that a Lambda writes to,
+  // draw CF → Lambda "serves via CDN" so the media delivery path is visible.
+  for (const cfNode of groups.cdn.filter(n => n.data.service === "cloudfront")) {
+    const cfOriginS3Ids = new Set(
+      edges.filter(e => e.source === cfNode.id && e.label === "origin").map(e => e.target)
+    );
+    for (const lambdaNode of groups.compute.filter(n => n.data.service === "lambda")) {
+      const lambdaWritesTo = new Set(
+        edges.filter(e => e.source === lambdaNode.id && e.label === "store").map(e => e.target)
+      );
+      for (const s3Id of lambdaWritesTo) {
+        if (cfOriginS3Ids.has(s3Id)) {
+          edges.push(edge(cfNode.id, lambdaNode.id, "serves via CDN"));
+          break;
+        }
       }
     }
   }
@@ -336,7 +374,7 @@ export async function GET() {
     const cluster = (await tryFetch(() => eks.send(new DescribeClusterCommand({ name: clusterName }))))?.cluster;
     const status = cluster?.status ?? "ACTIVE";
     const eksId = `eks-${clusterName}`;
-    groups.compute.push(node(eksId, clusterName, "eks", status.toLowerCase(), {
+    groups.eks.push(node(eksId, clusterName, "eks", status.toLowerCase(), {
       endpoint: cluster?.endpoint ?? "", version: cluster?.version ?? "",
     }));
     // ALB → EKS: load balancer forwards traffic into the cluster
