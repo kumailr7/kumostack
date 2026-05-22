@@ -34,6 +34,13 @@ const SERVICE_COLOR: Record<string, string> = {
 };
 
 
+const SNAP_DEMO_CMD = `cd examples/snapchat-architecture
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
+pip install boto3
+python3 simulate.py          # run demo
+python3 simulate.py --reset  # re-run clean`;
+
 export default function ArchitectureTab({ connected }: { connected: boolean }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -41,6 +48,8 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [resourceCount, setResourceCount] = useState(0);
+  const [showDemo, setShowDemo] = useState(false);
+  const hasSnapResources = nodes.some(n => (n.data as { label: string }).label?.startsWith("snap-"));
 
   const fetchArchitecture = useCallback(async () => {
     setLoading(true);
@@ -131,6 +140,41 @@ export default function ArchitectureTab({ connected }: { connected: boolean }) {
           </button>
         </div>
       </div>
+
+      {/* Snapchat demo guide — shown when snap resources are detected, or toggled manually */}
+      {(hasSnapResources || showDemo) && (
+        <div style={{ background: "#0d1f12", borderBottom: "1px solid #22c55e30", padding: "10px 20px", display: "flex", gap: 16, alignItems: "flex-start", flexShrink: 0 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: "#22c55e", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                {hasSnapResources ? "Snapchat Demo Running" : "Try the Snapchat Demo"}
+              </span>
+              {hasSnapResources && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 6px #22c55e", display: "inline-block" }} />}
+            </div>
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, maxWidth: 340 }}>
+                {hasSnapResources
+                  ? `${resourceCount} resources live — EKS + Lambda microservices + DynamoDB + S3 + CloudFront. Refresh to watch state change.`
+                  : "Run the included simulation to populate this view with a real Snapchat-like architecture."}
+              </div>
+              <pre style={{ margin: 0, fontSize: 10, background: "#0a120e", border: "1px solid #22c55e20", borderRadius: 6, padding: "8px 12px", color: "#86efac", lineHeight: 1.7, flexShrink: 0 }}>
+                {SNAP_DEMO_CMD}
+              </pre>
+            </div>
+          </div>
+          <button onClick={() => setShowDemo(false)} style={{ background: "none", border: "none", color: "var(--text-faint)", cursor: "pointer", fontSize: 16, padding: 0, flexShrink: 0 }}>×</button>
+        </div>
+      )}
+
+      {/* Show demo button when no snap resources and panel is hidden */}
+      {!hasSnapResources && !showDemo && (
+        <div style={{ borderBottom: "1px solid var(--border)", padding: "6px 20px", background: "var(--bg-elevated)", flexShrink: 0, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 11, color: "var(--text-faint)" }}>Want to see this populated?</span>
+          <button onClick={() => setShowDemo(true)} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 5, border: "1px solid #22c55e40", background: "#22c55e10", color: "#22c55e", cursor: "pointer", fontWeight: 600 }}>
+            Try Snapchat Demo ↗
+          </button>
+        </div>
+      )}
 
       {/* Canvas */}
       <div style={{ flex: 1, position: "relative" }}>

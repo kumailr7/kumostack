@@ -75,9 +75,9 @@ export const TIER_LABELS_BY_X: Record<number, string> = {
 const BOTTOM_TIERS = new Set(["storage", "secrets"]);
 
 function layoutNodes(groups: Record<string, ArchNode[]>): ArchNode[] {
-  const GAP      = 240;
-  const MAIN_Y   = 380;   // vertical centre of main flow
-  const BOTTOM_Y = 720;   // vertical centre of bottom row (storage / origins)
+  const GAP      = 130;   // tighter vertical spacing — prevents nodes going off-screen
+  const MAIN_Y   = 260;   // vertical centre of main flow
+  const BOTTOM_Y = 430;   // vertical centre of bottom row (storage / origins)
 
   // Split into main-row and bottom-row buckets keyed by x
   const byX = new Map<number, { main: ArchNode[]; bottom: ArchNode[] }>();
