@@ -316,7 +316,7 @@ def test_athena_mixed_glue_and_s3_uri(athena, glue, monkeypatch, tmp_path):
 
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
     req = urllib.request.Request(
-        f"{endpoint}/_ministack/config",
+        f"{endpoint}/_kumostack/config",
         data=_json.dumps({"athena.ATHENA_DATA_DIR": str(tmp_path)}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
