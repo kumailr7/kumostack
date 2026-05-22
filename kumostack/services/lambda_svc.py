@@ -76,7 +76,7 @@ def _emit_lambda_metrics(function_name: str, duration_ms: float,
     Errors are swallowed; instrumentation must never break the primary call.
     """
     try:
-        from ministack.services import cloudwatch as _cw
+        from kumostack.services import cloudwatch as _cw
     except Exception:
         return
     dims = {"FunctionName": function_name}

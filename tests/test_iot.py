@@ -437,7 +437,7 @@ def test_iot_account_isolation():
 import asyncio
 import struct
 
-from ministack.services.iot import (
+from kumostack.services.iot import (
     PKT_CONNACK,
     PKT_CONNECT,
     PKT_DISCONNECT,
@@ -1625,7 +1625,7 @@ def test_retransmit_sends_dup_flag():
             if now - m.sent_at >= _RETRANSMIT_INTERVAL_SECONDS:
                 m.retransmit_count += 1
                 m.sent_at = now
-                from ministack.services.iot import _make_publish
+                from kumostack.services.iot import _make_publish
                 await session.send_bytes(
                     _make_publish(m.topic, m.payload, qos=1, packet_id=p, dup=True)
                 )

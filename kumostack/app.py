@@ -843,7 +843,7 @@ def _handle_iot_ca_request(method: str, path: str):
     if path != "/_ministack/iot/ca.pem" or method != "GET":
         return None
     try:
-        from ministack.services import iot
+        from kumostack.services import iot
 
         cert_pem = iot.get_ca_cert_pem()
     except RuntimeError as e:

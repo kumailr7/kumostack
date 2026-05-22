@@ -21,8 +21,8 @@ import socket
 import threading
 import time
 
-from ministack.core.persistence import load_state
-from ministack.core.responses import (
+from kumostack.core.persistence import load_state
+from kumostack.core.responses import (
     AccountScopedDict,
     apply_image_prefix,
     error_response_json,
@@ -172,13 +172,13 @@ def _capture_v2_admin_password(env, container):
 
 
 def _sync_dags_from_s3(env, docker_client, container):
-    """Copy DAG files from ministack S3 into the Airflow container's dags folder.
+    """Copy DAG files from kumostack S3 into the Airflow container's dags folder.
 
     Reads directly from the S3 service's internal ``_buckets`` store rather
     than going through HTTP — same process, same account context, much faster.
     """
     try:
-        from ministack.services import s3 as s3_svc
+        from kumostack.services import s3 as s3_svc
         bucket_arn = env.get("SourceBucketArn", "")
         bucket_name = bucket_arn.split(":")[-1] if bucket_arn else ""
         dag_path = env.get("DagS3Path", "dags/")

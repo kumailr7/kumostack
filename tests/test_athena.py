@@ -307,7 +307,7 @@ def test_athena_mixed_glue_and_s3_uri(athena, glue, monkeypatch, tmp_path):
     bucket_name = "athena-results"
     db_name = "test_db_athena_glue_s3"
 
-    from ministack.services import s3 as s3mod
+    from kumostack.services import s3 as s3mod
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
 

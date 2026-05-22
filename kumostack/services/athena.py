@@ -366,7 +366,7 @@ async def _run_duckdb(query, database):
 
 
 async def _rewrite_data_paths(query, database):
-    from ministack.services import glue as glue_svc
+    from kumostack.services import glue as glue_svc
 
     # Skip identifiers that look like function calls (read_csv('s3://...'))
     # or already contain a path separator. Restrict to bare table references
@@ -444,7 +444,7 @@ def _rewrite_s3_paths(query):
 
 
 async def _save_query_results(query_id):
-    from ministack.services import s3 as s3_svc
+    from kumostack.services import s3 as s3_svc
     execution = _executions.get(query_id)
     results = execution.get('_results', [])
 

@@ -1099,7 +1099,7 @@ def _dispatch_to_sns(arn, payload):
 
 
 def _dispatch_to_stepfunctions(arn, payload):
-    from ministack.services import stepfunctions as _sfn
+    from kumostack.services import stepfunctions as _sfn
 
     # Accept all three SFN target ARN shapes EventBridge supports in real
     # AWS: base state machine, published version, and alias. The resolver

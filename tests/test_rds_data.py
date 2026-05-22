@@ -366,7 +366,7 @@ def test_rds_data_stub_drop_user(rds, sm):
 
 def test_rds_data_real_endpoint_connection_failure_is_transient(monkeypatch):
     """Endpoint-backed clusters must not acknowledge writes through stub mode."""
-    from ministack.services import rds_data
+    from kumostack.services import rds_data
 
     rds_data.reset()
     resource_arn = f"arn:aws:rds:{REGION}:{ACCOUNT_ID}:cluster:real-cluster"
@@ -399,7 +399,7 @@ def test_rds_data_real_endpoint_connection_failure_is_transient(monkeypatch):
 
 def test_rds_data_non_container_endpoint_keeps_stub_mode(monkeypatch):
     """Control-plane-only instances still use the lightweight SQL stub."""
-    from ministack.services import rds_data
+    from kumostack.services import rds_data
 
     rds_data.reset()
     resource_arn = f"arn:aws:rds:{REGION}:{ACCOUNT_ID}:cluster:stub-cluster"
@@ -424,7 +424,7 @@ def test_rds_data_non_container_endpoint_keeps_stub_mode(monkeypatch):
 
 def test_rds_data_lock_wait_timeout_is_not_connection_error():
     """MySQL lock wait timeout is a SQL error, not endpoint unavailability."""
-    from ministack.services import rds_data
+    from kumostack.services import rds_data
 
     assert not rds_data._is_connection_error(
         Exception("(1205, 'Lock wait timeout exceeded; try restarting transaction')")
@@ -433,7 +433,7 @@ def test_rds_data_lock_wait_timeout_is_not_connection_error():
 
 def test_rds_cluster_status_tracks_member_readiness():
     """Parent clusters remain creating until their member instance is available."""
-    from ministack.services import rds
+    from kumostack.services import rds
 
     cluster_id = "readiness-cluster"
     instance_id = "readiness-instance"
@@ -463,7 +463,7 @@ def test_rds_cluster_status_tracks_member_readiness():
 
 def test_rds_cluster_endpoints_sync_to_backing_instance():
     """Aurora cluster endpoints track the registered local writer instance."""
-    from ministack.services import rds
+    from kumostack.services import rds
 
     cluster_id = "endpoint-sync-cluster"
     instance_id = "endpoint-sync-instance"

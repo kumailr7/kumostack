@@ -40,8 +40,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
-from ministack.core.persistence import load_state
-from ministack.core.responses import (
+from kumostack.core.persistence import load_state
+from kumostack.core.responses import (
     AccountScopedDict,
     _request_account_id,
     error_response_json,
@@ -50,7 +50,7 @@ from ministack.core.responses import (
     json_response,
     new_uuid,
 )
-from ministack.core.x509_utils import (
+from kumostack.core.x509_utils import (
     generate_ca,
     get_certificate_id,
     sign_leaf_certificate,

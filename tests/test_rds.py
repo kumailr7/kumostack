@@ -929,7 +929,7 @@ def test_rds_mysql_master_user_privilege_grants(monkeypatch):
     import sys
     import types
 
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     calls = []
 

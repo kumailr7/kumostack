@@ -18,12 +18,12 @@ import json
 import logging
 from urllib.parse import unquote
 
-from ministack.core.responses import (
+from kumostack.core.responses import (
     error_response_json,
     get_account_id,
     json_response,
 )
-from ministack.services import iot as _iot_module
+from kumostack.services import iot as _iot_module
 
 logger = logging.getLogger("iot_data")
 

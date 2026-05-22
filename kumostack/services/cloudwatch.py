@@ -348,7 +348,7 @@ def _dispatch_alarm_actions(alarm, old_state, new_state, reason):
     if not sns_arns:
         return
     try:
-        from ministack.services import sns as _sns
+        from kumostack.services import sns as _sns
     except Exception:
         logger.debug("alarm actions: SNS module unavailable", exc_info=True)
         return

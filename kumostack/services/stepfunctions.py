@@ -4606,7 +4606,7 @@ def _dispatch_aws_sdk_lambda_rest(service_info, service_name, action, input_data
     """Dispatch the Lambda REST aws-sdk calls needed by Step Functions workflows."""
     from urllib.parse import quote
 
-    from ministack import app
+    from kumostack import app
 
     service_key = service_info.get("service_key", service_name)
     handler = app.SERVICE_HANDLERS.get(service_key)
