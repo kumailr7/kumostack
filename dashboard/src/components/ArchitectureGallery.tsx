@@ -217,7 +217,7 @@ function _iconKey(id: string): string {
     glue: "glue",
     kin: "kinesis",
     // Snapchat pattern nodes
-    gw: "eks", media: "ecs", mcs: "ecs", fg: "ecs", snapdb: "ecs",
+    gw: "eks", media: "eks", mcs: "eks", fg: "eks", snapdb: "eks",
     mobile: "",  // text-only, no AWS icon for client devices
   };
   return aliases[stripped] ?? stripped.replace(/\d+$/, "");
