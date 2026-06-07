@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
   pull-requests: write
 
 jobs:
@@ -126,79 +125,43 @@ jobs:
               ].join('\n'),
             });
 
-      # ── Conflict: open/update a GitHub Issue with details ─────────────────
-      - name: Open conflict issue (merge failed)
+      # ── Conflict: log details to the workflow run summary ─────────────────
+      # Issues are disabled on this fork, so we can't open a tracking issue —
+      # write the report to $GITHUB_STEP_SUMMARY instead, which shows up
+      # directly on the workflow run page without needing any extra permissions.
+      - name: Report merge conflict (merge failed)
         if: >
           steps.detect.outputs.already_synced == 'false' &&
           steps.merge.outputs.success == 'false'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const tag   = '${{ steps.detect.outputs.upstream_tag }}';
-            const files = `${{ steps.merge.outputs.conflict_files }}`;
-            const title = `⚠️ Manual merge needed: upstream ${tag}`;
+        run: |
+          TAG="${{ steps.detect.outputs.upstream_tag }}"
+          FILES="${{ steps.merge.outputs.conflict_files }}"
 
-            // Avoid duplicate issues for the same release
-            const existing = await github.rest.issues.listForRepo({
-              owner:  context.repo.owner,
-              repo:   context.repo.repo,
-              state:  'open',
-              labels: 'upstream-sync-conflict',
-            });
-            const dupe = existing.data.find(i => i.title === title);
-            if (dupe) {
-              console.log(`Issue already open: #${dupe.number}`);
-              return;
-            }
+          {
+            echo "## ⚠️ Manual merge needed: upstream $TAG"
+            echo ""
+            echo "The sync workflow tried to merge **$TAG** from [ministackorg/ministack](https://github.com/ministackorg/ministack) but hit conflicts in the following files:"
+            echo ""
+            echo "$FILES" | sed '/^$/d; s/^/- \`/; s/$/\`/'
+            echo ""
+            echo "## How to resolve"
+            echo ""
+            echo '```bash'
+            echo "# 1. Make sure upstream remote is set"
+            echo "git remote add upstream https://github.com/ministackorg/ministack.git || true"
+            echo "git fetch upstream --tags"
+            echo ""
+            echo "# 2. Merge and resolve conflicts manually"
+            echo "git checkout main"
+            echo "git merge upstream/main"
+            echo "# ... fix each conflicted file ..."
+            echo "# Remember: keep kumostack/ paths, not ministack/"
+            echo ""
+            echo "# 3. Commit and push"
+            echo "git add <resolved-files>"
+            echo "git commit -m \"merge: sync upstream $TAG\""
+            echo "git push origin main"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-            // Ensure label exists
-            try {
-              await github.rest.issues.createLabel({
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                name:  'upstream-sync-conflict',
-                color: 'e4e669',
-                description: 'Auto-merge from upstream failed due to conflicts',
-              });
-            } catch (_) { /* label already exists */ }
-
-            const fileList = files.trim().split('\n')
-              .filter(Boolean)
-              .map(f => `- \`${f}\``)
-              .join('\n');
-
-            await github.rest.issues.create({
-              owner:  context.repo.owner,
-              repo:   context.repo.repo,
-              title,
-              labels: ['upstream-sync-conflict'],
-              body: [
-                `## Upstream ${tag} — merge conflicts detected`,
-                '',
-                `The sync workflow tried to merge **${tag}** from [ministackorg/ministack](https://github.com/ministackorg/ministack) but hit conflicts in the following files:`,
-                '',
-                fileList,
-                '',
-                '## How to resolve',
-                '',
-                '```bash',
-                '# 1. Make sure upstream remote is set',
-                'git remote add upstream https://github.com/ministackorg/ministack.git || true',
-                'git fetch upstream --tags',
-                '',
-                '# 2. Merge and resolve conflicts manually',
-                'git checkout main',
-                `git merge upstream/main`,
-                '# ... fix each conflicted file ...',
-                '# Remember: keep kumostack/ paths, not ministack/',
-                '',
-                '# 3. Commit and push',
-                'git add <resolved-files>',
-                `git commit -m "merge: sync upstream ${tag}"`,
-                'git push origin main',
-                '```',
-                '',
-                `> This issue was opened automatically by the [Sync Upstream workflow](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/sync-upstream.yml).`,
-                '> Close this issue once the merge is done.',
-              ].join('\n'),
-            });
+          echo "::warning title=Upstream sync conflict::Manual merge needed for upstream $TAG — see the job summary for the conflicting files and resolution steps."
