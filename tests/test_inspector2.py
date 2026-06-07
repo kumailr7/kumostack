@@ -120,7 +120,7 @@ class TestSearchVulnerabilities:
 
 class TestPersistence:
     def test_state_methods_exist(self):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         assert hasattr(_inspector2, "get_state")
         assert hasattr(_inspector2, "restore_state")
@@ -128,7 +128,7 @@ class TestPersistence:
         assert hasattr(_inspector2, "handle_request")
 
     def test_reset_clears_state(self):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         state = _inspector2.get_state()
@@ -136,7 +136,7 @@ class TestPersistence:
             assert key in state
 
     def test_get_state_returns_expected_keys(self):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         state = _inspector2.get_state()
@@ -144,7 +144,7 @@ class TestPersistence:
             assert key in state
 
     def test_restore_state_preserves_config(self):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         state = _inspector2.get_state()
@@ -371,7 +371,7 @@ class TestEndToEndScan:
         assert len(agg.get("responses", [])) > 0
 
     def test_full_stub_scan_lambda(self, inspector2):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         inspector2.enable(resourceTypes=["LAMBDA"])
@@ -387,7 +387,7 @@ class TestEndToEndScan:
         assert "AWS_LAMBDA_FUNCTION" in resource_types
 
     def test_full_stub_scan_ec2(self, inspector2):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         inspector2.enable(resourceTypes=["EC2"])
@@ -403,7 +403,7 @@ class TestEndToEndScan:
         assert "AWS_EC2_INSTANCE" in resource_types
 
     def test_scan_deterministic_across_calls(self, inspector2):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         inspector2.enable(resourceTypes=["ECR"])
@@ -432,7 +432,7 @@ class TestMultitenancy:
         )
 
     def test_findings_isolated_by_account(self):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         client_a = self._client("111111111111")
@@ -452,7 +452,7 @@ class TestMultitenancy:
         assert findings_b[0]["awsAccountId"] == "222222222222"
 
     def test_filters_isolated_by_account(self):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         client_a = self._client("111111111111")
@@ -470,7 +470,7 @@ class TestMultitenancy:
         assert filters_b[0]["name"] == "acct-b-filter"
 
     def test_tags_isolated_by_account(self):
-        from ministack.services import inspector2 as _inspector2
+        from kumostack.services import inspector2 as _inspector2
 
         _inspector2.reset()
         client_a = self._client("111111111111")
@@ -589,7 +589,7 @@ class TestErrorBoundaries:
 
 
 class TestIntegration:
-    """Inspector2 integration with other ministack services."""
+    """Inspector2 integration with other kumostack services."""
 
     def test_findings_use_actual_account_id(self, inspector2):
         inspector2.enable(resourceTypes=["ECR"])

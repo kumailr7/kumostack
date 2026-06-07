@@ -848,13 +848,13 @@ def test_ec2_flow_log_tags(ec2):
         LogGroupName="/aws/vpc/flowlogs-tags",
         TagSpecifications=[{
             "ResourceType": "flow-log",
-            "Tags": [{"Key": "Project", "Value": "ministack"}],
+            "Tags": [{"Key": "Project", "Value": "kumostack"}],
         }],
     )["FlowLogIds"]
 
     desc = ec2.describe_flow_logs(FlowLogIds=fl_ids)
     tags = {t["Key"]: t["Value"] for t in desc["FlowLogs"][0].get("Tags", [])}
-    assert tags == {"Project": "ministack"}
+    assert tags == {"Project": "kumostack"}
 
     ec2.delete_flow_logs(FlowLogIds=fl_ids)
     tag_resp = ec2.describe_tags(Filters=[{"Name": "resource-id", "Values": fl_ids}])

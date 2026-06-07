@@ -879,7 +879,7 @@ def _build_define_auth_challenge_event(pool_id: str, client_id: str, username: s
         "userPoolId": pool_id,
         "userName": username,
         "callerContext": {
-            "awsSdkVersion": "ministack",
+            "awsSdkVersion": "kumostack",
             "clientId": client_id,
         },
         "request": {
@@ -911,7 +911,7 @@ def _build_create_auth_challenge_event(pool_id: str, client_id: str, username: s
         "userPoolId": pool_id,
         "userName": username,
         "callerContext": {
-            "awsSdkVersion": "ministack",
+            "awsSdkVersion": "kumostack",
             "clientId": client_id,
         },
         "request": {
@@ -946,7 +946,7 @@ def _build_verify_auth_challenge_event(pool_id: str, client_id: str, username: s
         "userPoolId": pool_id,
         "userName": username,
         "callerContext": {
-            "awsSdkVersion": "ministack",
+            "awsSdkVersion": "kumostack",
             "clientId": client_id,
         },
         "request": {
@@ -990,7 +990,7 @@ def _invoke_define_auth_challenge_trigger(pool_id: str, client_id: str, username
     event = _build_define_auth_challenge_event(pool_id, client_id, username, user_attrs, session)
     
     try:
-        from ministack.services import lambda_svc
+        from kumostack.services import lambda_svc
         name, qualifier = lambda_svc._resolve_name_and_qualifier(arn)
         record, _ = lambda_svc._get_func_record_for_qualifier(name, qualifier)
         if record is None:
@@ -1044,7 +1044,7 @@ def _invoke_create_auth_challenge_trigger(pool_id: str, client_id: str, username
                                                user_attrs, session, client_metadata)
     
     try:
-        from ministack.services import lambda_svc
+        from kumostack.services import lambda_svc
         name, qualifier = lambda_svc._resolve_name_and_qualifier(arn)
         record, _ = lambda_svc._get_func_record_for_qualifier(name, qualifier)
         if record is None:
@@ -1100,7 +1100,7 @@ def _invoke_verify_auth_challenge_trigger(pool_id: str, client_id: str, username
                                                challenge_answer, client_metadata)
     
     try:
-        from ministack.services import lambda_svc
+        from kumostack.services import lambda_svc
         name, qualifier = lambda_svc._resolve_name_and_qualifier(arn)
         record, _ = lambda_svc._get_func_record_for_qualifier(name, qualifier)
         if record is None:
@@ -1381,7 +1381,7 @@ async def _dispatch_idp(action: str, data: dict):
     if not handler:
         return error_response_json("InvalidAction", f"Unknown Cognito IDP action: {action}", 400)
     # Run the sync handler in a worker thread so trigger Lambdas (which call
-    # back into ministack over HTTP) don't deadlock against a blocked event
+    # back into kumostack over HTTP) don't deadlock against a blocked event
     # loop. The Lambda response path needs the loop free to accept new
     # requests while _execute_function is running.
     return await asyncio.to_thread(handler, data)

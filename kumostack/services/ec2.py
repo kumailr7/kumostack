@@ -827,7 +827,7 @@ def _rules_match(a, b):
 def _is_malformed_security_group_id(group_id):
     # EC2 applies additional opaque validation to some syntactically plausible
     # long ids. Keep captured AWS-malformed samples explicit so generated
-    # MiniStack ids and valid missing-resource probes continue to work.
+    # KumoStack ids and valid missing-resource probes continue to work.
     return group_id in _KNOWN_MALFORMED_SECURITY_GROUP_IDS or not _SECURITY_GROUP_ID_RE.fullmatch(group_id or "")
 
 

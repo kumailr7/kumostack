@@ -280,7 +280,7 @@ def _start_airflow_container(env_name, env):
         container_env[f"AIRFLOW__{env_key}"] = value
 
     try:
-        container_name = f"ministack-mwaa-{env_name}"
+        container_name = f"kumostack-mwaa-{env_name}"
 
         # Remove stale container from previous runs (same pattern as RDS)
         try:
@@ -296,7 +296,7 @@ def _start_airflow_container(env_name, env):
             environment=container_env,
             ports={f"{container_port}/tcp": host_port},
             name=container_name,
-            labels={"ministack": "mwaa", "env_name": env_name},
+            labels={"kumostack": "mwaa", "env_name": env_name},
         )
 
         if ms_network:
@@ -304,8 +304,8 @@ def _start_airflow_container(env_name, env):
 
         if MWAA_PERSIST:
             container_kwargs["volumes"] = {
-                f"ministack-mwaa-{env_name}-dags": {"bind": "/opt/airflow/dags", "mode": "rw"},
-                f"ministack-mwaa-{env_name}-db": {"bind": "/opt/airflow", "mode": "rw"},
+                f"kumostack-mwaa-{env_name}-dags": {"bind": "/opt/airflow/dags", "mode": "rw"},
+                f"kumostack-mwaa-{env_name}-db": {"bind": "/opt/airflow", "mode": "rw"},
             }
 
         container = docker_client.containers.run(**container_kwargs)

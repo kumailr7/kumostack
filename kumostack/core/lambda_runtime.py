@@ -80,7 +80,7 @@ def run():
         if not line:
             break
         event = json.loads(line)
-        # X-Ray active tracing: ministack injects the per-invocation trace
+        # X-Ray active tracing: kumostack injects the per-invocation trace
         # header into the event; pop it into os.environ so the AWS X-Ray SDK
         # can read _X_AMZN_TRACE_ID on import.
         _xray_tid = event.pop("_x_amzn_trace_id", None)
@@ -506,7 +506,7 @@ rl.on("line", async (line) => {
       succeed: () => {},
       fail: () => {},
     };
-    // X-Ray active tracing: ministack injects the per-invocation trace
+    // X-Ray active tracing: kumostack injects the per-invocation trace
     // header into the event; promote it to process.env so the AWS X-Ray SDK
     // can read _X_AMZN_TRACE_ID on require().
     if (event._x_amzn_trace_id) {

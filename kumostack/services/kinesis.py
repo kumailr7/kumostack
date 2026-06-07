@@ -472,7 +472,7 @@ def _put_record(data):
     # Fan out to any Firehose delivery stream configured with this Kinesis
     # stream as its source. Best-effort, must not break this PutRecord.
     try:
-        from ministack.services import firehose as _firehose
+        from kumostack.services import firehose as _firehose
         _firehose.ingest_from_kinesis_source(
             stream["StreamARN"], [(partition_key, raw)],
         )
@@ -551,7 +551,7 @@ def _put_records(data):
     # Fan out the whole batch to any Firehose delivery stream configured with
     # this Kinesis stream as its source. Best-effort, must not break PutRecords.
     try:
-        from ministack.services import firehose as _firehose
+        from kumostack.services import firehose as _firehose
         _firehose.ingest_from_kinesis_source(stream["StreamARN"], fanout_pairs)
     except Exception:
         logger.exception("Firehose fan-out from Kinesis PutRecords failed")

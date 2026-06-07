@@ -585,7 +585,7 @@ def invoke_durable_resume(function_name: str, durable_arn: str, original_event: 
     """Re-invoke a paused durable function with the existing execution ARN
     and the now-populated operations log. Called by the resume scheduler
     when a WAIT expires."""
-    from ministack.services import lambda_durable
+    from kumostack.services import lambda_durable
     rec = lambda_durable._executions.get(durable_arn)
     if not rec:
         return
@@ -795,7 +795,7 @@ async def handle_request(method: str, path: str, headers: dict, body: bytes, que
     # --- Durable Execution surface (preview, API version 2025-12-01) ---
     # Routed first because some paths embed the function ARN as a path segment
     # which can otherwise be misclassified.
-    from ministack.services import lambda_durable
+    from kumostack.services import lambda_durable
     durable_resp = lambda_durable.try_route(method, path, body, query_params,
                                              function_arn_lookup=_durable_arn_lookup)
     if durable_resp is not None:
@@ -1534,7 +1534,7 @@ def _update_config(name: str, data: dict):
     config["RevisionId"] = new_uuid()
     # AWS-match: UpdateFunctionConfiguration recycles the init container when
     # spawn-time inputs change (Runtime/Handler/Layers/Env/MemorySize/Arch/
-    # VpcConfig/FileSystemConfigs). The ministack warm-pool key is just
+    # VpcConfig/FileSystemConfigs). The kumostack warm-pool key is just
     # account:func:qualifier, so a stale worker would keep serving with the
     # pre-update layers/env. Invalidate to force a fresh worker on next invoke,
     # mirroring what _update_code already does. Otherwise PublishLayerVersion +
@@ -1602,7 +1602,7 @@ async def _invoke(name: str, event: dict, headers: dict, path_qualifier: str | N
     # Arn response header so callers can wire it to follow-up management ops.
     durable_arn = None
     if (func.get("config", {}) or {}).get("DurableConfig", {}).get("Enabled"):
-        from ministack.services import lambda_durable
+        from kumostack.services import lambda_durable
         try:
             event_payload = json.dumps(event) if not isinstance(event, str) else event
         except (TypeError, ValueError):
@@ -1627,7 +1627,7 @@ async def _invoke(name: str, event: dict, headers: dict, path_qualifier: str | N
         # We pass back the operations list (with the seeded EXECUTION op) so
         # the SDK has the input on every invocation, including replays.
         # Operations are serialized via lambda_durable._serialize_operations.
-        from ministack.services import lambda_durable as _ld
+        from kumostack.services import lambda_durable as _ld
         event = {
             "DurableExecutionArn": durable_arn,
             "CheckpointToken": rec["CheckpointToken"],
@@ -1664,7 +1664,7 @@ async def _invoke(name: str, event: dict, headers: dict, path_qualifier: str | N
     if durable_arn:
         resp_headers["X-Amz-Durable-Execution-Arn"] = durable_arn
         # Real AWS hands the initial CheckpointToken to the runtime via Lambda
-        # context; ministack surfaces it on the response header so test clients
+        # context; kumostack surfaces it on the response header so test clients
         # and SDK-less callers can drive the management ops directly.
         _de_rec = lambda_durable._executions.get(durable_arn)
         if _de_rec:
@@ -3426,7 +3426,7 @@ def _execute_function_local(func: dict, event: dict) -> dict:
             if not endpoint:
                 endpoint = _normalize_endpoint_url(env_vars.get("LOCALSTACK_HOSTNAME", ""))
             if not endpoint:
-                # Subprocess runs on the same host as ministack — point it at
+                # Subprocess runs on the same host as kumostack — point it at
                 # ourselves so boto3 calls land back here, not at real AWS.
                 gateway_port = os.environ.get("GATEWAY_PORT", "4566")
                 endpoint = f"http://{_MINISTACK_HOST}:{gateway_port}"

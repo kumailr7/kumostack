@@ -565,7 +565,7 @@ def test_appsync_lambda_event_identity_from_authorizer(appsync, lam):
 
 
 def test_appsync_lambda_not_found_no_crash(appsync):
-    """If Lambda function doesn't exist in ministack, AppSync returns a response (no crash)."""
+    """If Lambda function doesn't exist in kumostack, AppSync returns a response (no crash)."""
     api = appsync.create_graphql_api(name="lambda-missing-api", authenticationType="API_KEY")
     api_id = api["graphqlApi"]["apiId"]
     api_key = appsync.create_api_key(apiId=api_id)["apiKey"]["id"]

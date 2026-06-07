@@ -519,7 +519,7 @@ def test_apigw_execute_lambda_proxy_header_case_override(apigw, lam):
     """A lowercase `content-type` overrides the default, not duplicates it.
 
     Follow-up to #750: HTTP field names are case-insensitive (RFC 9110 §5.1),
-    so a Lambda's `content-type` must replace MiniStack's seeded default
+    so a Lambda's `content-type` must replace KumoStack's seeded default
     `Content-Type` rather than ship as a second header.
     """
     import urllib.request as _urlreq
@@ -1313,7 +1313,7 @@ def test_apigw_resolve_jwks_url_uses_oidc_discovery(monkeypatch):
     """
     import asyncio
 
-    from ministack.services import apigateway as apigw_mod
+    from kumostack.services import apigateway as apigw_mod
 
     issuer = "https://example-idp.test"
     discovery_url = f"{issuer}/.well-known/openid-configuration"
@@ -1339,7 +1339,7 @@ def test_apigw_resolve_jwks_url_falls_back_when_discovery_unavailable(monkeypatc
     """If OIDC discovery fails, fall back to the conventional jwks.json path."""
     import asyncio
 
-    from ministack.services import apigateway as apigw_mod
+    from kumostack.services import apigateway as apigw_mod
 
     issuer = "https://unreachable-idp.test"
 
@@ -1359,7 +1359,7 @@ def test_apigw_resolve_jwks_url_cognito_skips_discovery(monkeypatch):
     """Cognito issuers keep using the local pool JWKS — no discovery call."""
     import asyncio
 
-    from ministack.services import apigateway as apigw_mod
+    from kumostack.services import apigateway as apigw_mod
 
     issuer = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool123"
     called = {"hit": False}

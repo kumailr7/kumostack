@@ -132,18 +132,18 @@ def test_save_dict_includes_sibling_imported_modules():
     dropped. The fallback through `sys.modules` is the fix."""
     import sys as _sys
 
-    from ministack.app import _build_persistence_save_dict, _loaded_modules
+    from kumostack.app import _build_persistence_save_dict, _loaded_modules
 
     # Force-import appsync_events the way appsync.py does it — a plain
     # sibling import that bypasses `_get_module` and therefore does NOT
     # populate `_loaded_modules`.
-    import ministack.services.appsync_events  # noqa: F401
+    import kumostack.services.appsync_events  # noqa: F401
 
     # Simulate the bug condition: module is in sys.modules but absent
     # from _loaded_modules.
     saved = _loaded_modules.pop("appsync_events", None)
     try:
-        assert "ministack.services.appsync_events" in _sys.modules, (
+        assert "kumostack.services.appsync_events" in _sys.modules, (
             "test premise broken — module isn't in sys.modules"
         )
         assert "appsync_events" not in _loaded_modules, (
@@ -174,7 +174,7 @@ def test_save_dict_skips_modules_never_imported():
     Defensive guard: ensure the fallback path's `hasattr` check works."""
     import sys as _sys
 
-    from ministack.app import _build_persistence_save_dict, _loaded_modules, _state_map
+    from kumostack.app import _build_persistence_save_dict, _loaded_modules, _state_map
 
     # Pick any persisted module and ensure it's truly absent from both
     # `_loaded_modules` and `sys.modules`. `cur` is an obscure one that

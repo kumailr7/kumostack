@@ -589,7 +589,7 @@ def _resolve_object_checksums(body: bytes, headers: dict):
         server-computed value MUST match the supplied one or the request is
         rejected with `BadDigest` (HTTP 400).
 
-    Ministack-specific: CRC32C / CRC64NVME require optional native libraries
+    Kumostack-specific: CRC32C / CRC64NVME require optional native libraries
     that the "no new dependencies" rule forbids us from adding. Rather than
     silently accept an unverifiable checksum (which would round-trip on Get
     without ever being validated against the body — a worse failure mode than
@@ -617,10 +617,10 @@ def _resolve_object_checksums(body: bytes, headers: dict):
         return {}, _error(
             "InvalidRequest",
             (
-                f"Checksum algorithm not supported in this ministack build: "
+                f"Checksum algorithm not supported in this kumostack build: "
                 f"{', '.join(sorted(unverifiable))}. Supported: SHA256, SHA1, CRC32. "
                 f"CRC32C and CRC64NVME require optional native dependencies that "
-                f"ministack does not bundle; use SHA256 instead, or omit the "
+                f"kumostack does not bundle; use SHA256 instead, or omit the "
                 f"checksum header."
             ),
             400,
@@ -3054,7 +3054,7 @@ def _put_object_legal_hold(bucket_name: str, key: str, body: bytes):
 # ---------------------------------------------------------------------------
 
 # Canned ACLs accepted by PutObjectAcl `x-amz-acl` header per the AWS S3 API
-# reference. Stored verbatim — ministack does not enforce ACL semantics on the
+# reference. Stored verbatim — kumostack does not enforce ACL semantics on the
 # data plane, only round-trips the value so SDK callers that read it back
 # (terraform, CDK, custom code) see what they set.
 _CANNED_OBJECT_ACLS = {
@@ -3078,12 +3078,12 @@ def _default_object_acl_xml() -> bytes:
         XML_DECL + b"\n"
         b'<AccessControlPolicy xmlns="' + S3_NS.encode() + b'">'
         b"<Owner><ID>" + owner_id.encode() + b"</ID>"
-        b"<DisplayName>ministack</DisplayName></Owner>"
+        b"<DisplayName>kumostack</DisplayName></Owner>"
         b"<AccessControlList><Grant>"
         b'<Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
         b'xsi:type="CanonicalUser">'
         b"<ID>" + owner_id.encode() + b"</ID>"
-        b"<DisplayName>ministack</DisplayName></Grantee>"
+        b"<DisplayName>kumostack</DisplayName></Grantee>"
         b"<Permission>FULL_CONTROL</Permission>"
         b"</Grant></AccessControlList></AccessControlPolicy>"
     )
@@ -3132,12 +3132,12 @@ def _put_object_acl(bucket_name: str, key: str, body: bytes, headers: dict):
             XML_DECL.decode() + "\n"
             f'<AccessControlPolicy xmlns="{S3_NS}">'
             f"<Owner><ID>{owner_id}</ID>"
-            f"<DisplayName>ministack</DisplayName></Owner>"
+            f"<DisplayName>kumostack</DisplayName></Owner>"
             f'<AccessControlList><!-- canned: {canned} --><Grant>'
             f'<Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
             f'xsi:type="CanonicalUser">'
             f"<ID>{owner_id}</ID>"
-            f"<DisplayName>ministack</DisplayName></Grantee>"
+            f"<DisplayName>kumostack</DisplayName></Grantee>"
             f"<Permission>FULL_CONTROL</Permission></Grant></AccessControlList>"
             f"</AccessControlPolicy>"
         )

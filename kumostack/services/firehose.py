@@ -214,7 +214,7 @@ def _apply_lambda_processors(stream: dict, dest: dict, records: list) -> list:
       - ``result == "Ok"`` → use the Lambda's returned (base64) data.
       - ``result == "Dropped"`` → omit from the output entirely.
       - ``result == "ProcessingFailed"`` → omit; AWS routes to the
-        S3 backup destination if configured (ministack: omit + warn).
+        S3 backup destination if configured (kumostack: omit + warn).
 
     On any Lambda lookup / invocation / response-parsing error the original
     record is passed through. Firehose is best-effort by AWS contract — a
@@ -237,7 +237,7 @@ def _apply_lambda_processors(stream: dict, dest: dict, records: list) -> list:
     if not lambda_arns:
         return records
 
-    from ministack.services import lambda_svc
+    from kumostack.services import lambda_svc
     current = list(records)
     stream_arn = stream.get("arn", "")
     stream_name = stream.get("name", "?")

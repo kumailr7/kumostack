@@ -19,7 +19,7 @@ def clear_challenge_sessions():
     unit tests below). It does NOT touch the server's session store; server-side
     sessions are keyed by random tokens, so they never collide across API tests.
     """
-    import ministack.services.cognito as cognito_mod
+    import kumostack.services.cognito as cognito_mod
     yield
     cognito_mod._challenge_sessions.clear()
 
@@ -198,7 +198,7 @@ def test_custom_auth_respond_invalid_session(cognito_idp):
 # session clock, and there's no API to do so. Test the helper directly.
 
 def test_custom_auth_session_expiry_in_process():
-    import ministack.services.cognito as cognito_mod
+    import kumostack.services.cognito as cognito_mod
 
     token, session = cognito_mod._create_challenge_session(
         "us-east-1_pool", "client123", "user@example.com"
@@ -549,7 +549,7 @@ def test_custom_auth_client_metadata_propagated(cognito_idp, lam):
 # ── Test 17: Session persists across get_state/restore_state — in-process ────
 
 def test_custom_auth_session_persistence():
-    import ministack.services.cognito as cognito_mod
+    import kumostack.services.cognito as cognito_mod
 
     token, _session = cognito_mod._create_challenge_session(
         "us-east-1_pool", "client123", "user@example.com"
@@ -1335,7 +1335,7 @@ def test_update_pending_challenge_result_merge_and_fallback():
     """Unit-pin _update_pending_challenge_result's full contract: merge the
     result into the pending round in place (True or False, without growing the
     history), and fall back to appending only when there is no pending round."""
-    import ministack.services.cognito as cognito_mod
+    import kumostack.services.cognito as cognito_mod
 
     def _pending(metadata):
         return {

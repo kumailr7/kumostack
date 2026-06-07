@@ -56,10 +56,10 @@ BASE_PORT = int(os.environ.get("RDS_BASE_PORT", "15432"))
 RDS_TMPFS_SIZE = os.environ.get("RDS_TMPFS_SIZE", "256m")
 RDS_PERSIST = os.environ.get("RDS_PERSIST", "0").lower() in ("1", "true", "yes")
 DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "")
-# When set, skip ministack's own Docker network auto-detect so DescribeDBInstances
+# When set, skip kumostack's own Docker network auto-detect so DescribeDBInstances
 # returns {MINISTACK_HOST, host_port} — the address that's actually reachable
-# from outside the Docker network (remote ministack deployments, host-side
-# clients of a containerised ministack). Off by default: existing in-network
+# from outside the Docker network (remote kumostack deployments, host-side
+# clients of a containerised kumostack). Off by default: existing in-network
 # behavior unchanged.
 RDS_PUBLIC_ENDPOINT = os.environ.get("MINISTACK_RDS_PUBLIC_ENDPOINT", "0").lower() in ("1", "true", "yes")
 
@@ -139,7 +139,7 @@ def restore_state(data):
     # to bring it back. Without this, restored instances stay marked
     # "available" with no running container, and StartDBInstance is
     # metadata-only so it can't recover them either.
-    from ministack.core.responses import _request_account_id
+    from kumostack.core.responses import _request_account_id
     for account_id, db_id, inst in to_respawn:
         ctx = contextvars.copy_context()
 
@@ -156,7 +156,7 @@ def _start_rds_container_for_instance(db_id, instance):
 
     Reads engine, credentials, and endpoint info from the persisted instance
     dict instead of CreateDBInstance request params. If a container with the
-    deterministic name ``ministack-rds-{db_id}`` already exists (e.g. host
+    deterministic name ``kumostack-rds-{db_id}`` already exists (e.g. host
     rebooted but Docker preserved stopped containers), it is removed first so
     a clean run can attach to the persistent named volume. Sets
     ``DBInstanceStatus`` to ``available`` on success, ``failed`` on Docker
@@ -181,7 +181,7 @@ def _start_rds_container_for_instance(db_id, instance):
     # fresh free port from `_next_port()`.
     host_port = instance.get("_HostPort") or _next_port()
     # If the stored host port was claimed by something else between
-    # restarts (another ministack, another db instance, a user app),
+    # restarts (another kumostack, another db instance, a user app),
     # docker bind would fail with "port is already allocated". Fall
     # back to a fresh free port and persist it so subsequent restarts
     # converge on a stable mapping again.
@@ -198,7 +198,7 @@ def _start_rds_container_for_instance(db_id, instance):
         instance["DBInstanceStatus"] = "available"
         return
 
-    container_name = f"ministack-rds-{db_id}"
+    container_name = f"kumostack-rds-{db_id}"
     try:
         existing = docker_client.containers.get(container_name)
         # `force=True` stops AND removes in one shot, including
@@ -231,13 +231,13 @@ def _start_rds_container_for_instance(db_id, instance):
         environment=env_vars,
         ports={f"{container_port}/tcp": host_port},
         name=container_name,
-        labels={"ministack": "rds", "db_id": db_id},
+        labels={"kumostack": "rds", "db_id": db_id},
     )
     if ms_network:
         container_kwargs["network"] = ms_network
     if RDS_PERSIST:
         container_kwargs["volumes"] = {
-            f"ministack-rds-{db_id}-data": {"bind": data_path, "mode": "rw"},
+            f"kumostack-rds-{db_id}-data": {"bind": data_path, "mode": "rw"},
         }
     else:
         container_kwargs["tmpfs"] = {
@@ -495,7 +495,7 @@ def _is_host_port_free(port: int) -> bool:
 def _next_port():
     """Return the next free host port for an RDS container. Increments
     the persisted counter, but skips ports that are already bound on the
-    host (e.g. by another ministack instance or the user's own services).
+    host (e.g. by another kumostack instance or the user's own services).
     Caps probing to avoid infinite loops if the entire upper range is
     saturated — in that pathological case the caller will get a port and
     likely fail at `docker run`, but we won't spin forever."""

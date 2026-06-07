@@ -705,7 +705,7 @@ def _invoke_lambda_authorizer(
     invocation error, malformed response, or ``isAuthorized:false``.
 
     AWS stores the authorizer Lambda under ``lambdaAuthorizerConfig.authorizerUri``
-    (which ``_create_graphql_api`` persists verbatim). ministack's AppSync Events
+    (which ``_create_graphql_api`` persists verbatim). kumostack's AppSync Events
     authorizer reads the same key.
     """
     func_arn = authorizer_config.get("authorizerUri") or authorizer_config.get("authorizer_uri")
@@ -715,12 +715,12 @@ def _invoke_lambda_authorizer(
         # rejection signal.
         return {}
 
-    import ministack.services.lambda_svc as _lambda_svc
+    import kumostack.services.lambda_svc as _lambda_svc
 
     func_name = func_arn.rsplit(":", 1)[-1]
     func = _lambda_svc._functions.get(func_name)
     if not func:
-        logger.warning("Lambda authorizer %s not found in ministack", func_name)
+        logger.warning("Lambda authorizer %s not found in kumostack", func_name)
         raise _AuthorizerRejected("authorizer Lambda not found")
 
     # AWS-verified authorizer event shape — apiId / accountId / requestId /

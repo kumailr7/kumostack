@@ -1494,7 +1494,7 @@ def test_lambda_docker_cp_dir_arcname_creates_subdir_in_existing_parent():
     import tarfile as _tarfile
     import tempfile
 
-    from ministack.services.lambda_svc import _docker_cp_dir
+    from kumostack.services.lambda_svc import _docker_cp_dir
 
     captured = {}
 
@@ -1526,7 +1526,7 @@ def test_lambda_pool_kill_function_reaps_all_qualifiers():
     #816 docker-executor follow-up. Wired into _update_config / _delete_function
     so layer attach via UpdateFunctionConfiguration displaces the pre-attach
     container before the next invoke."""
-    from ministack.services import lambda_svc as _svc
+    from kumostack.services import lambda_svc as _svc
 
     class _StubContainer:
         def __init__(self):
@@ -3999,7 +3999,7 @@ def _ms_endpoint():
 
 def _raw_durable(method: str, path: str, body: dict | None = None,
                  query: dict | None = None):
-    """Hit ministack with a raw HTTP call for the durable-execution surface.
+    """Hit kumostack with a raw HTTP call for the durable-execution surface.
     Boto3 doesn't carry the preview shapes yet, so use urllib."""
     import json as _json
     from urllib.parse import urlencode
@@ -4350,7 +4350,7 @@ def test_lambda_durable_chained_invoke_runs_child(lam):
 
 def test_lambda_durable_persistence_round_trip():
     """get_state / restore_state round-trip preserves the executions map."""
-    from ministack.services import lambda_durable
+    from kumostack.services import lambda_durable
     # Snapshot original state.
     original = lambda_durable.get_state()
     try:
@@ -4582,7 +4582,7 @@ def test_lambda_durable_get_execution_rejects_malformed_arn(lam):
 def test_lambda_durable_heartbeat_extends_callback_timeout():
     """Pushing the HeartbeatDeadline forward must actually delay the
     CallbackTimedOut firing. Stale heap entries must be no-ops."""
-    from ministack.services import lambda_durable as _ld
+    from kumostack.services import lambda_durable as _ld
     arn = "arn:aws:lambda:us-east-1:000000000000:function:hb-test:$LATEST/durable-execution/" \
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     now = _ld._now()
@@ -4624,7 +4624,7 @@ def test_lambda_durable_heartbeat_extends_callback_timeout():
 def test_lambda_durable_restore_rebuilds_callback_index_and_rearms_timers():
     """After restore_state, in-flight callbacks must be resolvable and
     pending timers must be back on the heap."""
-    from ministack.services import lambda_durable as _ld
+    from kumostack.services import lambda_durable as _ld
     arn = "arn:aws:lambda:us-east-1:000000000000:function:restore-test:$LATEST/durable-execution/" \
           "cccccccccccccccccccccccccccccccc/dddddddddddddddddddddddddddddddd"
     cb_op_id = "rstcbaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -4653,7 +4653,7 @@ def test_lambda_durable_restore_rebuilds_callback_index_and_rearms_timers():
     with _ld._resume_lock:
         _ld._resume_queue.clear()
     try:
-        # Pretend ministack just booted and read this rec from disk.
+        # Pretend kumostack just booted and read this rec from disk.
         _ld.restore_state({"executions": {arn: rec}})
         # Index must contain the STARTED callback.
         assert cb_op_id in _ld._callback_index
@@ -4682,7 +4682,7 @@ def test_lambda_durable_restore_skips_non_running_executions():
     """SUCCEEDED/FAILED/STOPPED executions must NOT be re-armed (they would
     pin a function arn that may not exist anymore) and their callbacks must
     NOT be re-indexed."""
-    from ministack.services import lambda_durable as _ld
+    from kumostack.services import lambda_durable as _ld
     arn_done = "arn:aws:lambda:us-east-1:000000000000:function:done-fn:$LATEST/durable-execution/" \
                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/ffffffffffffffffffffffffffffffff"
     cb_op_id = "donecbaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -4768,7 +4768,7 @@ def test_lambda_durable_checkpoint_unknown_op_type_rejected(lam):
         if code == 200:
             ops = body["NewExecutionState"]["Operations"]
             bogus = [o for o in ops if o.get("Type") == "NOT_A_REAL_TYPE"]
-            assert not bogus, "ministack silently created an Op with an invalid Type"
+            assert not bogus, "kumostack silently created an Op with an invalid Type"
     finally:
         lam.delete_function(FunctionName=fname)
 
@@ -4981,7 +4981,7 @@ def test_lambda_xray_does_not_leak_across_functions(lam):
 def test_xray_trace_id_helper_unit():
     """Direct unit test of the helper used by all executors."""
     import re as _re
-    from ministack.services.lambda_svc import _xray_trace_id_for_invocation
+    from kumostack.services.lambda_svc import _xray_trace_id_for_invocation
     # PassThrough / missing → None
     assert _xray_trace_id_for_invocation({}) is None
     assert _xray_trace_id_for_invocation({"TracingConfig": {"Mode": "PassThrough"}}) is None

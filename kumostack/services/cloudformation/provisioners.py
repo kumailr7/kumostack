@@ -1312,16 +1312,16 @@ def _cfn_nested_stack_deploy(logical_id, props, parent_stack_name, *,
     sub-attribute form CDK and console-built templates emit.
     """
     import copy
-    from ministack.core.responses import get_account_id, get_region, new_uuid
-    from ministack.services.cloudformation import (
+    from kumostack.core.responses import get_account_id, get_region, new_uuid
+    from kumostack.services.cloudformation import (
         _stack_events, _stacks,
     )
-    from ministack.services.cloudformation.engine import (
+    from kumostack.services.cloudformation.engine import (
         _evaluate_conditions, _parse_template, _resolve_parameters,
         _resolve_refs, _topological_sort,
     )
-    from ministack.services.cloudformation.helpers import _resolve_template
-    from ministack.services.cloudformation.stacks import _add_event
+    from kumostack.services.cloudformation.helpers import _resolve_template
+    from kumostack.services.cloudformation.stacks import _add_event
 
     template_url = props.get("TemplateURL")
     if not template_url:
@@ -1508,7 +1508,7 @@ def _cfn_nested_stack_deploy(logical_id, props, parent_stack_name, *,
 
 
 def _NO_VALUE_SENTINEL():
-    from ministack.services.cloudformation.engine import _NO_VALUE
+    from kumostack.services.cloudformation.engine import _NO_VALUE
     return _NO_VALUE
 
 
@@ -1527,7 +1527,7 @@ def _cfn_nested_stack_update(physical_id, old_props, new_props, stack_name):
 def _nested_stack_lookup_name(physical_id_or_arn):
     """Resolve a nested-stack physical id (StackId ARN or stack name) to its
     `_stacks` dict key. Returns the input if no ARN match is found."""
-    from ministack.services.cloudformation import _stacks
+    from kumostack.services.cloudformation import _stacks
     if physical_id_or_arn in _stacks:
         return physical_id_or_arn
     for name, stk in _stacks.items():
@@ -1537,7 +1537,7 @@ def _nested_stack_lookup_name(physical_id_or_arn):
 
 
 def _cfn_nested_stack_delete(physical_id, props):
-    from ministack.services.cloudformation import _exports, _stacks
+    from kumostack.services.cloudformation import _exports, _stacks
     child_name = _nested_stack_lookup_name(physical_id)
     child_stack = _stacks.get(child_name)
     if not child_stack:
@@ -1549,7 +1549,7 @@ def _cfn_nested_stack_delete(physical_id, props):
     res_defs = template.get("Resources", {}) if template else {}
     conditions = child_stack.get("_conditions", {})
     try:
-        from ministack.services.cloudformation.engine import _topological_sort
+        from kumostack.services.cloudformation.engine import _topological_sort
         ordered = (_topological_sort(res_defs, conditions)
                    if res_defs else list(resources.keys()))
     except Exception:

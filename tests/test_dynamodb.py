@@ -2787,7 +2787,7 @@ def test_dynamodb_update_nested_parens_do_not_flatten_two_groups(ddb):
 
 # ---------------------------------------------------------------------------
 # Contributor Insights, Resource Policies, Export/Import
-# Added for DynamoDB conformance — previously unsupported by ministack.
+# Added for DynamoDB conformance — previously unsupported by kumostack.
 # Behavior verified against botocore service-2.json (2012-08-10).
 # ---------------------------------------------------------------------------
 

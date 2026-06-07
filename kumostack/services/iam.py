@@ -1009,7 +1009,7 @@ def _get_access_key_last_used(p):
         return _error(404, "NoSuchEntity",
                       f"The Access Key with id {key_id} cannot be found.", ns="iam")
     user_name = _access_keys[key_id]["UserName"]
-    # Ministack does not track per-key usage; return the "never used" shape
+    # KumoStack does not track per-key usage; return the "never used" shape
     # that real AWS returns for keys that have never made a signed request
     # (no LastUsedDate element, Region/ServiceName = "N/A").
     return _xml(200, "GetAccessKeyLastUsedResponse",

@@ -775,7 +775,7 @@ async def _handle_sqs_messages_request(method: str, path: str, headers: dict, qu
       ?QueueUrl=<url>          restrict to one queue (within whatever
                                accounts pass the account filter)
     """
-    if path != "/_ministack/sqs/messages" or method != "GET":
+    if path != "/_kumostack/sqs/messages" or method != "GET":
         return None
 
     account_id = None
@@ -3471,7 +3471,7 @@ def _build_persistence_save_dict():
     for key, mod_name in _state_map.items():
         mod = _loaded_modules.get(mod_name)
         if mod is None:
-            mod = sys.modules.get(f"ministack.services.{mod_name}")
+            mod = sys.modules.get(f"kumostack.services.{mod_name}")
             if mod is None or not hasattr(mod, "get_state"):
                 continue
         save_dict[key] = mod.get_state
@@ -3701,9 +3701,9 @@ def _reset_all_state():
         # `apigateway` -> `apigateway_v1`, `lambda` -> `cloudwatch_logs`) is
         # imported into `sys.modules` but never registered in `_loaded_modules`.
         # Without the `sys.modules` fallback, those modules silently skip reset
-        # — leaving state across `/_ministack/reset` calls and breaking test
+        # — leaving state across `/_kumostack/reset` calls and breaking test
         # isolation.
-        mod = _loaded_modules.get(mod_name) or sys.modules.get(f"ministack.services.{mod_name}")
+        mod = _loaded_modules.get(mod_name) or sys.modules.get(f"kumostack.services.{mod_name}")
         if mod is None or not hasattr(mod, "reset"):
             continue
         try:

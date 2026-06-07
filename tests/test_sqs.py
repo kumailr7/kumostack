@@ -945,11 +945,11 @@ def test_sqs_dlq_sweep_survives_legacy_double_encoded_policy():
 
 
 # ---------------------------------------------------------------------------
-# /_ministack/sqs/messages — pure introspection over the queue store
+# /_kumostack/sqs/messages — pure introspection over the queue store
 # ---------------------------------------------------------------------------
 
 def test_sqs_messages_endpoint_basic(sqs):
-    """GET /_ministack/sqs/messages returns sent messages grouped by account
+    """GET /_kumostack/sqs/messages returns sent messages grouped by account
     and queue URL, without affecting subsequent ReceiveMessage."""
     import urllib.request
     qurl = sqs.create_queue(QueueName=f"intg-peek-{_uuid_mod.uuid4().hex[:8]}")["QueueUrl"]
@@ -957,7 +957,7 @@ def test_sqs_messages_endpoint_basic(sqs):
     sqs.send_message(QueueUrl=qurl, MessageBody="hello-peek-2")
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
 
-    with urllib.request.urlopen(f"{endpoint}/_ministack/sqs/messages?QueueUrl={qurl}") as r:
+    with urllib.request.urlopen(f"{endpoint}/_kumostack/sqs/messages?QueueUrl={qurl}") as r:
         data = json.loads(r.read())
 
     # One account, one queue, two messages.
@@ -987,7 +987,7 @@ def test_sqs_messages_endpoint_invalid_account_rejected(sqs):
     import urllib.request
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
     try:
-        urllib.request.urlopen(f"{endpoint}/_ministack/sqs/messages?account=abc")
+        urllib.request.urlopen(f"{endpoint}/_kumostack/sqs/messages?account=abc")
         raise AssertionError("expected 400")
     except urllib.error.HTTPError as e:
         assert e.code == 400

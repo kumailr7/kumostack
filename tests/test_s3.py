@@ -1989,8 +1989,8 @@ def test_s3_storage_class_persisted_to_disk(tmp_path, monkeypatch):
 
 def test_s3_create_bucket_persists_account_scoped(tmp_path, monkeypatch):
     """CreateBucket persists under DATA_DIR/<account>/<bucket>, never DATA_DIR/<bucket> (#824)."""
-    from ministack.core import responses as respmod
-    from ministack.services import s3 as s3mod
+    from kumostack.core import responses as respmod
+    from kumostack.services import s3 as s3mod
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
     monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
@@ -2011,8 +2011,8 @@ def test_s3_put_object_no_spurious_root_folder(tmp_path, monkeypatch):
 
     Mirrors the issue's repro: create 'my-bucket', put 'my-file', and assert the
     data-dir root contains only the account dir (no DATA_DIR/my-bucket)."""
-    from ministack.core import responses as respmod
-    from ministack.services import s3 as s3mod
+    from kumostack.core import responses as respmod
+    from kumostack.services import s3 as s3mod
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
     monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
@@ -2043,8 +2043,8 @@ def test_s3_put_object_no_spurious_root_folder(tmp_path, monkeypatch):
 
 def test_s3_delete_bucket_removes_persisted_dir(tmp_path, monkeypatch):
     """DeleteBucket removes the account-scoped on-disk directory (#824 cleanup gap)."""
-    from ministack.core import responses as respmod
-    from ministack.services import s3 as s3mod
+    from kumostack.core import responses as respmod
+    from kumostack.services import s3 as s3mod
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
     monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
@@ -2711,7 +2711,7 @@ def test_s3_versioned_get_returns_stored_checksum(s3):
 
 
 def test_s3_put_object_rejects_unsupported_crc32c_explicitly(s3):
-    """CRC32C requires an optional native library ministack doesn't bundle.
+    """CRC32C requires an optional native library kumostack doesn't bundle.
     Rather than silently accept-without-validation, the put must fail loudly
     so clients see the gap. Issue #831 follow-up: no silent failures."""
     import base64

@@ -1065,7 +1065,7 @@ def test_glue_partition_indexes(glue):
 
 def test_glue_spark_skips_docker_when_image_missing(glue):
     """glueetl job falls back to subprocess when the Spark Docker image is not pulled.
-    The job should not crash MiniStack — it either runs via subprocess (and fails
+    The job should not crash KumoStack — it either runs via subprocess (and fails
     on pyspark import) or stubs as SUCCEEDED if the script can't be resolved."""
     import time
     job_name = "test-spark-no-image"
@@ -1100,7 +1100,7 @@ def test_glue_spark_skips_docker_when_image_missing(glue):
 def test_glue_spark_image_for_version_maps_to_official_aws_image():
     """`GlueVersion: 4.0` and `3.0` map to the canonical `amazon/aws-glue-libs`
     images real AWS Glue uses for Spark. Override via `GLUE_DOCKER_IMAGE`."""
-    from ministack.services import glue as _glue
+    from kumostack.services import glue as _glue
 
     # Default mapping for supported Spark Glue versions
     assert _glue._glue_image_for_version("4.0") == "amazon/aws-glue-libs:glue_libs_4.0.0_image_01"
@@ -1112,7 +1112,7 @@ def test_glue_spark_image_for_version_maps_to_official_aws_image():
 
 def test_glue_spark_image_env_override(monkeypatch):
     """Setting GLUE_DOCKER_IMAGE bypasses the per-version map."""
-    from ministack.services import glue as _glue
+    from kumostack.services import glue as _glue
 
     monkeypatch.setattr(_glue, "GLUE_DOCKER_IMAGE_OVERRIDE", "my-org/custom-glue:latest")
     assert _glue._glue_image_for_version("4.0") == "my-org/custom-glue:latest"
@@ -1121,7 +1121,7 @@ def test_glue_spark_image_env_override(monkeypatch):
 
 def test_glue_is_spark_job_classifies_by_command_name():
     """`glueetl` and `gluestreaming` are Spark; `pythonshell` is not."""
-    from ministack.services import glue as _glue
+    from kumostack.services import glue as _glue
 
     assert _glue._is_spark_job({"Command": {"Name": "glueetl"}}) is True
     assert _glue._is_spark_job({"Command": {"Name": "gluestreaming"}}) is True
@@ -1158,7 +1158,7 @@ def test_glue_update_table_version_id_optimistic_concurrency(glue):
         )
     assert exc.value.response["Error"]["Code"] == "ConcurrentModificationException"
 
-    # No VersionId passed — current ministack/AWS shape still allows (back-compat).
+    # No VersionId passed — current kumostack/AWS shape still allows (back-compat).
     glue.update_table(DatabaseName="ver_db", TableInput={"Name": "t1", "Description": "v4"})
     t4 = glue.get_table(DatabaseName="ver_db", Name="t1")["Table"]
     assert t4["VersionId"] == "3"
@@ -1219,9 +1219,9 @@ def test_glue_resolve_script_account_scoped(tmp_path, monkeypatch):
     Regression: the on-disk lookup omitted the account id, so it could never
     match an object written by the canonical account-scoped writer.
     """
-    from ministack.core import responses as respmod
-    from ministack.services import s3 as s3mod
-    from ministack.services import glue as gluemod
+    from kumostack.core import responses as respmod
+    from kumostack.services import s3 as s3mod
+    from kumostack.services import glue as gluemod
 
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
@@ -1251,9 +1251,9 @@ def test_glue_start_job_run_resolves_script_in_worker_thread(tmp_path, monkeypat
     contextvars, so get_account_id() inside _resolve_script reverted to the
     default account and a non-default account's script was never found.
     """
-    from ministack.core import responses as respmod
-    from ministack.services import s3 as s3mod
-    from ministack.services import glue as gluemod
+    from kumostack.core import responses as respmod
+    from kumostack.services import s3 as s3mod
+    from kumostack.services import glue as gluemod
 
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
@@ -1311,8 +1311,8 @@ def test_glue_crawler_completes_for_non_default_account(monkeypatch):
     guard (evaluated under the default account) was False and the crawler hung
     in RUNNING forever with LastCrawl never recorded.
     """
-    from ministack.core import responses as respmod
-    from ministack.services import glue as gluemod
+    from kumostack.core import responses as respmod
+    from kumostack.services import glue as gluemod
 
     # Shrink the 5s finish timer so the test is fast.
     monkeypatch.setattr(gluemod, "CRAWLER_RUN_SECONDS", 0.2)
@@ -1351,9 +1351,9 @@ def test_glue_resolve_script_isolated_per_account(tmp_path, monkeypatch):
     Guards the core multi-tenancy property: account-scoped resolution must not
     leak one tenant's on-disk objects to another.
     """
-    from ministack.core import responses as respmod
-    from ministack.services import s3 as s3mod
-    from ministack.services import glue as gluemod
+    from kumostack.core import responses as respmod
+    from kumostack.services import s3 as s3mod
+    from kumostack.services import glue as gluemod
 
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)

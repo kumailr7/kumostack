@@ -85,7 +85,7 @@ def _issuer_url(oidc_id):
 def _get_oidc_keypair():
     """Lazily generate a single RSA keypair for OIDC discovery / JWKS.
 
-    Shared across all clusters — ministack does not issue real IRSA tokens, so
+    Shared across all clusters — kumostack does not issue real IRSA tokens, so
     a single advertised key is sufficient for Terraform's
     aws_iam_openid_connect_provider to fetch + thumbprint the issuer.
     """
@@ -296,7 +296,7 @@ def _collect_node_labels(cluster: dict) -> list[str]:
     `topology.kubernetes.io/zone` (set by the AWS cloud-controller-manager) so
     Karpenter / `topologySpreadConstraints` / Cluster Autoscaler can schedule.
     Per-node-group label overrides belong on `CreateNodegroup.labels`, which is
-    the AWS-shape-correct surface — not a ministack-specific tag convention.
+    the AWS-shape-correct surface — not a kumostack-specific tag convention.
 
     MUST be called from a request context (uses `get_region()`).
     """
@@ -1285,7 +1285,7 @@ async def handle_request(method, path, headers, body_bytes, query_params):
             return _describe_identity_provider_config(cluster_name, body)
 
 
-    # OIDC discovery + JWKS (IRSA). Path matches AWS shape under the ministack
+    # OIDC discovery + JWKS (IRSA). Path matches AWS shape under the kumostack
     # /oidc prefix because we can't own oidc.eks.{region}.amazonaws.com.
     m = re.fullmatch(r"/oidc/id/([A-Z0-9]+)/\.well-known/openid-configuration", path)
     if m and method == "GET":

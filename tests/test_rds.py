@@ -89,7 +89,7 @@ def test_rds_create_instance_v2(rds):
     assert inst["DBInstanceIdentifier"] == "rds-ci-v2"
     # Real AWS CreateDBInstance returns "creating" when a backing container
     # is being spawned, "available" when the call is control-plane-only.
-    # Both are valid post-create states; ministack mirrors that.
+    # Both are valid post-create states; kumostack mirrors that.
     assert inst["DBInstanceStatus"] in ("available", "creating")
     assert inst["Engine"] == "postgres"
     assert "Address" in inst["Endpoint"]
@@ -1474,7 +1474,7 @@ def test_rds_restore_state_respawns_docker_container(monkeypatch):
     running container, and the metadata-only StartDBInstance /
     RebootDBInstance ops can't recover them. Regression test for #692.
     """
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     runs = []
 
@@ -1529,12 +1529,12 @@ def test_rds_restore_state_respawns_docker_container(monkeypatch):
         time.sleep(0.05)
 
     assert runs, "restore_state did not respawn the Docker container"
-    assert runs[0]["name"] == f"ministack-rds-{db_id}"
+    assert runs[0]["name"] == f"kumostack-rds-{db_id}"
     assert runs[0]["image"].endswith("postgres:16-alpine")
     assert runs[0]["environment"]["POSTGRES_USER"] == "admin"
     assert runs[0]["environment"]["POSTGRES_PASSWORD"] == "password123"
     assert runs[0]["environment"]["POSTGRES_DB"] == "mydb"
-    assert runs[0]["labels"] == {"ministack": "rds", "db_id": db_id}
+    assert runs[0]["labels"] == {"kumostack": "rds", "db_id": db_id}
 
     restored = m._instances.get(db_id)
     assert restored is not None
@@ -1549,7 +1549,7 @@ def test_rds_restore_state_removes_stale_container_before_respawn(monkeypatch):
     must remove the stale one before re-creating, otherwise containers.run
     would fail with a name conflict.
     """
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     runs = []
     removed = []
@@ -1565,7 +1565,7 @@ def test_rds_restore_state_removes_stale_container_before_respawn(monkeypatch):
         def remove(self, **kwargs):
             removed.append(self.name)
 
-    stale = FakeContainer(name="ministack-rds-stale-db", container_id="cid-stale")
+    stale = FakeContainer(name="kumostack-rds-stale-db", container_id="cid-stale")
 
     class FakeContainers:
         def get(self, name):
@@ -1573,7 +1573,7 @@ def test_rds_restore_state_removes_stale_container_before_respawn(monkeypatch):
             # called and `removed` is populated, subsequent .get()s for
             # the same name raise "not found" — mirrors real docker after
             # a successful force-remove.
-            if name == "ministack-rds-stale-db" and "ministack-rds-stale-db" not in removed:
+            if name == "kumostack-rds-stale-db" and "kumostack-rds-stale-db" not in removed:
                 return stale
             raise Exception("not found")
 
@@ -1612,9 +1612,9 @@ def test_rds_restore_state_removes_stale_container_before_respawn(monkeypatch):
     while time.time() < deadline and not runs:
         time.sleep(0.05)
 
-    assert "ministack-rds-stale-db" in removed, "stale container not removed"
+    assert "kumostack-rds-stale-db" in removed, "stale container not removed"
     assert runs, "fresh container not spawned after removing stale one"
-    assert runs[0]["name"] == "ministack-rds-stale-db"
+    assert runs[0]["name"] == "kumostack-rds-stale-db"
 
     m._instances.clear()
 
@@ -1627,7 +1627,7 @@ def test_rds_respawn_does_not_bind_engine_port_on_host(monkeypatch):
     Regression for the bug doodaz reported on #692 after 1.3.48: the
     1.3.47 + 1.3.48 fixes covered restore-then-respawn but left this
     port-reuse bug live."""
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     runs = []
 
@@ -1691,7 +1691,7 @@ def test_rds_respawn_does_not_bind_engine_port_on_host(monkeypatch):
         f"ports={port_mapping}"
     )
     assert host_port >= 15432, (
-        f"respawn host port {host_port} not in MiniStack's allocated range "
+        f"respawn host port {host_port} not in KumoStack's allocated range "
         f"(>=15432) — looks like Endpoint.Port leaked through again."
     )
 
@@ -1710,7 +1710,7 @@ def test_rds_next_port_skips_busy_ports(monkeypatch):
     """`_next_port` must probe each candidate and skip ports already
     bound on the host. Without this, a counter-only allocator hands out
     a port that `docker run` will immediately fail to bind."""
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     busy_ports = {15432, 15433, 15434}
     monkeypatch.setattr(m, "_is_host_port_free", lambda p: p not in busy_ports)
@@ -1727,7 +1727,7 @@ def test_rds_respawn_falls_back_when_persisted_host_port_taken(monkeypatch):
     """If `_HostPort` from persisted state is taken by another process
     on the host, respawn must fall back to a fresh free port instead
     of trying to bind a port we know is unavailable."""
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     runs = []
 
@@ -1798,7 +1798,7 @@ def test_rds_respawn_force_removes_stale_created_container(monkeypatch):
     """Doodaz observed a half-spawned `Created`-status container with
     the deterministic name blocking respawn. Plain `.remove()` doesn't
     handle running/created containers; respawn must use `force=True`."""
-    from ministack.services import rds as m
+    from kumostack.services import rds as m
 
     remove_calls = []
 

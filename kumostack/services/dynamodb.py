@@ -36,7 +36,7 @@ from kumostack.core.responses import (
     new_uuid,
     now_iso,
 )
-from ministack.services._dynamodb_keywords import AWS_KEYWORDS
+from kumostack.services._dynamodb_keywords import AWS_KEYWORDS
 
 logger = logging.getLogger("dynamodb")
 

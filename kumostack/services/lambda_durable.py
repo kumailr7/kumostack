@@ -241,7 +241,7 @@ def _to_unix_millis(v) -> int | None:
 def _to_unix_seconds(v) -> int | None:
     """Float-seconds → int Unix-seconds. Used on every boto3 API-RESPONSE
     timestamp because botocore's `parse_timestamp` interprets numeric values
-    as seconds via `datetime.fromtimestamp(value, tzinfo())`. Ministack-wide
+    as seconds via `datetime.fromtimestamp(value, tzinfo())`. KumoStack-wide
     JSON convention is int (not float) so the strict-deserializing Java SDK v2
     and Go SDK v2 don't reject it — see feedback_timestamps_int_epoch."""
     if v is None:

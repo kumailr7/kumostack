@@ -732,7 +732,7 @@ def _delete_service(data):
     # INACTIVE. Services in the DRAINING or INACTIVE status can still be viewed
     # with the DescribeServices API operation." Tasks are stopped synchronously
     # above, so we land in INACTIVE directly. AWS may eventually purge INACTIVE
-    # records (no fixed window) — ministack keeps them for the process lifetime.
+    # records (no fixed window) — kumostack keeps them for the process lifetime.
     # Re-creating with the same name is allowed because _create_service only
     # conflicts on status=ACTIVE.
     svc["status"] = "INACTIVE"
