@@ -808,6 +808,52 @@ def test_s3_object_tagging(s3):
     assert tags["status"] == "active"
     assert tags["priority"] == "high"
 
+
+def test_s3_object_tagging_per_version(s3):
+    """Tags must be stored per object version, not collapsed onto the key.
+
+    Repro for #N: in a versioned bucket, tagging two versions of the same
+    object resulted in only the last-written tag set being returned for
+    either version.
+    """
+    bkt = "intg-s3-objtags-versioned"
+    s3.create_bucket(Bucket=bkt)
+    s3.put_bucket_versioning(
+        Bucket=bkt, VersioningConfiguration={"Status": "Enabled"}
+    )
+
+    v1 = s3.put_object(Bucket=bkt, Key="k", Body=b"one")["VersionId"]
+    v2 = s3.put_object(Bucket=bkt, Key="k", Body=b"two")["VersionId"]
+    assert v1 and v2 and v1 != v2
+
+    s3.put_object_tagging(
+        Bucket=bkt, Key="k", VersionId=v1,
+        Tagging={"TagSet": [{"Key": "ver", "Value": "1"}]},
+    )
+    s3.put_object_tagging(
+        Bucket=bkt, Key="k", VersionId=v2,
+        Tagging={"TagSet": [{"Key": "ver", "Value": "2"}]},
+    )
+
+    g1 = s3.get_object_tagging(Bucket=bkt, Key="k", VersionId=v1)
+    g2 = s3.get_object_tagging(Bucket=bkt, Key="k", VersionId=v2)
+    assert {t["Key"]: t["Value"] for t in g1["TagSet"]} == {"ver": "1"}
+    assert {t["Key"]: t["Value"] for t in g2["TagSet"]} == {"ver": "2"}
+    assert g1["VersionId"] == v1
+    assert g2["VersionId"] == v2
+
+    # GetObjectTagging without VersionId targets the current version (v2).
+    g_current = s3.get_object_tagging(Bucket=bkt, Key="k")
+    assert {t["Key"]: t["Value"] for t in g_current["TagSet"]} == {"ver": "2"}
+
+    # DeleteObjectTagging on v1 must not touch v2's tag set.
+    s3.delete_object_tagging(Bucket=bkt, Key="k", VersionId=v1)
+    g1_after = s3.get_object_tagging(Bucket=bkt, Key="k", VersionId=v1)
+    g2_after = s3.get_object_tagging(Bucket=bkt, Key="k", VersionId=v2)
+    assert g1_after["TagSet"] == []
+    assert {t["Key"]: t["Value"] for t in g2_after["TagSet"]} == {"ver": "2"}
+
+
 def test_s3_public_access_block(s3):
     bkt = "intg-s3-pab"
     s3.create_bucket(Bucket=bkt)
@@ -1941,6 +1987,80 @@ def test_s3_storage_class_persisted_to_disk(tmp_path, monkeypatch):
     assert restored["storage_class"] == "GLACIER"
 
 
+def test_s3_create_bucket_persists_account_scoped(tmp_path, monkeypatch):
+    """CreateBucket persists under DATA_DIR/<account>/<bucket>, never DATA_DIR/<bucket> (#824)."""
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+    monkeypatch.setattr(respmod, "get_account_id", lambda: "000000000000")
+    try:
+        status, _, _ = s3mod._create_bucket("issue824-create", b"")
+        assert status == 200
+        # The on-disk dir is account-scoped...
+        assert os.path.isdir(os.path.join(str(tmp_path), "000000000000", "issue824-create"))
+        # ...and there is NO spurious folder at the data-dir root.
+        assert not os.path.exists(os.path.join(str(tmp_path), "issue824-create"))
+    finally:
+        s3mod._buckets._data.pop(("000000000000", "issue824-create"), None)
+
+
+def test_s3_put_object_no_spurious_root_folder(tmp_path, monkeypatch):
+    """PutBucket + PutObject must not leave an empty folder at the data-dir root (#824).
+
+    Mirrors the issue's repro: create 'my-bucket', put 'my-file', and assert the
+    data-dir root contains only the account dir (no DATA_DIR/my-bucket)."""
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+    monkeypatch.setattr(respmod, "get_account_id", lambda: "000000000000")
+    try:
+        s3mod._create_bucket("my-bucket", b"")
+        obj = {
+            "body": b"hello",
+            "content_type": "text/plain",
+            "content_encoding": None,
+            "etag": '"abc"',
+            "last_modified": s3mod.now_iso(),
+            "size": 5,
+            "metadata": {},
+            "preserved_headers": {},
+            "storage_class": "STANDARD",
+        }
+        s3mod._persist_object("my-bucket", "my-file", obj)
+        # Object data lands under the account-scoped path...
+        assert os.path.isfile(
+            os.path.join(str(tmp_path), "000000000000", "my-bucket", "my-file")
+        )
+        # ...and the only top-level entry is the account dir — no spurious 'my-bucket'.
+        assert sorted(os.listdir(str(tmp_path))) == ["000000000000"]
+    finally:
+        s3mod._buckets._data.pop(("000000000000", "my-bucket"), None)
+
+
+def test_s3_delete_bucket_removes_persisted_dir(tmp_path, monkeypatch):
+    """DeleteBucket removes the account-scoped on-disk directory (#824 cleanup gap)."""
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+    monkeypatch.setattr(respmod, "get_account_id", lambda: "000000000000")
+    try:
+        s3mod._create_bucket("issue824-delete", b"")
+        bucket_dir = os.path.join(str(tmp_path), "000000000000", "issue824-delete")
+        assert os.path.isdir(bucket_dir)
+        status, _, _ = s3mod._delete_bucket("issue824-delete")
+        assert status == 204
+        # The on-disk directory is cleaned up, not orphaned.
+        assert not os.path.exists(bucket_dir)
+    finally:
+        s3mod._buckets._data.pop(("000000000000", "issue824-delete"), None)
+
+
 def test_s3_copy_object_propagates_storage_class(s3):
     """CopyObject with explicit StorageClass overrides the source's class (#534)."""
     s3.create_bucket(Bucket="qa-s3-sc-copy")
@@ -2397,3 +2517,263 @@ def test_s3_lifecycle_abort_multipart(s3):
     )
     resp = s3.get_bucket_lifecycle_configuration(Bucket=bucket)
     assert resp["Rules"][0]["AbortIncompleteMultipartUpload"]["DaysAfterInitiation"] == 7
+
+
+# ============================================================================
+# Object ACL (GetObjectAcl / PutObjectAcl)
+# ============================================================================
+
+def test_s3_get_object_acl_default(s3):
+    """Default ACL returns one Grant of FULL_CONTROL to the owner."""
+    import uuid as _u
+    bucket = f"acl-default-{_u.uuid4().hex[:8]}"
+    s3.create_bucket(Bucket=bucket)
+    s3.put_object(Bucket=bucket, Key="k", Body=b"hello")
+    acl = s3.get_object_acl(Bucket=bucket, Key="k")
+    assert acl["Owner"]["ID"]
+    grants = acl["Grants"]
+    assert len(grants) == 1
+    assert grants[0]["Permission"] == "FULL_CONTROL"
+    assert grants[0]["Grantee"]["Type"] == "CanonicalUser"
+    s3.delete_object(Bucket=bucket, Key="k")
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_put_object_acl_canned(s3):
+    """Canned ACL via x-amz-acl header is stored and round-trips via Get."""
+    import uuid as _u
+    bucket = f"acl-canned-{_u.uuid4().hex[:8]}"
+    s3.create_bucket(Bucket=bucket)
+    s3.put_object(Bucket=bucket, Key="k", Body=b"x")
+    s3.put_object_acl(Bucket=bucket, Key="k", ACL="public-read")
+    acl = s3.get_object_acl(Bucket=bucket, Key="k")
+    assert acl["Grants"]
+    # Round-trip: the put succeeded and Get returns a well-formed policy.
+    # We don't enforce ACL semantics, so the canned name is stored as a
+    # comment in the body and not surfaced by boto3's parser; that's fine.
+    s3.delete_object(Bucket=bucket, Key="k")
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_put_object_acl_invalid_canned(s3):
+    """Invalid x-amz-acl values are rejected with InvalidArgument (400)."""
+    import uuid as _u
+    from botocore.exceptions import ClientError
+    bucket = f"acl-bad-{_u.uuid4().hex[:8]}"
+    s3.create_bucket(Bucket=bucket)
+    s3.put_object(Bucket=bucket, Key="k", Body=b"x")
+    with pytest.raises(ClientError) as exc:
+        s3.put_object_acl(Bucket=bucket, Key="k", ACL="not-a-real-canned-acl")
+    assert exc.value.response["Error"]["Code"] == "InvalidArgument"
+    s3.delete_object(Bucket=bucket, Key="k")
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_get_object_acl_no_such_key(s3):
+    """GetObjectAcl on a missing key returns NoSuchKey (404)."""
+    import uuid as _u
+    from botocore.exceptions import ClientError
+    bucket = f"acl-missing-{_u.uuid4().hex[:8]}"
+    s3.create_bucket(Bucket=bucket)
+    with pytest.raises(ClientError) as exc:
+        s3.get_object_acl(Bucket=bucket, Key="never-existed")
+    assert exc.value.response["Error"]["Code"] == "NoSuchKey"
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_put_object_acl_xml_body(s3):
+    """A well-formed AccessControlPolicy XML body is accepted and round-trips."""
+    import uuid as _u
+    bucket = f"acl-xml-{_u.uuid4().hex[:8]}"
+    s3.create_bucket(Bucket=bucket)
+    s3.put_object(Bucket=bucket, Key="k", Body=b"x")
+    s3.put_object_acl(
+        Bucket=bucket, Key="k",
+        AccessControlPolicy={
+            "Owner": {"ID": "test-owner-id", "DisplayName": "tester"},
+            "Grants": [
+                {
+                    "Grantee": {
+                        "Type": "CanonicalUser",
+                        "ID": "test-owner-id",
+                        "DisplayName": "tester",
+                    },
+                    "Permission": "FULL_CONTROL",
+                },
+                {
+                    "Grantee": {
+                        "Type": "Group",
+                        "URI": "http://acs.amazonaws.com/groups/global/AllUsers",
+                    },
+                    "Permission": "READ",
+                },
+            ],
+        },
+    )
+    acl = s3.get_object_acl(Bucket=bucket, Key="k")
+    assert acl["Owner"]["ID"] == "test-owner-id"
+    perms = sorted(g["Permission"] for g in acl["Grants"])
+    assert perms == ["FULL_CONTROL", "READ"]
+    s3.delete_object(Bucket=bucket, Key="k")
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_put_object_with_sha256_checksum_roundtrips(s3):
+    """PutObject + ChecksumAlgorithm=SHA256 must be retrievable via
+    GetObject(ChecksumMode='ENABLED'). Issue #831."""
+    import base64
+    import hashlib
+
+    bucket = "checksum-sha256-bucket"
+    s3.create_bucket(Bucket=bucket)
+    body = b"hello checksum world" * 64
+    expected = base64.b64encode(hashlib.sha256(body).digest()).decode()
+
+    s3.put_object(Bucket=bucket, Key="k", Body=body, ChecksumAlgorithm="SHA256")
+
+    head = s3.head_object(Bucket=bucket, Key="k", ChecksumMode="ENABLED")
+    assert head["ChecksumSHA256"] == expected
+
+    got = s3.get_object(Bucket=bucket, Key="k", ChecksumMode="ENABLED")
+    assert got["ChecksumSHA256"] == expected
+    assert got["Body"].read() == body
+
+    s3.delete_object(Bucket=bucket, Key="k")
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_put_object_with_explicit_sha256_value_validated(s3):
+    """PutObject with both ChecksumAlgorithm + ChecksumSHA256: the supplied
+    value must match the server-computed one (BadDigest otherwise)."""
+    import base64
+    import hashlib
+
+    from botocore.exceptions import ClientError
+
+    bucket = "checksum-validate-bucket"
+    s3.create_bucket(Bucket=bucket)
+    body = b"trust but verify"
+    good = base64.b64encode(hashlib.sha256(body).digest()).decode()
+
+    # Matching value → accepted.
+    s3.put_object(Bucket=bucket, Key="ok", Body=body,
+                  ChecksumAlgorithm="SHA256", ChecksumSHA256=good)
+    head = s3.head_object(Bucket=bucket, Key="ok", ChecksumMode="ENABLED")
+    assert head["ChecksumSHA256"] == good
+
+    # Mismatched value → BadDigest.
+    bad = base64.b64encode(hashlib.sha256(b"tampered").digest()).decode()
+    with pytest.raises(ClientError) as exc:
+        s3.put_object(Bucket=bucket, Key="bad", Body=body,
+                      ChecksumAlgorithm="SHA256", ChecksumSHA256=bad)
+    assert exc.value.response["Error"]["Code"] == "BadDigest"
+
+    s3.delete_object(Bucket=bucket, Key="ok")
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_versioned_get_returns_stored_checksum(s3):
+    """A versioned GetObject(?versionId=X) with ChecksumMode=ENABLED must
+    return the per-version checksum that was stored at put time. Issue #831
+    in-scope follow-up: the original fix added checksums to the current-version
+    path; the versioned-read branch had its own early-return."""
+    import base64
+    import hashlib
+
+    bucket = "checksum-versioned-bucket"
+    s3.create_bucket(Bucket=bucket)
+    s3.put_bucket_versioning(
+        Bucket=bucket,
+        VersioningConfiguration={"Status": "Enabled"},
+    )
+
+    body_a = b"version A body"
+    body_b = b"version B body - different bytes entirely"
+    expected_a = base64.b64encode(hashlib.sha256(body_a).digest()).decode()
+    expected_b = base64.b64encode(hashlib.sha256(body_b).digest()).decode()
+
+    pa = s3.put_object(Bucket=bucket, Key="k", Body=body_a, ChecksumAlgorithm="SHA256")
+    pb = s3.put_object(Bucket=bucket, Key="k", Body=body_b, ChecksumAlgorithm="SHA256")
+    va = pa["VersionId"]
+    vb = pb["VersionId"]
+    assert va != vb
+
+    got_a = s3.get_object(Bucket=bucket, Key="k", VersionId=va, ChecksumMode="ENABLED")
+    got_b = s3.get_object(Bucket=bucket, Key="k", VersionId=vb, ChecksumMode="ENABLED")
+    assert got_a["ChecksumSHA256"] == expected_a
+    assert got_b["ChecksumSHA256"] == expected_b
+    assert got_a["Body"].read() == body_a
+    assert got_b["Body"].read() == body_b
+
+    s3.delete_object(Bucket=bucket, Key="k", VersionId=va)
+    s3.delete_object(Bucket=bucket, Key="k", VersionId=vb)
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_put_object_rejects_unsupported_crc32c_explicitly(s3):
+    """CRC32C requires an optional native library ministack doesn't bundle.
+    Rather than silently accept-without-validation, the put must fail loudly
+    so clients see the gap. Issue #831 follow-up: no silent failures."""
+    import base64
+    import os
+
+    from botocore.exceptions import ClientError
+
+    bucket = "checksum-crc32c-reject-bucket"
+    s3.create_bucket(Bucket=bucket)
+    fake_crc32c = base64.b64encode(os.urandom(4)).decode()
+    with pytest.raises(ClientError) as exc:
+        s3.put_object(
+            Bucket=bucket, Key="k", Body=b"x",
+            ChecksumAlgorithm="CRC32C",
+            ChecksumCRC32C=fake_crc32c,
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidRequest"
+    s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_copy_object_preserves_source_checksum(s3):
+    """CopyObject must propagate the source's stored checksum to the
+    destination so GetObject(dest, ChecksumMode='ENABLED') returns the same
+    SHA256 as the source. Issue #831 in-scope follow-up."""
+    import base64
+    import hashlib
+
+    src_bucket = "checksum-copy-src"
+    dst_bucket = "checksum-copy-dst"
+    s3.create_bucket(Bucket=src_bucket)
+    s3.create_bucket(Bucket=dst_bucket)
+    body = b"copy me with my checksum intact"
+    expected = base64.b64encode(hashlib.sha256(body).digest()).decode()
+
+    s3.put_object(Bucket=src_bucket, Key="k", Body=body, ChecksumAlgorithm="SHA256")
+    s3.copy_object(
+        Bucket=dst_bucket, Key="k",
+        CopySource={"Bucket": src_bucket, "Key": "k"},
+    )
+    got = s3.get_object(Bucket=dst_bucket, Key="k", ChecksumMode="ENABLED")
+    assert got["ChecksumSHA256"] == expected
+
+    s3.delete_object(Bucket=src_bucket, Key="k")
+    s3.delete_object(Bucket=dst_bucket, Key="k")
+    s3.delete_bucket(Bucket=src_bucket)
+    s3.delete_bucket(Bucket=dst_bucket)
+
+
+def test_s3_put_object_with_crc32_checksum_roundtrips(s3):
+    """CRC32 is the other stdlib-supported algorithm — verify the same path."""
+    import base64
+    import struct
+    import zlib
+
+    bucket = "checksum-crc32-bucket"
+    s3.create_bucket(Bucket=bucket)
+    body = b"crc32 payload"
+    expected = base64.b64encode(struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)).decode()
+
+    s3.put_object(Bucket=bucket, Key="k", Body=body, ChecksumAlgorithm="CRC32")
+    got = s3.get_object(Bucket=bucket, Key="k", ChecksumMode="ENABLED")
+    assert got["ChecksumCRC32"] == expected
+
+    s3.delete_object(Bucket=bucket, Key="k")
+    s3.delete_bucket(Bucket=bucket)

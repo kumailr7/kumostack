@@ -33,8 +33,11 @@ import json
 import logging
 import os
 import re
+import struct
+import shutil
 import threading
 import time
+import zlib
 from urllib.parse import parse_qs as _parse_qs
 from urllib.parse import quote as url_quote
 from urllib.parse import unquote as url_unquote
@@ -79,6 +82,7 @@ _bucket_accelerate_config = AccountScopedDict()
 _bucket_request_payment_config = AccountScopedDict()
 
 _object_tags = AccountScopedDict()
+_object_acl = AccountScopedDict()  # (bucket, key) -> stored ACL XML string
 _object_versions = AccountScopedDict()  # (bucket, key) -> [{version_id, obj_record}, ...]
 
 _bucket_object_lock = AccountScopedDict()
@@ -520,7 +524,8 @@ def _extract_user_metadata(headers: dict) -> dict:
     return meta
 
 
-def _build_object_record(body: bytes, headers: dict, etag: str = None) -> dict:
+def _build_object_record(body: bytes, headers: dict, etag: str = None,
+                         checksums: dict | None = None) -> dict:
     content_type = headers.get("content-type", "application/octet-stream")
     content_encoding = headers.get("content-encoding")
     preserved = {}
@@ -539,10 +544,106 @@ def _build_object_record(body: bytes, headers: dict, etag: str = None) -> dict:
         "metadata": _extract_user_metadata(headers),
         "preserved_headers": preserved,
         "storage_class": headers.get("x-amz-storage-class") or "STANDARD",
+        # AWS-shape checksums (SHA256 / SHA1 / CRC32 / CRC32C / CRC64NVME),
+        # stored uppercase-keyed and base64-encoded per the S3 wire contract.
+        # Surfaced on Get/HeadObject via the `x-amz-checksum-*` headers only
+        # when the caller sends `x-amz-checksum-mode: ENABLED`.
+        "checksums": checksums or {},
     }
 
 
-def _object_response_headers(obj: dict, bucket_name: str = "", key: str = "") -> dict:
+# ---------------------------------------------------------------------------
+# AWS-shape checksum handling (SHA256 / SHA1 / CRC32 / CRC32C / CRC64NVME)
+# ---------------------------------------------------------------------------
+
+_S3_CHECKSUM_HEADERS = ("crc32", "crc32c", "crc64nvme", "sha1", "sha256")
+
+
+def _compute_s3_checksum(algorithm: str, body: bytes) -> str | None:
+    """Return base64-encoded checksum for the given AWS S3 algorithm name.
+
+    Supports SHA256 / SHA1 / CRC32 via stdlib. CRC32C / CRC64NVME require
+    optional native libs (`google-crc32c` / `crc64nvme-py`) that aren't part of
+    the stdlib; we return None for those, and the caller falls back to the
+    client-supplied value (if any) instead of failing the put.
+    """
+    algo = (algorithm or "").upper().replace("_", "")
+    if algo == "SHA256":
+        return base64.b64encode(hashlib.sha256(body).digest()).decode()
+    if algo == "SHA1":
+        return base64.b64encode(hashlib.sha1(body).digest()).decode()
+    if algo == "CRC32":
+        crc = zlib.crc32(body) & 0xFFFFFFFF
+        return base64.b64encode(struct.pack(">I", crc)).decode()
+    return None
+
+
+def _resolve_object_checksums(body: bytes, headers: dict):
+    """Build the stored checksum dict and validate any client-supplied values.
+
+    AWS PutObject contract:
+      - `x-amz-checksum-{alg}` headers carry a client-computed value.
+      - `x-amz-sdk-checksum-algorithm: ALG` asks the server to compute that
+        algorithm; the resulting value is returned alongside the response.
+      - When the SDK both names an algorithm AND supplies its value, the
+        server-computed value MUST match the supplied one or the request is
+        rejected with `BadDigest` (HTTP 400).
+
+    Ministack-specific: CRC32C / CRC64NVME require optional native libraries
+    that the "no new dependencies" rule forbids us from adding. Rather than
+    silently accept an unverifiable checksum (which would round-trip on Get
+    without ever being validated against the body — a worse failure mode than
+    refusing the request), we reject the put with a clear error. SHA256 / SHA1
+    / CRC32 work end-to-end.
+
+    Returns ``(checksums_dict, error_response_or_None)``.
+    """
+    provided = {}
+    unverifiable = set()
+    for alg in _S3_CHECKSUM_HEADERS:
+        val = headers.get(f"x-amz-checksum-{alg}")
+        if val:
+            provided[alg.upper()] = val
+            if _compute_s3_checksum(alg.upper(), b"") is None:
+                unverifiable.add(alg.upper())
+
+    sdk_alg_raw = headers.get("x-amz-sdk-checksum-algorithm")
+    if sdk_alg_raw:
+        sdk_key = sdk_alg_raw.upper().replace("_", "")
+        if _compute_s3_checksum(sdk_alg_raw, b"") is None:
+            unverifiable.add(sdk_key)
+
+    if unverifiable:
+        return {}, _error(
+            "InvalidRequest",
+            (
+                f"Checksum algorithm not supported in this ministack build: "
+                f"{', '.join(sorted(unverifiable))}. Supported: SHA256, SHA1, CRC32. "
+                f"CRC32C and CRC64NVME require optional native dependencies that "
+                f"ministack does not bundle; use SHA256 instead, or omit the "
+                f"checksum header."
+            ),
+            400,
+        )
+
+    checksums = dict(provided)
+    if sdk_alg_raw:
+        sdk_key = sdk_alg_raw.upper().replace("_", "")
+        computed = _compute_s3_checksum(sdk_alg_raw, body)
+        if computed is not None:
+            existing = provided.get(sdk_key)
+            if existing and existing != computed:
+                return {}, _error(
+                    "BadDigest",
+                    f"The {sdk_key} you specified did not match the calculated checksum.",
+                    400,
+                )
+            checksums[sdk_key] = computed
+    return checksums, None
+
+
+def _object_response_headers(obj: dict, bucket_name: str = "", key: str = "",
+                             include_checksums: bool = False) -> dict:
     h = {
         "Content-Type": obj["content_type"],
         "ETag": obj["etag"],
@@ -569,6 +670,18 @@ def _object_response_headers(obj: dict, bucket_name: str = "", key: str = "") ->
         hold = _object_legal_hold.get((bucket_name, key))
         if hold:
             h["x-amz-object-lock-legal-hold"] = hold
+    # AWS only returns x-amz-checksum-* headers when the request opted in via
+    # `x-amz-checksum-mode: ENABLED` — silent on Head/Get otherwise to match
+    # the documented contract and avoid leaking checksums into clients that
+    # didn't ask for them.
+    if include_checksums:
+        stored = obj.get("checksums") or {}
+        for alg, val in stored.items():
+            h[f"x-amz-checksum-{alg.lower()}"] = val
+        if stored:
+            # Single PutObject = FULL_OBJECT; multipart-uploaded objects would
+            # be COMPOSITE — out of scope here.
+            h["x-amz-checksum-type"] = "FULL_OBJECT"
     return h
 
 
@@ -607,11 +720,13 @@ def _dispatch(
             if "uploadId" in query_params:
                 return _list_parts(bucket, key, query_params)
             if "tagging" in query_params:
-                return _get_object_tagging(bucket, key)
+                return _get_object_tagging(bucket, key, query_params)
             if "retention" in query_params:
                 return _get_object_retention(bucket, key)
             if "legal-hold" in query_params:
                 return _get_object_legal_hold(bucket, key)
+            if "acl" in query_params:
+                return _get_object_acl(bucket, key)
             return _get_object(bucket, key, headers, query_params)
 
         if method == "PUT":
@@ -620,11 +735,13 @@ def _dispatch(
                     return _upload_part_copy(bucket, key, query_params, headers)
                 return _upload_part(bucket, key, body, query_params, headers)
             if "tagging" in query_params:
-                return _put_object_tagging(bucket, key, body)
+                return _put_object_tagging(bucket, key, body, query_params)
             if "retention" in query_params:
                 return _put_object_retention(bucket, key, body, headers)
             if "legal-hold" in query_params:
                 return _put_object_legal_hold(bucket, key, body)
+            if "acl" in query_params:
+                return _put_object_acl(bucket, key, body, headers)
             if "x-amz-copy-source" in headers:
                 return _copy_object(bucket, key, headers)
             return _put_object(bucket, key, body, headers)
@@ -641,13 +758,13 @@ def _dispatch(
             )
 
         if method == "HEAD":
-            return _head_object(bucket, key)
+            return _head_object(bucket, key, headers)
 
         if method == "DELETE":
             if "uploadId" in query_params:
                 return _abort_multipart_upload(bucket, key, query_params)
             if "tagging" in query_params:
-                return _delete_object_tagging(bucket, key)
+                return _delete_object_tagging(bucket, key, query_params)
             return _delete_object(bucket, key, headers)
 
         return _error(
@@ -880,7 +997,10 @@ def _create_bucket(name: str, body: bytes, headers: dict = None):
         _bucket_versioning[name] = "Enabled"
 
     if S3_PERSIST:
-        os.makedirs(os.path.join(DATA_DIR, name), exist_ok=True)
+        # Account-scope the on-disk dir to match where objects are actually
+        # written (_object_disk_path / _persist_object). Omitting the account id
+        # here created a spurious empty folder at DATA_DIR/<bucket> (#824).
+        os.makedirs(os.path.join(DATA_DIR, get_account_id(), name), exist_ok=True)
     logger.info("S3 bucket created: %s%s", name, f" (region={region})" if region else "")
     return 200, {"Location": f"/{name}"}, b""
 
@@ -917,6 +1037,8 @@ def _delete_bucket(name: str):
         del _object_retention[k]
     for k in [k for k in _object_legal_hold if k[0] == name]:
         del _object_legal_hold[k]
+    if S3_PERSIST:
+        _delete_persisted_bucket(name)
     return 204, {}, b""
 
 
@@ -1909,20 +2031,26 @@ def _put_object(bucket_name: str, key: str, body: bytes, headers: dict):
     if precondition_err:
         return precondition_err
 
+    checksums, csum_err = _resolve_object_checksums(body, headers)
+    if csum_err:
+        return csum_err
+
     etag = f'"{md5_hash(body)}"'
-    obj = _build_object_record(body, headers, etag=etag)
+    obj = _build_object_record(body, headers, etag=etag, checksums=checksums)
     bucket["objects"][key] = obj
 
     # --- Object Lock headers on PutObject ---
     _apply_object_lock_from_headers(bucket_name, key, headers)
 
     # --- x-amz-tagging header on PutObject ---
+    # Parse + validate up front so the count error returns before persist/event,
+    # but defer the dict write until version_id is assigned (tags are per-version).
+    pending_tags = None
     tagging_header = headers.get("x-amz-tagging", "")
     if tagging_header:
-        tags = {k: v[0] for k, v in _parse_qs(tagging_header).items()}
-        if len(tags) > 10:
+        pending_tags = {k: v[0] for k, v in _parse_qs(tagging_header).items()}
+        if len(pending_tags) > 10:
             return _error("BadRequest", "Object tags cannot be greater than 10", 400)
-        _object_tags[(bucket_name, key)] = tags
 
     if S3_PERSIST:
         _persist_object(bucket_name, key, obj)
@@ -1947,10 +2075,14 @@ def _put_object(bucket_name: str, key: str, body: bytes, headers: dict):
             "is_latest": True,
             "data": body,
             "storage_class": obj.get("storage_class") or "STANDARD",
+            "checksums": obj.get("checksums") or {},
         })
         # Mark all previous versions as not latest
         for v in _object_versions[vkey][:-1]:
             v["is_latest"] = False
+
+    if pending_tags is not None:
+        _object_tags[(bucket_name, key, obj.get("version_id"))] = pending_tags
     return 200, resp_headers, b""
 
 
@@ -2108,11 +2240,13 @@ def _post_object(bucket_name: str, body: bytes, headers: dict):
     bucket["objects"][key] = obj
     _apply_object_lock_from_headers(bucket_name, key, synth)
 
+    # Defer tag write until version_id is assigned (tags are per-version).
+    pending_tags = None
     tagging_header = synth.get("x-amz-tagging", "")
     if tagging_header:
-        tags = {k: v[0] for k, v in _parse_qs(tagging_header).items()}
-        if len(tags) <= 10:
-            _object_tags[(bucket_name, key)] = tags
+        parsed = {k: v[0] for k, v in _parse_qs(tagging_header).items()}
+        if len(parsed) <= 10:
+            pending_tags = parsed
 
     if S3_PERSIST:
         _persist_object(bucket_name, key, obj)
@@ -2139,6 +2273,9 @@ def _post_object(bucket_name: str, body: bytes, headers: dict):
         })
         for v in _object_versions[vkey][:-1]:
             v["is_latest"] = False
+
+    if pending_tags is not None:
+        _object_tags[(bucket_name, key, version_id)] = pending_tags
 
     location = f"http://{bucket_name}.s3.amazonaws.com/{url_quote(key, safe='/')}"
     base_resp = {"ETag": etag, "Location": location}
@@ -2232,6 +2369,15 @@ def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = 
                     "Last-Modified": iso_to_rfc7231(v["last_modified"]),
                     "x-amz-version-id": v["version_id"],
                 }
+                # Versioned reads honor `x-amz-checksum-mode: ENABLED` the same
+                # way current-version reads do — the stored per-version
+                # checksums are looked up and surfaced as `x-amz-checksum-*`.
+                if (headers.get("x-amz-checksum-mode") or "").upper() == "ENABLED":
+                    stored = v.get("checksums") or {}
+                    for alg, val in stored.items():
+                        resp_headers[f"x-amz-checksum-{alg.lower()}"] = val
+                    if stored:
+                        resp_headers["x-amz-checksum-type"] = "FULL_OBJECT"
                 return 200, resp_headers, v["data"]
         return _error("NoSuchVersion", "The specified version does not exist.", 404, f"/{bucket_name}/{key}")
 
@@ -2244,9 +2390,16 @@ def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = 
         )
 
     obj = bucket["objects"][key]
-    resp_headers = _object_response_headers(obj, bucket_name, key)
-
     range_header = headers.get("range", "")
+    # AWS returns whole-object checksums only on full-object responses (HTTP
+    # 200). On a 206 Partial Content reply the bytes are a slice, and a
+    # whole-object checksum can't validate them — boto3 raises
+    # `FlexibleChecksumError` if it sees one alongside sliced bytes.
+    checksum_mode_on = (headers.get("x-amz-checksum-mode") or "").upper() == "ENABLED"
+    include_checksums = checksum_mode_on and not range_header
+    resp_headers = _object_response_headers(obj, bucket_name, key,
+                                            include_checksums=include_checksums)
+
     body = _read_body(bucket_name, key, obj)
     if range_header:
         rng = _parse_range(range_header, obj["size"])
@@ -2279,7 +2432,8 @@ def _range_error_xml(bucket_name: str, key: str) -> Element:
     return root
 
 
-def _head_object(bucket_name: str, key: str):
+def _head_object(bucket_name: str, key: str, headers: dict | None = None):
+    headers = headers or {}
     bucket = _ensure_bucket(bucket_name)
     if bucket is None:
         return _no_such_bucket(bucket_name)
@@ -2292,7 +2446,9 @@ def _head_object(bucket_name: str, key: str):
         )
 
     obj = bucket["objects"][key]
-    return 200, _object_response_headers(obj, bucket_name, key), b""
+    include_checksums = (headers.get("x-amz-checksum-mode") or "").upper() == "ENABLED"
+    return 200, _object_response_headers(obj, bucket_name, key,
+                                         include_checksums=include_checksums), b""
 
 
 def _delete_object(bucket_name: str, key: str, headers: dict | None = None):
@@ -2332,9 +2488,10 @@ def _delete_object(bucket_name: str, key: str, headers: dict | None = None):
 
     existed = key in bucket["objects"]
     bucket["objects"].pop(key, None)
-    _object_tags.pop((bucket_name, key), None)
+    _object_tags.pop((bucket_name, key, None), None)
     _object_retention.pop((bucket_name, key), None)
     _object_legal_hold.pop((bucket_name, key), None)
+    _object_acl.pop((bucket_name, key), None)
     _delete_persisted_object(bucket_name, key)
 
     if existed:
@@ -2446,6 +2603,18 @@ def _copy_object(bucket_name: str, dest_key: str, headers: dict):
     new_etag = src_obj["etag"]
     last_modified = now_iso()
     src_body = _read_body(src_bucket_name, src_key, src_obj)
+    # AWS CopyObject preserves the source's whole-object checksum unless the
+    # caller asks for a different algorithm via `x-amz-checksum-algorithm` /
+    # `x-amz-sdk-checksum-algorithm`. The latter case is handled by the same
+    # resolver as PutObject, against the copied body.
+    dest_checksums = dict(src_obj.get("checksums") or {})
+    if headers.get("x-amz-sdk-checksum-algorithm") or any(
+        headers.get(f"x-amz-checksum-{a}") for a in _S3_CHECKSUM_HEADERS
+    ):
+        resolved, csum_err = _resolve_object_checksums(src_body, headers)
+        if csum_err:
+            return csum_err
+        dest_checksums.update(resolved)
     dest_obj = {
         "body": src_body,
         "content_type": content_type,
@@ -2456,25 +2625,26 @@ def _copy_object(bucket_name: str, dest_key: str, headers: dict):
         "metadata": metadata,
         "preserved_headers": preserved,
         "storage_class": dest_sc,
+        "checksums": dest_checksums,
     }
     dest_bucket["objects"][dest_key] = dest_obj
 
-    # --- Preserve / replace tags ---
+    # --- Resolve tag payload now; commit after dest version_id is assigned
+    #     (object tags are per-version per AWS).
     tagging_directive = headers.get("x-amz-tagging-directive", "COPY").upper()
+    pending_dest_tags: dict | None = None
     if tagging_directive == "REPLACE":
         tagging_header = headers.get("x-amz-tagging", "")
         if tagging_header:
-            _object_tags[(bucket_name, dest_key)] = {
+            pending_dest_tags = {
                 k: v[0] for k, v in _parse_qs(tagging_header).items()
             }
-        else:
-            _object_tags.pop((bucket_name, dest_key), None)
     else:
-        src_tags = _object_tags.get((src_bucket_name, src_key))
+        src_tags = _object_tags.get(
+            (src_bucket_name, src_key, src_obj.get("version_id"))
+        )
         if src_tags:
-            _object_tags[(bucket_name, dest_key)] = dict(src_tags)
-        else:
-            _object_tags.pop((bucket_name, dest_key), None)
+            pending_dest_tags = dict(src_tags)
 
     # --- Preserve lock / retention ---
     src_retention = _object_retention.get((src_bucket_name, src_key))
@@ -2522,6 +2692,12 @@ def _copy_object(bucket_name: str, dest_key: str, headers: dict):
         for v in _object_versions[vkey][:-1]:
             v["is_latest"] = False
 
+    dest_version_id = dest_obj.get("version_id")
+    if pending_dest_tags is not None:
+        _object_tags[(bucket_name, dest_key, dest_version_id)] = pending_dest_tags
+    else:
+        _object_tags.pop((bucket_name, dest_key, dest_version_id), None)
+
     root = Element("CopyObjectResult", xmlns=S3_NS)
     SubElement(root, "LastModified").text = last_modified
     SubElement(root, "ETag").text = new_etag
@@ -2533,7 +2709,21 @@ def _copy_object(bucket_name: str, dest_key: str, headers: dict):
 # ---------------------------------------------------------------------------
 
 
-def _get_object_tagging(bucket_name: str, key: str):
+def _resolve_tagging_version(query_params: dict, bucket: dict, key: str):
+    """Resolve the (key, version_id) pair an Object Tagging op should act on.
+
+    Per AWS, object tags are per-version: when ``?versionId=`` is present the
+    op targets that specific version; otherwise it targets the current object.
+    The literal ``versionId=null`` means the pre-versioning object (stored as
+    ``None`` in our key tuple)."""
+    vid = _qp(query_params or {}, "versionId", "")
+    if vid:
+        return None if vid == "null" else vid
+    obj = bucket["objects"].get(key)
+    return obj.get("version_id") if obj else None
+
+
+def _get_object_tagging(bucket_name: str, key: str, query_params: dict | None = None):
     bucket = _ensure_bucket(bucket_name)
     if bucket is None:
         return _no_such_bucket(bucket_name)
@@ -2545,17 +2735,23 @@ def _get_object_tagging(bucket_name: str, key: str):
             f"/{bucket_name}/{key}",
         )
 
-    tags = _object_tags.get((bucket_name, key), {})
+    version_id = _resolve_tagging_version(query_params, bucket, key)
+    tags = _object_tags.get((bucket_name, key, version_id), {})
     root = Element("Tagging", xmlns=S3_NS)
     tag_set = SubElement(root, "TagSet")
     for k, v in tags.items():
         tag = SubElement(tag_set, "Tag")
         SubElement(tag, "Key").text = k
         SubElement(tag, "Value").text = v
-    return 200, {"Content-Type": "application/xml"}, _xml_body(root)
+    resp_headers = {"Content-Type": "application/xml"}
+    if version_id:
+        resp_headers["x-amz-version-id"] = version_id
+    return 200, resp_headers, _xml_body(root)
 
 
-def _put_object_tagging(bucket_name: str, key: str, body: bytes):
+def _put_object_tagging(
+    bucket_name: str, key: str, body: bytes, query_params: dict | None = None
+):
     bucket = _ensure_bucket(bucket_name)
     if bucket is None:
         return _no_such_bucket(bucket_name)
@@ -2572,11 +2768,17 @@ def _put_object_tagging(bucket_name: str, key: str, body: bytes):
         return _error("MalformedXML", "The XML you provided was not well-formed", 400)
     if len(tags) > 10:
         return _error("BadRequest", "Object tags cannot be greater than 10", 400)
-    _object_tags[(bucket_name, key)] = tags
-    return 200, {"Content-Type": "application/xml"}, b""
+    version_id = _resolve_tagging_version(query_params, bucket, key)
+    _object_tags[(bucket_name, key, version_id)] = tags
+    resp_headers = {"Content-Type": "application/xml"}
+    if version_id:
+        resp_headers["x-amz-version-id"] = version_id
+    return 200, resp_headers, b""
 
 
-def _delete_object_tagging(bucket_name: str, key: str):
+def _delete_object_tagging(
+    bucket_name: str, key: str, query_params: dict | None = None
+):
     bucket = _ensure_bucket(bucket_name)
     if bucket is None:
         return _no_such_bucket(bucket_name)
@@ -2587,8 +2789,12 @@ def _delete_object_tagging(bucket_name: str, key: str):
             404,
             f"/{bucket_name}/{key}",
         )
-    _object_tags.pop((bucket_name, key), None)
-    return 204, {}, b""
+    version_id = _resolve_tagging_version(query_params, bucket, key)
+    _object_tags.pop((bucket_name, key, version_id), None)
+    resp_headers = {}
+    if version_id:
+        resp_headers["x-amz-version-id"] = version_id
+    return 204, resp_headers, b""
 
 
 # ---------------------------------------------------------------------------
@@ -2841,6 +3047,117 @@ def _put_object_legal_hold(bucket_name: str, key: str, body: bytes):
 
     _object_legal_hold[(bucket_name, key)] = status_el.text
     return 200, {"Content-Type": "application/xml"}, b""
+
+
+# ---------------------------------------------------------------------------
+# Object ACL (?acl subresource)
+# ---------------------------------------------------------------------------
+
+# Canned ACLs accepted by PutObjectAcl `x-amz-acl` header per the AWS S3 API
+# reference. Stored verbatim — ministack does not enforce ACL semantics on the
+# data plane, only round-trips the value so SDK callers that read it back
+# (terraform, CDK, custom code) see what they set.
+_CANNED_OBJECT_ACLS = {
+    "private",
+    "public-read",
+    "public-read-write",
+    "authenticated-read",
+    "aws-exec-read",
+    "bucket-owner-read",
+    "bucket-owner-full-control",
+}
+
+
+def _default_object_acl_xml() -> bytes:
+    """Default ACL real AWS returns when no ACL has been set on an object:
+    a single Grant of FULL_CONTROL to the bucket owner (CanonicalUser).
+    The canonical-user ID is derived from the request's account so cross-
+    account callers don't all collide on the same fake ID."""
+    owner_id = get_account_id()
+    return (
+        XML_DECL + b"\n"
+        b'<AccessControlPolicy xmlns="' + S3_NS.encode() + b'">'
+        b"<Owner><ID>" + owner_id.encode() + b"</ID>"
+        b"<DisplayName>ministack</DisplayName></Owner>"
+        b"<AccessControlList><Grant>"
+        b'<Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        b'xsi:type="CanonicalUser">'
+        b"<ID>" + owner_id.encode() + b"</ID>"
+        b"<DisplayName>ministack</DisplayName></Grantee>"
+        b"<Permission>FULL_CONTROL</Permission>"
+        b"</Grant></AccessControlList></AccessControlPolicy>"
+    )
+
+
+def _get_object_acl(bucket_name: str, key: str):
+    bucket = _ensure_bucket(bucket_name)
+    if bucket is None:
+        return _no_such_bucket(bucket_name)
+    if key not in bucket["objects"]:
+        return _error(
+            "NoSuchKey",
+            "The specified key does not exist.",
+            404,
+            f"/{bucket_name}/{key}",
+        )
+
+    stored = _object_acl.get((bucket_name, key))
+    body = stored.encode("utf-8") if stored else _default_object_acl_xml()
+    return 200, {"Content-Type": "application/xml"}, body
+
+
+def _put_object_acl(bucket_name: str, key: str, body: bytes, headers: dict):
+    bucket = _ensure_bucket(bucket_name)
+    if bucket is None:
+        return _no_such_bucket(bucket_name)
+    if key not in bucket["objects"]:
+        return _error(
+            "NoSuchKey",
+            "The specified key does not exist.",
+            404,
+            f"/{bucket_name}/{key}",
+        )
+
+    # Canned ACL from x-amz-acl header takes precedence and is mutually
+    # exclusive with an XML body per the AWS API reference. Either path
+    # stores the resulting policy XML so GetObjectAcl round-trips the value
+    # the caller set, matching what real AWS would return.
+    canned = headers.get("x-amz-acl")
+    if canned:
+        if canned not in _CANNED_OBJECT_ACLS:
+            return _error("InvalidArgument",
+                          f"Invalid x-amz-acl value: {canned}", 400)
+        owner_id = get_account_id()
+        _object_acl[(bucket_name, key)] = (
+            XML_DECL.decode() + "\n"
+            f'<AccessControlPolicy xmlns="{S3_NS}">'
+            f"<Owner><ID>{owner_id}</ID>"
+            f"<DisplayName>ministack</DisplayName></Owner>"
+            f'<AccessControlList><!-- canned: {canned} --><Grant>'
+            f'<Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            f'xsi:type="CanonicalUser">'
+            f"<ID>{owner_id}</ID>"
+            f"<DisplayName>ministack</DisplayName></Grantee>"
+            f"<Permission>FULL_CONTROL</Permission></Grant></AccessControlList>"
+            f"</AccessControlPolicy>"
+        )
+        return 200, {}, b""
+
+    if not body:
+        return _error("MissingSecurityHeader",
+                      "Your request was missing a required header.", 400)
+    try:
+        # Validate XML well-formedness — real AWS rejects malformed bodies
+        # with MalformedACLError. We don't enforce grantee/permission
+        # semantics on the data plane, so any well-formed AccessControlPolicy
+        # is accepted and round-tripped verbatim.
+        fromstring(body)
+    except Exception:
+        return _error("MalformedACLError",
+                      "The XML you provided was not well-formed or did not validate "
+                      "against our published schema.", 400)
+    _object_acl[(bucket_name, key)] = body.decode("utf-8", errors="replace")
+    return 200, {}, b""
 
 
 # ---------------------------------------------------------------------------
@@ -3197,9 +3514,11 @@ def _delete_objects(bucket_name: str, body: bytes, headers: dict = None):
                     )
                     continue
             bucket["objects"].pop(k, None)
-            _object_tags.pop((bucket_name, k), None)
+            _object_tags.pop((bucket_name, k, None), None)
             _object_retention.pop((bucket_name, k), None)
             _object_legal_hold.pop((bucket_name, k), None)
+            _object_acl.pop((bucket_name, k), None)
+            _delete_persisted_object(bucket_name, k)
             deleted_keys.append(k)
 
     resp = Element("DeleteResult", xmlns=S3_NS)
@@ -3715,6 +4034,7 @@ def _persist_object(bucket: str, key: str, obj):
                 "metadata": obj.get("metadata", {}),
                 "preserved_headers": obj.get("preserved_headers", {}),
                 "storage_class": obj.get("storage_class", "STANDARD"),
+                "checksums": obj.get("checksums", {}),
             }
             _atomic_write(fpath + ".meta.json", json.dumps(meta), text=True)
         # Drop body from in-memory record to save RAM
@@ -3757,6 +4077,41 @@ def _delete_persisted_object(bucket_name: str, key: str):
             os.remove(meta_path)
     except Exception as e:
         logger.warning("Failed to delete persisted S3 object %s/%s: %s", bucket_name, key, e)
+
+
+def _delete_persisted_bucket(name: str):
+    """Remove a bucket's account-scoped on-disk directory when the bucket is deleted.
+
+    Mirrors the account scoping in _object_disk_path so we clean up exactly the
+    directory _create_bucket / _persist_object create. Without this the bucket
+    folder is orphaned on disk after DeleteBucket (#824).
+
+    Only the new account-scoped layout (DATA_DIR/<account>/<bucket>) is removed;
+    legacy unscoped data (DATA_DIR/<bucket>) from pre-account-scoping versions is
+    left in place — same as _delete_persisted_object, which only touches the
+    account-scoped path."""
+    if not S3_PERSIST or not name:
+        return
+    try:
+        account_id = get_account_id()
+        root = os.path.realpath(DATA_DIR)
+        account_root = os.path.realpath(os.path.join(DATA_DIR, account_id))
+        bucket_dir = os.path.realpath(os.path.join(DATA_DIR, account_id, name))
+        # Never remove DATA_DIR, the account directory itself, or anything that
+        # escapes DATA_DIR — only the one bucket's subtree. rmtree is destructive,
+        # so guard the primitive rather than relying solely on the validated caller.
+        if (
+            bucket_dir in (root, account_root)
+            or os.path.commonpath([root, bucket_dir]) != root
+        ):
+            logger.warning("S3 persist: refusing to delete bucket dir %s (outside its bucket scope)", name)
+            return
+        if os.path.isdir(bucket_dir):
+            # No ignore_errors: let a partial-failure OSError reach the except
+            # below so cleanup failures are logged instead of silently leaking.
+            shutil.rmtree(bucket_dir)
+    except (ValueError, OSError) as e:
+        logger.warning("Failed to delete persisted S3 bucket dir %s: %s", name, e)
 
 
 def _load_persisted_data():
@@ -3840,6 +4195,7 @@ def _load_persisted_bucket(account_id, bucket_name, bucket_path):
                 "metadata": meta.get("metadata", {}),
                 "preserved_headers": meta.get("preserved_headers", {}),
                 "storage_class": meta.get("storage_class", "STANDARD"),
+                "checksums": meta.get("checksums", {}),
             }
 
 
@@ -3852,7 +4208,7 @@ def reset():
     global _bucket_versioning, _bucket_encryption, _bucket_lifecycle, _bucket_cors
     global _bucket_acl, _bucket_websites, _bucket_logging_config
     global _bucket_accelerate_config, _bucket_request_payment_config
-    global _object_tags, _multipart_uploads, _object_versions
+    global _object_tags, _multipart_uploads, _object_versions, _object_acl
     global \
         _bucket_object_lock, \
         _bucket_replication, \
@@ -3873,6 +4229,7 @@ def reset():
         _bucket_accelerate_config,
         _bucket_request_payment_config,
         _object_tags,
+        _object_acl,
         _multipart_uploads,
         _bucket_object_lock,
         _bucket_replication,

@@ -15,7 +15,7 @@ IAM actions:
   PutRolePolicy, GetRolePolicy, DeleteRolePolicy, ListRolePolicies,
   AttachUserPolicy, DetachUserPolicy, ListAttachedUserPolicies,
   PutUserPolicy, GetUserPolicy, DeleteUserPolicy, ListUserPolicies,
-  CreateAccessKey, ListAccessKeys, DeleteAccessKey,
+  CreateAccessKey, ListAccessKeys, DeleteAccessKey, UpdateAccessKey, GetAccessKeyLastUsed,
   CreateInstanceProfile, DeleteInstanceProfile, GetInstanceProfile,
   AddRoleToInstanceProfile, RemoveRoleFromInstanceProfile,
   ListInstanceProfiles, ListInstanceProfilesForRole,
@@ -250,6 +250,18 @@ def _seed_aws_managed_policies() -> None:
         ('AWSCloudFormationFullAccess',
          '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["cloudformation:*"],"Resource":"*"}]}',
          "Provides full access to AWS CloudFormation."),
+        ('AmazonEKSClusterPolicy',
+         '{"Version":"2012-10-17","Statement":[{"Sid":"AmazonEKSClusterPolicy","Effect":"Allow","Action":["autoscaling:DescribeAutoScalingGroups","autoscaling:UpdateAutoScalingGroup","ec2:AttachVolume","ec2:AuthorizeSecurityGroupIngress","ec2:CreateRoute","ec2:CreateSecurityGroup","ec2:CreateTags","ec2:CreateVolume","ec2:DeleteRoute","ec2:DeleteSecurityGroup","ec2:DeleteVolume","ec2:DescribeInstances","ec2:DescribeRouteTables","ec2:DescribeSecurityGroups","ec2:DescribeSubnets","ec2:DescribeVolumes","ec2:DescribeVolumesModifications","ec2:DescribeVpcs","ec2:DescribeDhcpOptions","ec2:DescribeNetworkInterfaces","ec2:DescribeAvailabilityZones","ec2:DetachVolume","ec2:ModifyInstanceAttribute","ec2:ModifyVolume","ec2:RevokeSecurityGroupIngress","ec2:DescribeAccountAttributes","ec2:DescribeAddresses","ec2:DescribeInternetGateways","ec2:DescribeInstanceTopology","elasticloadbalancing:AddTags","elasticloadbalancing:ApplySecurityGroupsToLoadBalancer","elasticloadbalancing:AttachLoadBalancerToSubnets","elasticloadbalancing:ConfigureHealthCheck","elasticloadbalancing:CreateListener","elasticloadbalancing:CreateLoadBalancer","elasticloadbalancing:CreateLoadBalancerListeners","elasticloadbalancing:CreateLoadBalancerPolicy","elasticloadbalancing:CreateTargetGroup","elasticloadbalancing:DeleteListener","elasticloadbalancing:DeleteLoadBalancer","elasticloadbalancing:DeleteLoadBalancerListeners","elasticloadbalancing:DeleteTargetGroup","elasticloadbalancing:DeregisterInstancesFromLoadBalancer","elasticloadbalancing:DeregisterTargets","elasticloadbalancing:DescribeListeners","elasticloadbalancing:DescribeLoadBalancerAttributes","elasticloadbalancing:DescribeLoadBalancerPolicies","elasticloadbalancing:DescribeLoadBalancers","elasticloadbalancing:DescribeTargetGroupAttributes","elasticloadbalancing:DescribeTargetGroups","elasticloadbalancing:DescribeTargetHealth","elasticloadbalancing:DetachLoadBalancerFromSubnets","elasticloadbalancing:ModifyListener","elasticloadbalancing:ModifyLoadBalancerAttributes","elasticloadbalancing:ModifyTargetGroup","elasticloadbalancing:ModifyTargetGroupAttributes","elasticloadbalancing:RegisterInstancesWithLoadBalancer","elasticloadbalancing:RegisterTargets","elasticloadbalancing:SetLoadBalancerPoliciesForBackendServer","elasticloadbalancing:SetLoadBalancerPoliciesOfListener","kms:DescribeKey"],"Resource":"*"},{"Sid":"AmazonEKSClusterPolicySLRCreate","Effect":"Allow","Action":"iam:CreateServiceLinkedRole","Resource":"*","Condition":{"StringEquals":{"iam:AWSServiceName":"elasticloadbalancing.amazonaws.com"}}},{"Sid":"AmazonEKSClusterPolicyENIDelete","Effect":"Allow","Action":"ec2:DeleteNetworkInterface","Resource":"*","Condition":{"StringEquals":{"ec2:ResourceTag/eks:eni:owner":"amazon-vpc-cni"}}}]}',
+         "Provides Kubernetes the permissions it requires to manage resources on your behalf."),
+        ('AmazonEKSWorkerNodePolicy',
+         '{"Version":"2012-10-17","Statement":[{"Sid":"WorkerNodePermissions","Effect":"Allow","Action":["ec2:DescribeInstances","ec2:DescribeInstanceTypes","ec2:DescribeRouteTables","ec2:DescribeSecurityGroups","ec2:DescribeSubnets","ec2:DescribeVolumes","ec2:DescribeVolumesModifications","ec2:DescribeVpcs","eks:DescribeCluster","eks-auth:AssumeRoleForPodIdentity"],"Resource":"*"}]}',
+         "This policy allows Amazon EKS worker nodes to connect to Amazon EKS Clusters."),
+        ('AmazonEKS_CNI_Policy',
+         '{"Version":"2012-10-17","Statement":[{"Sid":"AmazonEKSCNIPolicy","Effect":"Allow","Action":["ec2:AssignPrivateIpAddresses","ec2:AttachNetworkInterface","ec2:CreateNetworkInterface","ec2:DeleteNetworkInterface","ec2:DescribeInstances","ec2:DescribeTags","ec2:DescribeNetworkInterfaces","ec2:DescribeInstanceTypes","ec2:DescribeSubnets","ec2:DescribeSecurityGroups","ec2:DetachNetworkInterface","ec2:ModifyNetworkInterfaceAttribute","ec2:UnassignPrivateIpAddresses"],"Resource":"*"},{"Sid":"AmazonEKSCNIPolicyENITag","Effect":"Allow","Action":["ec2:CreateTags"],"Resource":["arn:aws:ec2:*:*:network-interface/*"]}]}',
+         "Provides the Amazon VPC CNI Plugin (amazon-vpc-cni-k8s) the permissions it requires to modify the IP address configuration on your EKS worker nodes."),
+        ('AmazonEKSServicePolicy',
+         '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["ec2:CreateNetworkInterface","ec2:CreateNetworkInterfacePermission","ec2:DeleteNetworkInterface","ec2:DescribeInstances","ec2:DescribeNetworkInterfaces","ec2:DetachNetworkInterface","ec2:DescribeSecurityGroups","ec2:DescribeSubnets","ec2:DescribeVpcs","ec2:ModifyNetworkInterfaceAttribute","iam:ListAttachedRolePolicies","eks:UpdateClusterVersion","ec2:GetSecurityGroupsForVpc"],"Resource":"*"},{"Effect":"Allow","Action":["ec2:CreateTags","ec2:DeleteTags"],"Resource":["arn:aws:ec2:*:*:vpc/*","arn:aws:ec2:*:*:subnet/*"]},{"Effect":"Allow","Action":["ec2:CreateTags"],"Resource":["arn:aws:ec2:*:*:network-interface/*"],"Condition":{"StringLike":{"aws:RequestTag/Name":"eks-cluster-*"}}},{"Effect":"Allow","Action":"route53:AssociateVPCWithHostedZone","Resource":"*"},{"Effect":"Allow","Action":"logs:CreateLogGroup","Resource":"*"},{"Effect":"Allow","Action":["logs:CreateLogStream","logs:DescribeLogStreams"],"Resource":"arn:aws:logs:*:*:log-group:/aws/eks/*:*"},{"Effect":"Allow","Action":"logs:PutLogEvents","Resource":"arn:aws:logs:*:*:log-group:/aws/eks/*:*:*"},{"Effect":"Allow","Action":"iam:CreateServiceLinkedRole","Resource":"arn:aws:iam::*:role/aws-service-role/eks.amazonaws.com/AWSServiceRoleForAmazonEKS","Condition":{"StringLike":{"iam:AWSServiceName":"eks.amazonaws.com"}}}]}',
+         "This policy allows Amazon Elastic Container Service for Kubernetes to create and manage the necessary resources to operate EKS Clusters."),
     ]
 
     for name, document, description in seeds:
@@ -966,6 +978,49 @@ def _delete_access_key(p):
                       f"The Access Key with id {key_id} cannot be found.", ns="iam")
     del _access_keys[key_id]
     return _xml(200, "DeleteAccessKeyResponse", "", ns="iam")
+
+
+def _update_access_key(p):
+    key_id = _p(p, "AccessKeyId")
+    status = _p(p, "Status")
+    user_name = _p(p, "UserName")
+
+    if not key_id:
+        return _error(400, "InvalidInput", "AccessKeyId is required.", ns="iam")
+    if status not in ("Active", "Inactive"):
+        return _error(400, "InvalidInput",
+                      f"Invalid status value: {status!r}. Must be Active or Inactive.",
+                      ns="iam")
+    if key_id not in _access_keys:
+        return _error(404, "NoSuchEntity",
+                      f"The Access Key with id {key_id} cannot be found.", ns="iam")
+    if user_name and _access_keys[key_id]["UserName"] != user_name:
+        return _error(404, "NoSuchEntity",
+                      f"The Access Key with id {key_id} cannot be found.", ns="iam")
+    _access_keys[key_id]["Status"] = status
+    return _xml(200, "UpdateAccessKeyResponse", "", ns="iam")
+
+
+def _get_access_key_last_used(p):
+    key_id = _p(p, "AccessKeyId")
+    if not key_id:
+        return _error(400, "InvalidInput", "AccessKeyId is required.", ns="iam")
+    if key_id not in _access_keys:
+        return _error(404, "NoSuchEntity",
+                      f"The Access Key with id {key_id} cannot be found.", ns="iam")
+    user_name = _access_keys[key_id]["UserName"]
+    # Ministack does not track per-key usage; return the "never used" shape
+    # that real AWS returns for keys that have never made a signed request
+    # (no LastUsedDate element, Region/ServiceName = "N/A").
+    return _xml(200, "GetAccessKeyLastUsedResponse",
+                f"<GetAccessKeyLastUsedResult>"
+                f"<UserName>{user_name}</UserName>"
+                f"<AccessKeyLastUsed>"
+                f"<Region>N/A</Region>"
+                f"<ServiceName>N/A</ServiceName>"
+                f"</AccessKeyLastUsed>"
+                f"</GetAccessKeyLastUsedResult>",
+                ns="iam")
 
 
 # -------------------- Instance profiles --------------------
@@ -1826,6 +1881,8 @@ _IAM_HANDLERS = {
     "CreateAccessKey": _create_access_key,
     "ListAccessKeys": _list_access_keys,
     "DeleteAccessKey": _delete_access_key,
+    "UpdateAccessKey": _update_access_key,
+    "GetAccessKeyLastUsed": _get_access_key_last_used,
     "CreateInstanceProfile": _create_instance_profile,
     "DeleteInstanceProfile": _delete_instance_profile,
     "GetInstanceProfile": _get_instance_profile,

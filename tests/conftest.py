@@ -53,6 +53,7 @@ def make_client(service, additional_config_kwargs=None):
 
 _SERIAL_TESTS = {
     "tests/test_athena.py::test_athena_engine_mock_via_config",
+    "tests/test_athena.py::test_athena_mixed_glue_and_s3_uri",
     "tests/test_ec2.py::test_ec2_create_default_vpc",
     "tests/test_eks.py::test_eks_cfn_cluster",
     "tests/test_eks.py::test_eks_create_describe_delete_cluster",
@@ -78,6 +79,23 @@ _SERIAL_TESTS = {
     "tests/test_apigatewayv2.py::test_apigwv1_path_based_restapi_legacy_user_request",
     "tests/test_apigatewayv2.py::test_apigwv2_named_stage_still_requires_prefix",
     "tests/test_apigatewayv2.py::test_apigwv2_integration_wrapped_function_arn",
+    # AppSync Lambda-resolver event-shape tests cold-start Lambdas under a 10s
+    # urlopen timeout (Test 6 spawns two functions). Same cold-start-under-xdist
+    # flakiness as the apigw Lambda tests above — run them in the serial phase.
+    "tests/test_appsync.py::test_appsync_lambda_event_field_name",
+    "tests/test_appsync.py::test_appsync_lambda_event_arguments",
+    "tests/test_appsync.py::test_appsync_lambda_event_api_key_header",
+    "tests/test_appsync.py::test_appsync_lambda_event_custom_headers_forwarded",
+    "tests/test_appsync.py::test_appsync_lambda_event_no_identity_in_api_key_mode",
+    "tests/test_appsync.py::test_appsync_lambda_event_identity_from_authorizer",
+    "tests/test_appsync.py::test_appsync_lambda_not_found_no_crash",
+    "tests/test_appsync.py::test_appsync_lambda_returns_errors",
+    "tests/test_appsync.py::test_appsync_lambda_event_source_empty_for_root",
+    "tests/test_appsync.py::test_appsync_lambda_event_variables_substituted",
+    "tests/test_appsync.py::test_appsync_lambda_unhandled_exception_becomes_error",
+    "tests/test_appsync.py::test_appsync_lambda_authorizer_rejection_returns_unauthorized",
+    "tests/test_appsync.py::test_appsync_lambda_missing_authorizer_returns_unauthorized",
+    "tests/test_appsync.py::test_appsync_lambda_failing_authorizer_returns_unauthorized",
 }
 
 
@@ -491,3 +509,8 @@ def tagging():
 @pytest.fixture(scope="session")
 def cur():
     return make_client("cur")
+
+
+@pytest.fixture(scope="session")
+def inspector2():
+    return make_client("inspector2")

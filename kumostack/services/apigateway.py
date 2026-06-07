@@ -105,6 +105,10 @@ _integration_responses = AccountScopedDict()   # api_id -> {integration_id -> {i
 # to per-account local Cognito user pools — the same URL string may legitimately
 # serve different keys in different accounts.
 _jwks_cache = AccountScopedDict()
+# OIDC discovery documents ({issuer}/.well-known/openid-configuration) are cached
+# by issuer (account-scoped, like _jwks_cache) so the jwks_uri lookup does not
+# hit the network on every request.
+_oidc_config_cache = AccountScopedDict()
 
 # WebSocket connection registry — connections are not per-account-scoped at the store level
 # because the @connections management API may arrive on any host/account; instead we store
@@ -496,7 +500,32 @@ def _extract_token_from_identity_source(identity_source, headers: dict, query_pa
     return None
 
 
-def _resolve_jwks_url(authorizer: dict) -> str | None:
+async def _fetch_oidc_jwks_uri(issuer: str) -> str | None:
+    """Resolve an issuer's jwks_uri via OIDC discovery, cached per issuer.
+
+    Reads {issuer}/.well-known/openid-configuration and returns its jwks_uri.
+    Returns None (and caches the miss) if discovery is unavailable so callers
+    can fall back to the conventional path.
+    """
+    issuer = issuer.rstrip("/")
+    cached = _oidc_config_cache.get(issuer)
+    now = time.time()
+    if cached and cached.get("expiresAt", 0) > now:
+        return cached.get("jwks_uri")
+    jwks_uri = None
+    try:
+        url = f"{issuer}/.well-known/openid-configuration"
+        _, _, body = await _urlopen_async(url, _JWKS_TIMEOUT_SECONDS)
+        jwks_uri = (json.loads(body or b"{}") or {}).get("jwks_uri")
+    except (OSError, ValueError, json.JSONDecodeError):
+        jwks_uri = None
+    # Mirror _fetch_jwks (line ~543) which hardcodes `now + 7200`; no separate
+    # env knob for OIDC discovery — it shares the JWT-auth external-fetch path.
+    _oidc_config_cache[issuer] = {"jwks_uri": jwks_uri, "expiresAt": now + 7200}
+    return jwks_uri
+
+
+async def _resolve_jwks_url(authorizer: dict) -> str | None:
     jwt_cfg = authorizer.get("jwtConfiguration") or {}
     issuer = jwt_cfg.get("issuer") or jwt_cfg.get("Issuer")
     if not issuer:
@@ -505,7 +534,8 @@ def _resolve_jwks_url(authorizer: dict) -> str | None:
     if issuer.startswith("https://cognito-idp.") and ".amazonaws.com/" in issuer:
         pool_id = issuer.rsplit("/", 1)[-1]
         return f"http://{_HOST}:{_PORT}/{pool_id}/.well-known/jwks.json"
-    return f"{issuer}/.well-known/jwks.json"
+    discovered = await _fetch_oidc_jwks_uri(issuer)
+    return discovered or f"{issuer}/.well-known/jwks.json"
 
 
 async def _fetch_jwks(url: str) -> dict:
@@ -575,7 +605,7 @@ async def _validate_jwt_authorizer(route: dict, authorizer: dict, headers: dict,
         return None, None, _jwt_unauthorized()
 
     kid = header.get("kid")
-    jwks_url = _resolve_jwks_url(authorizer)
+    jwks_url = await _resolve_jwks_url(authorizer)
     if not kid or not jwks_url:
         return None, None, _jwt_unauthorized()
 
@@ -924,6 +954,22 @@ def _path_matches(route_path: str, request_path: str) -> bool:
     return _extract_path_params(route_path, request_path) is not None
 
 
+def _v2_request_body_is_text(content_type: str | None) -> bool:
+    """Whether an HTTP API (v2) request body is delivered as a UTF-8 string.
+
+    Real AWS delivers the body as text (``isBase64Encoded`` false) only for a
+    whitelist of content types; everything else — including a missing content
+    type and ``application/x-www-form-urlencoded`` — is base64-encoded. The docs
+    don't enumerate this, so the set below was verified against live AWS.
+    """
+    ct = (content_type or "").split(";", 1)[0].strip().lower()
+    return ct.startswith("text/") or ct in (
+        "application/json",
+        "application/xml",
+        "application/javascript",
+    )
+
+
 async def _invoke_lambda_proxy(
     integration,
     api_id,
@@ -960,6 +1006,15 @@ async def _invoke_lambda_proxy(
     # AWS API Gateway v2 joins multi-value query params with commas
     qs = {k: ",".join(v) for k, v in query_params.items()} if query_params else None
     raw_qs = "&".join(f"{k}={val}" for k, vals in query_params.items() for val in vals)
+    # Binary request bodies are base64-encoded with isBase64Encoded=true; only
+    # the text content types AWS recognizes are passed through as UTF-8 strings.
+    if body:
+        if _v2_request_body_is_text(headers.get("content-type")):
+            req_body, req_is_base64 = body.decode("utf-8", errors="replace"), False
+        else:
+            req_body, req_is_base64 = base64.b64encode(body).decode("ascii"), True
+    else:
+        req_body, req_is_base64 = None, False
     event = {
         "version": "2.0",
         "routeKey": route_key,
@@ -985,8 +1040,8 @@ async def _invoke_lambda_proxy(
             "timeEpoch": int(time.time() * 1000),
         },
         "pathParameters": path_params,
-        "body": body.decode("utf-8", errors="replace") if body else None,
-        "isBase64Encoded": False,
+        "body": req_body,
+        "isBase64Encoded": req_is_base64,
     }
     if authorizer_claims is not None:
         event["requestContext"]["authorizer"] = {
@@ -1007,9 +1062,38 @@ async def _invoke_lambda_proxy(
 
     status = lambda_response.get("statusCode", 200)
     resp_headers = {"Content-Type": "application/json"}
-    resp_headers.update(lambda_response.get("headers", {}))
+    # Apply the Lambda's headers, letting each override any case-insensitive
+    # default already present. HTTP field names are case-insensitive (RFC 9110
+    # §5.1), so a lowercase `content-type` from the function must replace the
+    # seeded `Content-Type`, not ship alongside it — the same case-insensitive
+    # handling #750 applied to the v1 multiValueHeaders merge.
+    for k, v in (lambda_response.get("headers") or {}).items():
+        lower_k = k.lower()
+        for existing in [h for h in resp_headers if h.lower() == lower_k]:
+            del resp_headers[existing]
+        resp_headers[k] = v
+    # Payload format 2.0 delivers cookies via the top-level `cookies` array,
+    # which AWS turns into one Set-Cookie header per entry. Observed AWS
+    # behavior when both `cookies` and a `Set-Cookie` in `headers` are
+    # returned: both ship, with the array's entries emitted first followed by
+    # any header Set-Cookie. Merge case-insensitively on the header key, then
+    # reassign under the canonical `Set-Cookie`. _send_response expands the
+    # list into one Set-Cookie line per entry.
+    cookies = lambda_response.get("cookies")
+    if cookies:
+        prior = []
+        for existing in [h for h in resp_headers if h.lower() == "set-cookie"]:
+            val = resp_headers.pop(existing)
+            prior.extend(val if isinstance(val, (list, tuple)) else [val])
+        resp_headers["Set-Cookie"] = list(cookies) + prior
     resp_body = lambda_response.get("body", "")
-    if isinstance(resp_body, str):
+    # A base64-encoded body (isBase64Encoded=true) is decoded to its raw bytes
+    # before sending. HTTP APIs (v2) honor this unconditionally — there is no
+    # binaryMediaTypes negotiation as in REST (v1) — so a true flag always means
+    # "the body string is base64; emit the decoded bytes."
+    if lambda_response.get("isBase64Encoded") and isinstance(resp_body, str):
+        resp_body = base64.b64decode(resp_body)
+    elif isinstance(resp_body, str):
         resp_body = resp_body.encode("utf-8")
     elif isinstance(resp_body, dict):
         resp_body = json.dumps(resp_body, ensure_ascii=False).encode("utf-8")

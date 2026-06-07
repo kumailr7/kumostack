@@ -49,6 +49,8 @@ from kumostack.services import ecs_metadata
 logger = logging.getLogger("ecs")
 
 REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
+_MINISTACK_HOST = os.environ.get("MINISTACK_HOST", "localhost")
+_GATEWAY_PORT = os.environ.get("GATEWAY_PORT", "4566")
 
 _clusters = AccountScopedDict()
 _task_defs = AccountScopedDict()
@@ -252,7 +254,7 @@ async def handle_request(method, path, headers, body, query_params):
 
     parts = [p for p in path.strip("/").split("/") if p]
     if not parts:
-        return error_response_json("InvalidRequest", "Missing path", 400)
+        return error_response_json("ClientException", "Missing path", 400)
 
     return _finalize_ecs_response(_dispatch_path(method, parts, data))
 
@@ -322,7 +324,7 @@ def _dispatch_path(method, parts, data):
         if method == "GET":
             return _list_tags_for_resource(data)
 
-    return error_response_json("InvalidRequest", f"Unknown ECS path: /{'/'.join(parts)}", 400)
+    return error_response_json("ClientException", f"Unknown ECS path: /{'/'.join(parts)}", 400)
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +639,9 @@ def _create_service(data):
 
     svc_key = f"{cluster_name}/{name}"
     if svc_key in _services and _services[svc_key]["status"] == "ACTIVE":
-        return error_response_json("ServiceAlreadyExists",
+        # Per botocore ECS service model there is no ServiceAlreadyExistsException;
+        # the documented surface for this case is ClientException with a message.
+        return error_response_json("ClientException",
             "Creation of service was not idempotent.", 400)
 
     td_ref = data.get("taskDefinition", "")
@@ -723,8 +727,15 @@ def _delete_service(data):
         _stop_task({"task": task_arn, "cluster": cluster_name, "reason": "Service deleted"})
 
     svc["runningCount"] = 0
-    _tags.pop(svc["serviceArn"], None)
-    del _services[svc_key]
+    # AWS DeleteService docs: "After all tasks have transitioned to either
+    # STOPPING or STOPPED status, the service status moves from DRAINING to
+    # INACTIVE. Services in the DRAINING or INACTIVE status can still be viewed
+    # with the DescribeServices API operation." Tasks are stopped synchronously
+    # above, so we land in INACTIVE directly. AWS may eventually purge INACTIVE
+    # records (no fixed window) — ministack keeps them for the process lifetime.
+    # Re-creating with the same name is allowed because _create_service only
+    # conflicts on status=ACTIVE.
+    svc["status"] = "INACTIVE"
 
     _recount_cluster(cluster_name)
     return json_response({"service": _sanitize(svc)})
@@ -1738,7 +1749,8 @@ def _submit_attachment_state_changes(data):
 
 
 def _discover_poll_endpoint(data):
-    return json_response({"endpoint": "http://localhost:4566", "telemetryEndpoint": "http://localhost:4566"})
+    endpoint = f"http://{_MINISTACK_HOST}:{_GATEWAY_PORT}"
+    return json_response({"endpoint": endpoint, "telemetryEndpoint": endpoint})
 
 
 # ---------------------------------------------------------------------------

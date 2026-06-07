@@ -23,7 +23,9 @@ logger = logging.getLogger("kumostack")
 # and routes via credential scope, but raw HTTP/curl/runtime API don't).
 _LAMBDA_PATH_RE = re.compile(
     r"^/\d{4}-\d{2}-\d{2}/(?:functions|layers|event-source-mappings|"
-    r"account-settings|runtime|tags|code-signing-configs)(?:/|$)"
+    r"account-settings|runtime|tags|code-signing-configs|"
+    # Durable Functions (preview, Dec 2025).
+    r"durable-executions|durable-execution-callbacks)(?:/|$)"
 )
 
 # ECS Task Metadata V4 paths: /v4/<token>[/task|/stats|...]. Token is
@@ -63,7 +65,13 @@ SERVICE_PATTERNS = {
         "host_patterns": [r"dynamodb\."],
     },
     "lambda": {
-        "path_patterns": [r"^/2015-03-31/", r"^/2018-10-31/layers"],
+        "path_patterns": [
+            r"^/2015-03-31/",
+            r"^/2018-10-31/layers",
+            # Durable Functions (preview, Dec 2025) — surface lives on the
+            # Lambda endpoint under a fresh API-version prefix.
+            r"^/2025-12-01/(durable-executions|durable-execution-callbacks|functions)",
+        ],
         "host_patterns": [r"lambda\."],
     },
     "iam": {
@@ -338,7 +346,12 @@ SERVICE_PATTERNS = {
     },
     "eks": {
         "host_patterns": [r"eks\."],
+        "path_prefixes": ["/oidc/"],
         "credential_scope": "eks",
+    },
+    "mediaconnect": {
+        "host_patterns": [r"^mediaconnect\."],
+        "credential_scope": "mediaconnect",
     },
     "tagging": {
         "target_prefixes": ["ResourceGroupsTaggingAPI_20170126"],
@@ -372,6 +385,15 @@ SERVICE_PATTERNS = {
         "target_prefixes": ["AWSOrigamiServiceGateway"],
         "host_patterns": [r"cur\."],
         "credential_scope": "cur",
+    },
+    "inspector2": {
+        "host_patterns": [r"inspector2\."],
+        "credential_scope": "inspector2",
+    },
+    "s3tables": {
+        "host_patterns": [r"s3tables\."],
+        "credential_scope": "s3tables",
+        "path_prefixes": ["/buckets", "/iceberg"],
     },
 }
 
@@ -452,10 +474,13 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
                 "appconfigdata": "appconfigdata",
                 "scheduler": "scheduler",
                 "eks": "eks",
+                "mediaconnect": "mediaconnect",
                 "tagging": "tagging",
                 "resource-groups": "resource-groups",
                 "cloudtrail": "cloudtrail",
                 "cur": "cur",
+                "inspector2": "inspector2",
+                "s3tables": "s3tables",
             }
             if svc_name in scope_map:
                 return scope_map[svc_name]
@@ -845,6 +870,12 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
         return "cognito-idp"
     if _ECS_METADATA_PATH_RE.match(path_lower):
         return "ecs-metadata"
+    # EKS OIDC discovery / JWKS for IRSA — Terraform's
+    # aws_iam_openid_connect_provider fetches these as plain unsigned HTTPS
+    # GETs, so we route by path before falling into the generic /clusters ECS
+    # rule below.
+    if path_lower.startswith("/oidc/"):
+        return "eks"
     if path_lower.startswith(("/clusters", "/taskdefinitions", "/tasks", "/services", "/stoptask")):
         return "ecs"
     # smithy-rpc-v2-cbor path: /service/ServiceName/operation/ActionName

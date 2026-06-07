@@ -31,6 +31,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import secrets
 import importlib
 import io
 import json
@@ -66,6 +67,8 @@ from kumostack.core.responses import (
 
 logger = logging.getLogger("lambda")
 
+_MINISTACK_HOST = os.environ.get("MINISTACK_HOST", "localhost")
+
 
 def _emit_lambda_metrics(function_name: str, duration_ms: float,
                          error: bool, throttle: bool) -> None:
@@ -94,6 +97,29 @@ def _emit_lambda_metrics(function_name: str, duration_ms: float,
             )
     except Exception:
         logger.debug("emit lambda metrics failed", exc_info=True)
+
+
+def _xray_trace_id_for_invocation(config: dict, inbound_trace_header: str | None = None) -> str | None:
+    """Return the value to set as ``_X_AMZN_TRACE_ID`` for an invocation.
+
+    AWS Lambda exposes this env var to the runtime when ``TracingConfig.Mode``
+    is ``Active``. Format per AWS X-Ray docs:
+    ``Root=1-<8hex_epoch>-<24hex_random>;Parent=<16hex_random>;Sampled=1``.
+    If the inbound request already carries an ``X-Amzn-Trace-Id`` header (a
+    chained Lambda → Lambda invocation), prefer it so traces stitch across
+    hops; otherwise synthesize a fresh root segment. Returns ``None`` when
+    tracing is not Active and no inbound header is present, so the caller can
+    skip the env-var entirely.
+    """
+    if inbound_trace_header:
+        return inbound_trace_header
+    mode = (config.get("TracingConfig") or {}).get("Mode", "PassThrough")
+    if mode != "Active":
+        return None
+    epoch_hex = format(int(time.time()), "08x")
+    root_random = secrets.token_hex(12)   # 24 hex chars
+    parent = secrets.token_hex(8)          # 16 hex chars
+    return f"Root=1-{epoch_hex}-{root_random};Parent={parent};Sampled=1"
 
 
 def _account_from_arn(arn: str) -> str:
@@ -531,6 +557,100 @@ def _validate_unzipped_size(zip_data: bytes | None):
     return None
 
 
+import contextvars
+
+# Per-invocation durable-execution context, set by `_invoke` and read by the
+# executor functions to inject env vars into the Lambda container. Keeps
+# the data flow explicit and concurrency-safe (each request has its own
+# context — ASGI + asyncio.to_thread both propagate ContextVars).
+_durable_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "lambda_durable_ctx", default=None,
+)
+
+
+def _durable_env_overlay() -> dict[str, str]:
+    """Return env vars to layer onto the Lambda container when the current
+    invocation belongs to a durable execution. Empty dict otherwise."""
+    ctx = _durable_ctx.get()
+    if not ctx:
+        return {}
+    return {
+        "AWS_LAMBDA_DURABLE_EXECUTION_ARN": ctx.get("arn", ""),
+        "AWS_LAMBDA_DURABLE_CHECKPOINT_TOKEN": ctx.get("token", ""),
+        "AWS_LAMBDA_DURABLE_EXECUTION_NAME": ctx.get("name", ""),
+    }
+
+
+def invoke_durable_resume(function_name: str, durable_arn: str, original_event: dict) -> None:
+    """Re-invoke a paused durable function with the existing execution ARN
+    and the now-populated operations log. Called by the resume scheduler
+    when a WAIT expires."""
+    from ministack.services import lambda_durable
+    rec = lambda_durable._executions.get(durable_arn)
+    if not rec:
+        return
+    canonical = _resolve_name(function_name)
+    func = _functions.get(canonical)
+    if not func:
+        return
+    config = func.get("config") or func
+    # Set the durable context to the SAME ARN/token so the SDK reads the
+    # accumulated operations as InitialExecutionState (replay path).
+    _durable_ctx.set({
+        "arn": durable_arn,
+        "token": rec["CheckpointToken"],
+        "name": rec["DurableExecutionName"],
+    })
+    resume_event = {
+        "DurableExecutionArn": durable_arn,
+        "CheckpointToken": rec["CheckpointToken"],
+        "InitialExecutionState": {
+            "Operations": lambda_durable._serialize_operations(rec["Operations"], for_event=True),
+            "NextMarker": "",
+        },
+    }
+    try:
+        result = _execute_function(func, resume_event)
+        # If the resume still returns PENDING, schedule the next wakeup.
+        try:
+            payload = result.get("body")
+            if isinstance(payload, (bytes, bytearray)):
+                payload = payload.decode("utf-8", errors="replace")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if isinstance(payload, dict) and payload.get("Status") == "PENDING":
+                lambda_durable.schedule_resume(durable_arn)
+            elif isinstance(payload, dict) and payload.get("Status") == "SUCCEEDED":
+                lambda_durable.mark_execution_completed(
+                    durable_arn,
+                    result_payload=payload.get("Result"),
+                    error=None,
+                )
+            elif isinstance(payload, dict) and payload.get("Status") == "FAILED":
+                lambda_durable.mark_execution_completed(
+                    durable_arn,
+                    result_payload=None,
+                    error=payload.get("Error"),
+                )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    finally:
+        _durable_ctx.set(None)
+
+
+def _durable_arn_lookup(name_or_arn: str) -> str | None:
+    """Resolve a function name or ARN to the canonical function ARN, or None
+    if the function doesn't exist. Used by lambda_durable.handle_list_by_function."""
+    try:
+        canonical = _resolve_name(name_or_arn)
+    except Exception:
+        return None
+    func = _functions.get(canonical)
+    if not func:
+        return None
+    return func.get("FunctionArn") or _func_arn(canonical)
+
+
 def _build_config(name: str, data: dict, code_zip: bytes | None = None) -> dict:
     code_size = len(code_zip) if code_zip else 0
     code_sha = base64.b64encode(hashlib.sha256(code_zip).digest()).decode() if code_zip else ""
@@ -539,8 +659,11 @@ def _build_config(name: str, data: dict, code_zip: bytes | None = None) -> dict:
     layers_cfg = []
     for layer in data.get("Layers", []):
         if isinstance(layer, str):
-            layers_cfg.append({"Arn": layer, "CodeSize": 0})
+            layers_cfg.append({"Arn": layer, "CodeSize": _layer_codesize_for_arn(layer)})
         elif isinstance(layer, dict):
+            layer = dict(layer)
+            if "CodeSize" not in layer and "Arn" in layer:
+                layer["CodeSize"] = _layer_codesize_for_arn(layer["Arn"])
             layers_cfg.append(layer)
 
     env = data.get("Environment")
@@ -668,6 +791,15 @@ async def handle_request(method: str, path: str, headers: dict, body: bytes, que
 
     path = unquote(path)
     parts = path.rstrip("/").split("/")
+
+    # --- Durable Execution surface (preview, API version 2025-12-01) ---
+    # Routed first because some paths embed the function ARN as a path segment
+    # which can otherwise be misclassified.
+    from ministack.services import lambda_durable
+    durable_resp = lambda_durable.try_route(method, path, body, query_params,
+                                             function_arn_lookup=_durable_arn_lookup)
+    if durable_resp is not None:
+        return durable_resp
 
     try:
         data = json.loads(body) if body else {}
@@ -1074,7 +1206,7 @@ def _presigned_code_url(func_name: str) -> str:
     kumostack endpoint and dress the URL up with the query params SDKs and
     scripts expect, so `pip-style` pull-and-extract code works unchanged.
     """
-    host = os.environ.get("MINISTACK_HOST", "localhost")
+    host = _MINISTACK_HOST
     port = os.environ.get("GATEWAY_PORT", os.environ.get("EDGE_PORT", "4566"))
     qs = (
         f"?X-Amz-Algorithm=AWS4-HMAC-SHA256"
@@ -1272,6 +1404,9 @@ def _delete_function(name: str, query_params: dict):
     else:
         del _functions[name]
         invalidate_worker(name)
+        # Docker pool too — otherwise the function's pooled containers leak
+        # until _WARM_CONTAINER_TTL eviction.
+        _pool_kill_function(get_account_id(), name)
     return 204, {}, b""
 
 
@@ -1324,6 +1459,10 @@ def _update_code(name: str, data: dict):
 
     # Invalidate only the old $LATEST worker — published version workers stay alive
     invalidate_worker(name, qualifier="$LATEST")
+    # Docker pool: the new CodeSha256 changes the pool key so new invokes
+    # spawn fresh containers anyway, but the old containers under the old key
+    # would linger until _WARM_CONTAINER_TTL. Reap them now.
+    _pool_kill_function(get_account_id(), name)
     _schedule_state_transition(name, _LAMBDA_STATE_TRANSITION_DELAY)
 
     if data.get("Publish"):
@@ -1374,8 +1513,11 @@ def _update_config(name: str, data: dict):
                 layers_cfg = []
                 for layer in data["Layers"]:
                     if isinstance(layer, str):
-                        layers_cfg.append({"Arn": layer, "CodeSize": 0})
+                        layers_cfg.append({"Arn": layer, "CodeSize": _layer_codesize_for_arn(layer)})
                     elif isinstance(layer, dict):
+                        layer = dict(layer)
+                        if "CodeSize" not in layer and "Arn" in layer:
+                            layer["CodeSize"] = _layer_codesize_for_arn(layer["Arn"])
                         layers_cfg.append(layer)
                 config["Layers"] = layers_cfg
             else:
@@ -1390,6 +1532,27 @@ def _update_config(name: str, data: dict):
     config["StateReason"] = "The function is being updated."
     config["StateReasonCode"] = "Updating"
     config["RevisionId"] = new_uuid()
+    # AWS-match: UpdateFunctionConfiguration recycles the init container when
+    # spawn-time inputs change (Runtime/Handler/Layers/Env/MemorySize/Arch/
+    # VpcConfig/FileSystemConfigs). The ministack warm-pool key is just
+    # account:func:qualifier, so a stale worker would keep serving with the
+    # pre-update layers/env. Invalidate to force a fresh worker on next invoke,
+    # mirroring what _update_code already does. Otherwise PublishLayerVersion +
+    # UpdateFunctionConfiguration(Layers=[...]) leaves the previously-warm
+    # worker without the new layer extracted on disk (issue #816).
+    _WORKER_AFFECTING = {
+        "Runtime", "Handler", "Layers", "Environment", "MemorySize",
+        "Architectures", "VpcConfig", "FileSystemConfigs",
+    }
+    if any(k in data for k in _WORKER_AFFECTING):
+        invalidate_worker(name, qualifier="$LATEST")
+        # Also invalidate the docker warm-container pool: its key is
+        # account:func:zip:CodeSha256, so config-only changes (Layers,
+        # Environment, MemorySize, etc.) wouldn't otherwise displace a stale
+        # pooled container. Without this, LAMBDA_EXECUTOR=docker users hit the
+        # same "old container, no new layer mounted" failure mode that the
+        # in-process warm worker recycle solved for Python/Node.
+        _pool_kill_function(get_account_id(), name)
     _schedule_state_transition(name, _LAMBDA_STATE_TRANSITION_DELAY)
     return json_response(config)
 
@@ -1433,6 +1596,47 @@ async def _invoke(name: str, event: dict, headers: dict, path_qualifier: str | N
     if invocation_type == "DryRun":
         return 204, {"X-Amz-Executed-Version": executed_version}, b""
 
+    # If the function has DurableConfig.Enabled, spin up a durable execution
+    # record so the SDK calls (Checkpoint / GetState) inside the function
+    # have a target. The ARN is surfaced back via the X-Amz-Durable-Execution-
+    # Arn response header so callers can wire it to follow-up management ops.
+    durable_arn = None
+    if (func.get("config", {}) or {}).get("DurableConfig", {}).get("Enabled"):
+        from ministack.services import lambda_durable
+        try:
+            event_payload = json.dumps(event) if not isinstance(event, str) else event
+        except (TypeError, ValueError):
+            event_payload = ""
+        rec = lambda_durable.create_execution_for_invoke(
+            function_arn=_func_arn(name),
+            version=executed_version,
+            input_payload=event_payload,
+        )
+        durable_arn = rec["DurableExecutionArn"]
+        _durable_ctx.set({
+            "arn": durable_arn,
+            "token": rec["CheckpointToken"],
+            "name": rec["DurableExecutionName"],
+        })
+        # AWS sends a durable Lambda an event containing ONLY the durable
+        # context fields the SDK reads via `from_json_dict`: DurableExecutionArn,
+        # CheckpointToken, InitialExecutionState. The user's actual payload
+        # lives inside the InitialExecutionState as a synthetic EXECUTION-type
+        # operation (see lambda_durable.create_execution_for_invoke); the SDK
+        # reads it via execution_state.get_input_payload().
+        # We pass back the operations list (with the seeded EXECUTION op) so
+        # the SDK has the input on every invocation, including replays.
+        # Operations are serialized via lambda_durable._serialize_operations.
+        from ministack.services import lambda_durable as _ld
+        event = {
+            "DurableExecutionArn": durable_arn,
+            "CheckpointToken": rec["CheckpointToken"],
+            "InitialExecutionState": {
+                "Operations": _ld._serialize_operations(rec["Operations"], for_event=True),
+                "NextMarker": "",
+            },
+        }
+
     if invocation_type == "Event":
         # AWS async invocation: retry + DLQ routing handled by the shared
         # helper so event-source fan-out (S3, EventBridge, SNS → Lambda, etc.)
@@ -1457,6 +1661,40 @@ async def _invoke(name: str, event: dict, headers: dict, path_qualifier: str | N
         "Content-Type": "application/json",
         "X-Amz-Executed-Version": executed_version,
     }
+    if durable_arn:
+        resp_headers["X-Amz-Durable-Execution-Arn"] = durable_arn
+        # Real AWS hands the initial CheckpointToken to the runtime via Lambda
+        # context; ministack surfaces it on the response header so test clients
+        # and SDK-less callers can drive the management ops directly.
+        _de_rec = lambda_durable._executions.get(durable_arn)
+        if _de_rec:
+            resp_headers["X-Amz-Durable-Checkpoint-Token"] = _de_rec["CheckpointToken"]
+        # Inspect the SDK's return value: PENDING → schedule the next wakeup
+        # from the latest WAIT timestamp; SUCCEEDED/FAILED → mark terminal.
+        try:
+            payload_obj = result.get("body")
+            if isinstance(payload_obj, (bytes, bytearray)):
+                payload_obj = payload_obj.decode("utf-8", errors="replace")
+            if isinstance(payload_obj, str):
+                payload_obj = json.loads(payload_obj)
+            if isinstance(payload_obj, dict):
+                status = payload_obj.get("Status")
+                if status == "PENDING":
+                    lambda_durable.schedule_resume(durable_arn)
+                elif status == "SUCCEEDED":
+                    lambda_durable.mark_execution_completed(
+                        durable_arn,
+                        result_payload=payload_obj.get("Result"),
+                        error=None,
+                    )
+                elif status == "FAILED":
+                    lambda_durable.mark_execution_completed(
+                        durable_arn,
+                        result_payload=None,
+                        error=payload_obj.get("Error"),
+                    )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
 
     log_output = result.get("log", "")
     if log_output:
@@ -1715,6 +1953,29 @@ def _pool_clear_all() -> None:
         all_entries = [e for lst in _warm_pool.values() for e in lst]
         _warm_pool.clear()
     for e in all_entries:
+        _kill_pool_entry(e)
+
+
+def _pool_kill_function(account: str, func_name: str) -> None:
+    """Kill every pooled docker container for a function across all qualifiers.
+
+    The pool key is ``{account}:{func_name}:zip:{CodeSha256}`` (or
+    ``:image:{ImageUri}``). UpdateFunctionConfiguration changes attributes that
+    don't show up in the key (Layers / Environment / MemorySize / VpcConfig /
+    Architectures / FileSystemConfigs / Runtime / Handler), so the same key
+    would otherwise hand back a stale container that was spawned before the
+    config change. Issue #816 docker-executor follow-up: a layer attached
+    after the first invoke was never mounted on the reused warm container,
+    so handler imports from the layer kept failing even after the layer's
+    extracted dir was correct.
+    """
+    prefix = f"{account}:{func_name}:"
+    to_kill = []
+    with _warm_pool_lock:
+        for key in list(_warm_pool.keys()):
+            if key.startswith(prefix):
+                to_kill.extend(_warm_pool.pop(key))
+    for e in to_kill:
         _kill_pool_entry(e)
 
 
@@ -2017,12 +2278,20 @@ def _throttle_response(reason_code: str, msg: str, retry_after: int = 1) -> dict
     }
 
 
-def _docker_cp_dir(container, src_dir: str, dest_dir: str):
-    """Copy a local directory into a Docker container using a tar archive."""
+def _docker_cp_dir(container, src_dir: str, dest_dir: str, arcname: str = "."):
+    """Copy a local directory into a Docker container using a tar archive.
+
+    Docker's ``put_archive`` requires ``dest_dir`` to already exist in the
+    container. For paths the base image owns (``/var/task``, ``/var/runtime``,
+    ``/opt``) this is fine. For paths we want to create (``/opt/layer_N``),
+    extract into the existing parent and pass the new subdir via ``arcname``
+    so the tar carries ``./layer_N/...`` entries — the put_archive call
+    materialises the subdir as part of extraction.
+    """
     import tarfile
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
-        tar.add(src_dir, arcname=".")
+        tar.add(src_dir, arcname=arcname)
     buf.seek(0)
     container.put_archive(dest_dir, buf)
 
@@ -2258,6 +2527,26 @@ def _spawn_lambda_container(config: dict, code_zip: bytes | None):
             f"/opt/layer_{i}" for i in range(len(layers_dirs))
         )
     container_env.update(env_vars)
+    # Per-invocation durable-execution overlay (no-op when the call isn't
+    # inside a durable function).
+    container_env.update(_durable_env_overlay())
+    # NOTE: X-Ray active tracing is NOT supported in the docker RIE
+    # executor. AWS RIE explicitly does not implement X-Ray
+    # (https://github.com/aws/aws-lambda-runtime-interface-emulator —
+    # "The component does not support X-ray and other Lambda integrations
+    # locally") and the RIE container is pooled and reused, so baking
+    # ``_X_AMZN_TRACE_ID`` into ``container_env`` here would be stale on
+    # every reuse anyway. Functions that need X-Ray must use the warm
+    # Python/Node executor (default for those runtimes), the provided
+    # runtime, or the local subprocess executor.
+    if (config.get("TracingConfig") or {}).get("Mode") == "Active":
+        logger.warning(
+            "Lambda %s: TracingConfig.Mode=Active is not supported in the "
+            "docker RIE executor (AWS RIE limitation). _X_AMZN_TRACE_ID will "
+            "not be set in the runtime. Set LAMBDA_EXECUTOR= (empty) to use "
+            "the warm worker, which supports X-Ray.",
+            config.get("FunctionName", "?"),
+        )
     # AWS_ENDPOINT_URL set *after* function env so it always points at kumostack.
     # Replace localhost/127.0.0.1 with host.docker.internal so the container
     # can reach the host where kumostack is running.
@@ -2357,7 +2646,10 @@ def _spawn_lambda_container(config: dict, code_zip: bytes | None):
             if is_provided:
                 _docker_cp_dir(container, code_dir, "/var/runtime")
             for idx, ld in enumerate(layers_dirs):
-                _docker_cp_dir(container, ld, f"/opt/layer_{idx}")
+                # /opt/layer_{idx} doesn't exist in the base RIE image — extract
+                # into /opt with the layer dir baked into the arcname (issue #816
+                # follow-up: docker executor 404 on archive path).
+                _docker_cp_dir(container, ld, "/opt", arcname=f"layer_{idx}")
             container.start()
         else:
             container = client.containers.run(**run_kwargs)
@@ -2647,10 +2939,21 @@ def _execute_function(func: dict, event: dict) -> dict:
         runtime = config.get("Runtime", "python3.12")
         if runtime.startswith("provided"):
             result = _execute_function_provided(func, event)
-        elif runtime.startswith("python") or runtime.startswith("nodejs"):
+        elif (runtime.startswith("python") or runtime.startswith("nodejs")) \
+                and not _durable_ctx.get():
+            # Warm pool reuses worker subprocesses whose env was fixed at
+            # spawn time. Durable invocations need per-call env (the
+            # DurableExecutionArn + CheckpointToken change every invoke),
+            # so route them through the per-call local executor.
             result = _execute_function_warm(func, event)
-        else:
+        elif runtime.startswith(("python", "nodejs")):
+            # Durable python/nodejs falls through to local subprocess (per
+            # the elif above we already filtered durable out of warm).
             result = _execute_function_local(func, event)
+        else:
+            # java*/dotnet*/ruby* need the real RIE image — there's no
+            # in-process executor that can run JVM bytecode or .NET IL.
+            result = _execute_function_docker(func, event)
 
     duration_ms = int((time.time() - started) * 1000)
     _emit_lambda_logs(
@@ -2731,6 +3034,13 @@ def _execute_function_proxy(func: dict, event: dict, url: str, request_id: str) 
         "X-Amzn-Lambda-Request-Id": request_id,
         "X-Amzn-Lambda-Deadline-Ms": str(int((time.time() + timeout) * 1000)),
     }
+    # X-Ray active tracing — pass the trace header to the proxy. The user's
+    # container can translate it to ``_X_AMZN_TRACE_ID`` if their code reads
+    # X-Ray traces. Proxy mode is by definition not a Lambda runtime
+    # emulation, so this is best-effort header forwarding only.
+    _xray_trace_id = _xray_trace_id_for_invocation(config)
+    if _xray_trace_id:
+        headers["X-Amzn-Trace-Id"] = _xray_trace_id
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -2787,6 +3097,13 @@ def _execute_function_warm(func: dict, event: dict) -> dict:
     qualifier = config.get("Version", "$LATEST")
     try:
         worker = get_or_create_worker(func_name, config, code_zip, qualifier=qualifier)
+        # Inject X-Ray trace header into the event so the worker bootstrap
+        # can set ``_X_AMZN_TRACE_ID`` in os.environ before calling the
+        # handler. Per-invocation, not bake-time, so it can't live in the
+        # worker's spawn env.
+        _xray = _xray_trace_id_for_invocation(config)
+        if _xray:
+            event["_x_amzn_trace_id"] = _xray
         result = worker.invoke(event, new_uuid())
         if result.get("status") == "ok":
             return {"body": result.get("result"), "log": result.get("log", "")}
@@ -2801,7 +3118,7 @@ def _execute_function_warm(func: dict, event: dict) -> dict:
                     "errorType": error_type,
                 },
                 "error": True,
-                "log": result.get("trace", result.get("error", "")),
+                "log": "\n".join(filter(None, [result.get("log", ""), result.get("trace", result.get("error", ""))])),
             }
     except Exception as e:
         logger.error("Warm worker execution error for %s: %s", func_name, e)
@@ -2949,6 +3266,14 @@ def _execute_function_provided(func: dict, event: dict) -> dict:
                     "_HANDLER": config.get("Handler", "bootstrap"),
                 })
                 proc_env.update(env_vars)
+                proc_env.update(_durable_env_overlay())
+                # X-Ray active tracing. ``_execute_function_provided`` builds
+                # ``proc_env`` per-invocation, so a per-call trace ID is safe
+                # here (unlike the RIE pool). aws-xray-sdk reads this env var
+                # per-segment via ``os.getenv``, so the runtime sees it.
+                _xray_trace_id = _xray_trace_id_for_invocation(config)
+                if _xray_trace_id:
+                    proc_env["_X_AMZN_TRACE_ID"] = _xray_trace_id
                 # Override AWS_ENDPOINT_URL *after* function env vars so
                 # Lambda binaries always call back to this KumoStack
                 # instance.  Function-level env vars may carry the
@@ -3100,9 +3425,20 @@ def _execute_function_local(func: dict, event: dict) -> dict:
                 endpoint = _normalize_endpoint_url(env_vars.get("AWS_ENDPOINT_URL", ""))
             if not endpoint:
                 endpoint = _normalize_endpoint_url(env_vars.get("LOCALSTACK_HOSTNAME", ""))
+            if not endpoint:
+                # Subprocess runs on the same host as ministack — point it at
+                # ourselves so boto3 calls land back here, not at real AWS.
+                gateway_port = os.environ.get("GATEWAY_PORT", "4566")
+                endpoint = f"http://{_MINISTACK_HOST}:{gateway_port}"
             if endpoint:
                 env["AWS_ENDPOINT_URL"] = endpoint
             env.update(env_vars)
+            env.update(_durable_env_overlay())
+            # X-Ray active tracing — one-shot subprocess, env is per-invocation
+            # so a fresh trace ID per call is safe (unlike the pooled RIE).
+            _xray_trace_id = _xray_trace_id_for_invocation(config)
+            if _xray_trace_id:
+                env["_X_AMZN_TRACE_ID"] = _xray_trace_id
 
             cmd = ["node", wrapper_path] if is_node else ["python3", wrapper_path]
             proc = subprocess.run(
@@ -3186,6 +3522,28 @@ def _resolve_layer_zip(layer_arn_str: str) -> bytes | None:
         if v["Version"] == version:
             return v.get("_zip_data")
     return None
+
+
+def _layer_codesize_for_arn(layer_arn_str: str) -> int:
+    """Look up the stored layer version's CodeSize, or 0 if the layer
+    version can't be resolved. Real AWS surfaces the actual layer code size on
+    `GetFunctionConfiguration.Layers[*].CodeSize` so callers can sanity-check
+    against quotas (250 MB unzipped function + layers)."""
+    segs = layer_arn_str.split(":")
+    if len(segs) < 8:
+        return 0
+    layer_name = segs[6]
+    try:
+        version = int(segs[7])
+    except (ValueError, IndexError):
+        return 0
+    layer = _layers.get(layer_name)
+    if not layer:
+        return 0
+    for v in layer["versions"]:
+        if v["Version"] == version:
+            return v.get("Content", {}).get("CodeSize", 0)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -3574,9 +3932,8 @@ def _untag_resource(resource_arn: str, query_params: dict):
 
 
 def _layer_content_url(layer_name: str, version: int) -> str:
-    host = os.environ.get("MINISTACK_HOST", "localhost")
     port = os.environ.get("GATEWAY_PORT", "4566")
-    return f"http://{host}:{port}/_kumostack/lambda-layers/{layer_name}/{version}/content"
+    return f"http://{_MINISTACK_HOST}:{port}/_kumostack/lambda-layers/{layer_name}/{version}/content"
 
 
 def _publish_layer_version(layer_name: str, data: dict):

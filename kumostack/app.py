@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from urllib.parse import parse_qs, unquote
 
@@ -154,6 +155,7 @@ _NON_S3_VHOST_NAMES = frozenset({
     "apigateway", "cloudformation", "autoscaling", "codebuild", "transfer", "cur",
     "cloudfront-kvs",
     "appsync-api", "appsync-realtime-api",
+    "inspector2",
 })
 
 from kumostack.core.hypercorn_compat import install as _install_hypercorn_compat
@@ -286,6 +288,7 @@ SERVICE_REGISTRY = {
     "kms": {"module": "kms"},
     "lambda": {"module": "lambda_svc"},
     "logs": {"module": "cloudwatch_logs", "aliases": ("cloudwatch-logs",)},
+    "mediaconnect": {"module": "mediaconnect"},
     "opensearch": {"module": "opensearch", "aliases": ("es", "elasticsearch")},
     "organizations": {"module": "organizations"},
     "monitoring": {"module": "cloudwatch", "aliases": ("cloudwatch",)},
@@ -312,6 +315,8 @@ SERVICE_REGISTRY = {
     "wafv2": {"module": "waf"},
     "cloudtrail": {"module": "cloudtrail"},
     "cur": {"module": "cur"},
+    "inspector2": {"module": "inspector2"},
+    "s3tables": {"module": "s3tables"},
 }
 
 SERVICE_HANDLERS = {
@@ -347,6 +352,9 @@ _state_map = {
     "cloudfront_keyvaluestore": "cloudfront_keyvaluestore",
     "resource_groups": "resource_groups",
     "cloudtrail": "cloudtrail", "iot": "iot",
+    "inspector2": "inspector2",
+    "s3tables": "s3tables",
+    "lambda_durable": "lambda_durable",
 }
 
 SERVICE_NAME_ALIASES = {
@@ -386,12 +394,12 @@ BANNER = r"""
  |_|  |_|_|_| |_|_|____/ \__\__,_|\___|_|\_\
 
  Local AWS Service Emulator — Port {port}
- Services: S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, SecretsManager, CloudWatch Logs,
-          SSM, EventBridge, Kinesis, CloudWatch, SES, SES v2, ACM, WAF v2, Step Functions,
-          ECS, RDS, ElastiCache, Glue, Athena, API Gateway, Firehose, Route53,
-          Cognito, EC2, EMR, EBS, EFS, ALB/ELBv2, CloudFormation, KMS, ECR, CloudFront,
-          AppSync, Cloud Map, S3 Files, RDS Data API, CodeBuild, AppConfig, Transfer, EKS,
-          IoT Core
+  Services: S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, SecretsManager, CloudWatch Logs,
+           SSM, EventBridge, Kinesis, CloudWatch, SES, SES v2, ACM, WAF v2, Step Functions,
+           ECS, RDS, ElastiCache, Glue, Athena, API Gateway, Firehose, Route53,
+           Cognito, EC2, EMR, EBS, EFS, ALB/ELBv2, CloudFormation, KMS, ECR, CloudFront,
+           AppSync, Cloud Map, S3 Files, RDS Data API, CodeBuild, AppConfig, Transfer, EKS,
+           Inspector2, IoT Core
 """
 
 
@@ -473,7 +481,17 @@ async def _send_response(send, status, headers, body):
     body_bytes = body if isinstance(body, bytes) else body.encode("utf-8")
     if "content-length" not in {k.lower() for k in headers}:
         headers["Content-Length"] = str(len(body_bytes))
-    header_list = [(k.encode("latin-1"), _encode_header_value(str(v))) for k, v in headers.items()]
+    # A list/tuple header value expands to one header line per item. This is
+    # required for Set-Cookie, which RFC 6265 §3 forbids folding into a single
+    # comma-joined header; APIGW Lambda-proxy responses surface multiple
+    # cookies this way. Scalar values keep their existing single-line behavior.
+    header_list = []
+    for k, v in headers.items():
+        if isinstance(v, (list, tuple)):
+            for item in v:
+                header_list.append((k.encode("latin-1"), _encode_header_value(str(item))))
+        else:
+            header_list.append((k.encode("latin-1"), _encode_header_value(str(v))))
     await send(
         {
             "type": "http.response.start",
@@ -635,16 +653,24 @@ def _handle_lambda_download_request(path: str, method: str):
 async def _handle_cognito_get_request(method: str, path: str, headers: dict, query_params: dict):
     """Handle Cognito GET endpoints that do not require request body parsing."""
     if "/.well-known/" in path and method == "GET":
+        # Real AWS serves /<poolId>/.well-known/jwks.json only for actual user
+        # pools — any other pool prefix errors. Fall through to S3 when the
+        # pool isn't registered so an S3 object stored under a .well-known/
+        # key isn't shadowed by a fake Cognito JWKS body.
         if path.endswith("/.well-known/jwks.json"):
             pool_id = path.rsplit("/.well-known/jwks.json", 1)[0].lstrip("/")
             if pool_id:
-                return _get_module("cognito").well_known_jwks(pool_id)
+                cognito = _get_module("cognito")
+                if cognito._get_pool_unscoped(pool_id) is not None:
+                    return cognito.well_known_jwks(pool_id)
         elif path.endswith("/.well-known/openid-configuration"):
             pool_id = path.rsplit("/.well-known/openid-configuration", 1)[0].lstrip("/")
             if pool_id:
-                region = extract_region(headers) or "us-east-1"
-                host = headers.get("host") or headers.get("Host")
-                return _get_module("cognito").well_known_openid_configuration(pool_id, region, host)
+                cognito = _get_module("cognito")
+                if cognito._get_pool_unscoped(pool_id) is not None:
+                    region = extract_region(headers) or "us-east-1"
+                    host = headers.get("host") or headers.get("Host")
+                    return cognito.well_known_openid_configuration(pool_id, region, host)
 
     if path == "/oauth2/authorize" and method == "GET":
         return _get_module("cognito").handle_oauth2_authorize(method, path, headers, query_params)
@@ -737,6 +763,91 @@ async def _handle_ses_messages_request(method: str, path: str, headers: dict, qu
     return 200, {"Content-Type": "application/json"}, json.dumps(response).encode()
 
 
+async def _handle_sqs_messages_request(method: str, path: str, headers: dict, query_params: dict):
+    """Handle the SQS messages peek endpoint.
+
+    Pure introspection over `_queues[*].messages`. Does not touch
+    `visible_at`, `receive_count`, or any field the real SQS API mutates —
+    so calling this endpoint cannot affect a concurrent ReceiveMessage.
+
+    Filters:
+      ?account=<12-digit-id>   restrict to one account
+      ?QueueUrl=<url>          restrict to one queue (within whatever
+                               accounts pass the account filter)
+    """
+    if path != "/_ministack/sqs/messages" or method != "GET":
+        return None
+
+    account_id = None
+    if "account" in query_params:
+        raw_account = query_params["account"]
+        account_id = raw_account[0] if isinstance(raw_account, (list, tuple)) else raw_account
+        if not _12_DIGIT_RE.match(account_id):
+            return (
+                400,
+                {"Content-Type": "application/json"},
+                json.dumps(
+                    {
+                        "__type": "InvalidAccountID",
+                        "message": f"Account ID must be 12 digits, got: {account_id}",
+                    }
+                ).encode(),
+            )
+
+    queue_url_filter = None
+    if "QueueUrl" in query_params:
+        raw_qurl = query_params["QueueUrl"]
+        queue_url_filter = raw_qurl[0] if isinstance(raw_qurl, (list, tuple)) else raw_qurl
+
+    try:
+        mod = _get_module("sqs")
+        now = time.time()
+
+        # AccountScopedDict._data is keyed by (account_id, queue_url).
+        per_account: dict[str, dict[str, list]] = {}
+        try:
+            all_data = mod._queues.to_dict()
+        except Exception:
+            all_data = {}
+
+        for (acct, qurl), queue in all_data.items():
+            if account_id is not None and acct != account_id:
+                continue
+            if queue_url_filter is not None and qurl != queue_url_filter:
+                continue
+            if not isinstance(queue, dict):
+                continue
+            msgs = queue.get("messages") or []
+            rendered = []
+            for m in msgs:
+                rendered.append({
+                    "MessageId": m.get("id"),
+                    "Body": m.get("body", ""),
+                    "MD5OfBody": m.get("md5_body"),
+                    "MD5OfMessageAttributes": m.get("md5_attrs"),
+                    "SentTimestamp": int(m.get("sent_at", 0)),
+                    "VisibleAt": int(m.get("visible_at", 0)),
+                    "IsVisible": m.get("visible_at", 0) <= now,
+                    "ReceiveCount": m.get("receive_count", 0),
+                    "FirstReceiveTimestamp": (
+                        int(m["first_receive_at"]) if m.get("first_receive_at") else None
+                    ),
+                    "MessageAttributes": m.get("message_attributes") or {},
+                    "Attributes": m.get("sys") or {},
+                    "MessageGroupId": m.get("group_id"),
+                    "MessageDeduplicationId": m.get("dedup_id"),
+                    "SequenceNumber": m.get("seq"),
+                })
+            per_account.setdefault(acct, {})[qurl] = rendered
+
+        response = {"messages": per_account}
+    except Exception as e:
+        logger.exception("Error retrieving SQS messages: %s", e)
+        return 500, {"Content-Type": "application/json"}, json.dumps({"message": str(e)}).encode()
+
+    return 200, {"Content-Type": "application/json"}, json.dumps(response).encode()
+
+
 async def _handle_pre_body_request(method: str, path: str, headers: dict, query_params: dict, request_id: str):
     """Handle fast-path routes that do not require request body parsing."""
     # OPTIONS on an execute-api host / path MUST flow through apigateway.handle_execute
@@ -763,6 +874,10 @@ async def _handle_pre_body_request(method: str, path: str, headers: dict, query_
         return _with_data_plane_headers(response, request_id)
 
     response = await _handle_ses_messages_request(method, path, headers, query_params)
+    if response is not None:
+        return response
+
+    response = await _handle_sqs_messages_request(method, path, headers, query_params)
     if response is not None:
         return response
 
@@ -1400,6 +1515,13 @@ async def _handle_special_data_plane_request(
     request_id: str,
 ):
     """Handle special-case service entrypoints before the generic router."""
+    # Iceberg REST catalog — route /iceberg/* to s3tables service
+    if path.startswith("/iceberg"):
+        try:
+            return await _get_module("s3tables").handle_request(method, path, headers, body, query_params)
+        except Exception as e:
+            logger.exception("Error in Iceberg REST catalog: %s", e)
+            return 500, {"Content-Type": "application/json"}, json.dumps({"error": str(e)}).encode()
     if response := await _handle_s3_control_request(path, method, body, query_params, request_id):
         return response
     if response := await _handle_rds_data_request(method, path, headers, body, query_params):
@@ -3291,12 +3413,7 @@ async def _handle_lifespan(scope, receive, send):
         elif message["type"] == "lifespan.shutdown":
             logger.info("KumoStack shutting down...")
             if PERSIST_STATE:
-                # Only save state for modules that were actually loaded
-                save_dict = {}
-                for key, mod_name in _state_map.items():
-                    if mod_name in _loaded_modules:
-                        save_dict[key] = _loaded_modules[mod_name].get_state
-                save_all(save_dict)
+                save_all(_build_persistence_save_dict())
             try:
                 from kumostack.services import transfer
 
@@ -3340,6 +3457,27 @@ def _stop_docker_containers():
             pass
 
 
+def _build_persistence_save_dict():
+    """Build the {state_key: get_state} mapping that `save_all` consumes
+    at shutdown. Primary source is `_loaded_modules`, populated by
+    `_get_module()` on every routed request. Falls back to `sys.modules`
+    so modules reached only via sibling imports from other services
+    (e.g. `appsync` -> `appsync_events`, `apigateway` -> `apigateway_v1`,
+    `lambda` -> `cloudwatch_logs` for auto-created log groups, S3
+    notifications -> `eventbridge`) are still persisted. Without this
+    fallback, state created exclusively through cross-service code paths
+    is silently dropped at shutdown (#704 and class)."""
+    save_dict = {}
+    for key, mod_name in _state_map.items():
+        mod = _loaded_modules.get(mod_name)
+        if mod is None:
+            mod = sys.modules.get(f"ministack.services.{mod_name}")
+            if mod is None or not hasattr(mod, "get_state"):
+                continue
+        save_dict[key] = mod.get_state
+    return save_dict
+
+
 def _load_persisted_state():
     """Load persisted state for services that support it."""
     for svc_key in ("apigateway", "apigateway_v1", "servicediscovery"):
@@ -3350,19 +3488,51 @@ def _load_persisted_state():
 
     # Eagerly import persisted services whose restore path depends on
     # a module-level `load_state()` side-effect, but which would not
-    # otherwise be imported during startup. These are NOT covered by
-    # the explicit central-restore loop above (no
-    # `load_persisted_state` method), and the lazy router will not
-    # pull them in early enough — for example, `ses_v2` is reached
-    # via the `/v2/email/*` path-prefix shortcut and `pipes` via
-    # CloudFormation, neither of which fires at lifespan startup.
-    # Importing here triggers the restore (and, for `pipes`, also
-    # restarts the background poller for any RUNNING pipe). Keep this
-    # list narrow — every entry costs a cold-start import. Enforced
-    # by `tests/test_persistence_symmetry.py::test_state_map_
-    # services_without_endpoint_are_eagerly_imported`.
-    for svc_key in ("pipes", "ses_v2"):
+    # otherwise be imported during startup. The lazy router does not
+    # pull them in early enough in any of these cases:
+    #   - `ses_v2` is reached via the `/v2/email/*` path-prefix shortcut.
+    #   - `pipes` is created only via CloudFormation provisioners.
+    #   - `appsync_events` is routable (SERVICE_REGISTRY has
+    #     "appsync-events") but real traffic arrives under the
+    #     `appsync` credential scope at `/v2/apis`, so the
+    #     `appsync-events` lazy handler never fires; the module is
+    #     reached only via a sibling import from `appsync.py`, which
+    #     bypasses `_get_module` and leaves it out of
+    #     `_loaded_modules` → shutdown skips persistence (#704).
+    #   - `apigateway_v1` is restored above only when a state file
+    #     already exists; on first-ever boot the conditional skips
+    #     it, the module is reached only via `apigateway.py`'s
+    #     sibling import (line 237), and the first save is silently
+    #     dropped. Same bug class as #704.
+    # Importing here triggers the module-level restore (and, for
+    # `pipes`, also restarts the background poller for any RUNNING
+    # pipe). Keep this list narrow — every entry costs a cold-start
+    # import.
+    for svc_key in ("pipes", "ses_v2", "appsync_events", "apigateway_v1"):
         _get_module(svc_key)
+
+    # RDS is intentionally NOT in the unconditional list above —
+    # eager-importing it for every user would pull in ~13 MB of module
+    # objects (and, lazily, the docker SDK) even on stacks that don't
+    # use RDS. Instead, only eager-import when a persisted state file
+    # exists: importing the module triggers its bottom-of-file
+    # `load_state("rds")` which spawns the respawn threads for every
+    # persisted instance. Without this, users have to make one client
+    # call after every restart to lazily trigger the import + respawn
+    # (#692 follow-up after doodaz's confirmation).
+    if load_state("rds"):
+        _get_module("rds")
+        logger.info("RDS: eager-loaded module to respawn persisted containers at boot")
+
+    # `lambda_durable` is reached only via `lambda_svc.handle_request`, never
+    # directly through the lazy router (no SERVICE_REGISTRY entry — it has no
+    # AWS endpoint of its own). Without an eager import at boot, persisted
+    # durable executions silently disappear until something happens to invoke
+    # a durable endpoint. Same conditional-import pattern as RDS — only pay
+    # the cold-start cost when state actually exists.
+    if load_state("lambda_durable"):
+        _get_module("lambda_durable")
+        logger.info("Lambda Durable: eager-loaded module to restore persisted executions")
 
 
 async def _wait_for_port(port, timeout=30):
@@ -3518,18 +3688,28 @@ def _reset_all_state():
     # still need reset() — REST API v1 (served via the apigateway module),
     # SES v2 (served via the ses module), and EventBridge Pipes (CFN-only
     # provisioner with a background poller thread that reset() must stop).
+    # Kept for documentation / safety even though the `sys.modules` fallback
+    # below catches every imported module regardless.
     _extra_reset_modules = ("apigateway_v1", "ses_v2", "pipes")
 
     module_names = {cfg["module"] for cfg in SERVICE_REGISTRY.values()}
     module_names.update(_extra_reset_modules)
 
     for mod_name in module_names:
-        if mod_name in _loaded_modules:
-            mod = _loaded_modules[mod_name]
-            try:
-                mod.reset()
-            except Exception as e:
-                logger.warning("reset() failed for %s: %s", mod_name, e)
+        # Same class fix as the shutdown save loop: a module reached only via
+        # sibling import from another service (e.g. `appsync` -> `appsync_events`,
+        # `apigateway` -> `apigateway_v1`, `lambda` -> `cloudwatch_logs`) is
+        # imported into `sys.modules` but never registered in `_loaded_modules`.
+        # Without the `sys.modules` fallback, those modules silently skip reset
+        # — leaving state across `/_ministack/reset` calls and breaking test
+        # isolation.
+        mod = _loaded_modules.get(mod_name) or sys.modules.get(f"ministack.services.{mod_name}")
+        if mod is None or not hasattr(mod, "reset"):
+            continue
+        try:
+            mod.reset()
+        except Exception as e:
+            logger.warning("reset() failed for %s: %s", mod_name, e)
 
     S3_DATA_DIR = os.environ.get("S3_DATA_DIR", "/tmp/kumostack-data/s3")
     S3_PERSIST = os.environ.get("S3_PERSIST", "0") == "1"

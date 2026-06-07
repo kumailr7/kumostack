@@ -18,6 +18,7 @@ import kumostack.services.acm as _acm
 import kumostack.services.alb as _alb
 import kumostack.services.apigateway as _apigw_v2
 import kumostack.services.apigateway_v1 as _apigw_v1
+import kumostack.services.appconfig as _appconfig
 import kumostack.services.appsync as _appsync
 import kumostack.services.autoscaling as _asg
 import kumostack.services.backup as _backup
@@ -53,6 +54,7 @@ logger = logging.getLogger("cloudformation")
 # Module-level REGION kept for legacy imports; new code must use get_region()
 # so AWS::Region / ARNs reflect the caller's request region (#398).
 REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
+_MINISTACK_HOST = os.environ.get("MINISTACK_HOST", "localhost")
 
 
 def _physical_name(stack_name: str, logical_id: str, *,
@@ -741,6 +743,251 @@ def _ssm_delete(physical_id, props):
     _ssm._parameters.pop(physical_id, None)
 
 
+# --- AppConfig Application ---
+
+def _appconfig_application_create(logical_id, props, stack_name):
+    name = props.get("Name") or _physical_name(stack_name, logical_id)
+    app_id = _appconfig._gen_id()
+    _appconfig._applications[app_id] = {
+        "Id": app_id,
+        "Name": name,
+        "Description": props.get("Description", ""),
+    }
+    cfn_tags = props.get("Tags") or []
+    if cfn_tags:
+        _appconfig._apply_tags(
+            _appconfig._app_arn(app_id),
+            {t["Key"]: t["Value"] for t in cfn_tags if "Key" in t},
+        )
+    return app_id, {"ApplicationId": app_id}
+
+
+def _appconfig_application_delete(physical_id, props):
+    _appconfig._applications.pop(physical_id, None)
+    _appconfig._tags.pop(_appconfig._app_arn(physical_id), None)
+
+
+# --- AppConfig Environment ---
+
+def _appconfig_environment_create(logical_id, props, stack_name):
+    app_id = props.get("ApplicationId")
+    if not app_id:
+        raise ValueError("AWS::AppConfig::Environment requires ApplicationId")
+    name = props.get("Name") or _physical_name(stack_name, logical_id, max_len=64)
+    env_id = _appconfig._gen_id()
+    _appconfig._environments[f"{app_id}/{env_id}"] = {
+        "ApplicationId": app_id,
+        "Id": env_id,
+        "Name": name,
+        "Description": props.get("Description", ""),
+        "State": "READY_FOR_DEPLOYMENT",
+        "Monitors": props.get("Monitors", []),
+        "DeletionProtectionCheck": props.get("DeletionProtectionCheck", "ACCOUNT_DEFAULT"),
+    }
+    cfn_tags = props.get("Tags") or []
+    if cfn_tags:
+        _appconfig._apply_tags(
+            _appconfig._env_arn(app_id, env_id),
+            {t["Key"]: t["Value"] for t in cfn_tags if "Key" in t},
+        )
+    # Ref → environment ID; GetAtt EnvironmentId per AWS CFN reference.
+    return env_id, {"EnvironmentId": env_id}
+
+
+def _appconfig_environment_delete(physical_id, props):
+    app_id = props.get("ApplicationId", "")
+    _appconfig._environments.pop(f"{app_id}/{physical_id}", None)
+    _appconfig._tags.pop(_appconfig._env_arn(app_id, physical_id), None)
+
+
+# --- AppConfig ConfigurationProfile ---
+
+def _appconfig_configuration_profile_create(logical_id, props, stack_name):
+    app_id = props.get("ApplicationId")
+    if not app_id:
+        raise ValueError("AWS::AppConfig::ConfigurationProfile requires ApplicationId")
+    name = props.get("Name") or _physical_name(stack_name, logical_id, max_len=128)
+    profile_id = _appconfig._gen_id()
+    _appconfig._config_profiles[f"{app_id}/{profile_id}"] = {
+        "ApplicationId": app_id,
+        "Id": profile_id,
+        "Name": name,
+        "Description": props.get("Description", ""),
+        "LocationUri": props.get("LocationUri", "hosted"),
+        "RetrievalRoleArn": props.get("RetrievalRoleArn", ""),
+        "Validators": props.get("Validators", []),
+        "Type": props.get("Type", "AWS.Freeform"),
+        "KmsKeyIdentifier": props.get("KmsKeyIdentifier", ""),
+        "DeletionProtectionCheck": props.get("DeletionProtectionCheck", "ACCOUNT_DEFAULT"),
+    }
+    cfn_tags = props.get("Tags") or []
+    if cfn_tags:
+        _appconfig._apply_tags(
+            _appconfig._profile_arn(app_id, profile_id),
+            {t["Key"]: t["Value"] for t in cfn_tags if "Key" in t},
+        )
+    # Ref → configuration profile ID; GetAtt ConfigurationProfileId, KmsKeyArn.
+    # KmsKeyArn is only populated when a KMS key was supplied; CDK reads it as
+    # an empty string in that case.
+    return profile_id, {
+        "ConfigurationProfileId": profile_id,
+        "KmsKeyArn": props.get("KmsKeyIdentifier", ""),
+    }
+
+
+def _appconfig_configuration_profile_delete(physical_id, props):
+    app_id = props.get("ApplicationId", "")
+    _appconfig._config_profiles.pop(f"{app_id}/{physical_id}", None)
+    _appconfig._tags.pop(_appconfig._profile_arn(app_id, physical_id), None)
+
+
+# --- AppConfig HostedConfigurationVersion ---
+
+def _appconfig_hosted_version_create(logical_id, props, stack_name):
+    app_id = props.get("ApplicationId")
+    profile_id = props.get("ConfigurationProfileId")
+    if not app_id or not profile_id:
+        raise ValueError(
+            "AWS::AppConfig::HostedConfigurationVersion requires "
+            "ApplicationId and ConfigurationProfileId"
+        )
+    content = props.get("Content", "")
+    # CDK / Fn::ToJsonString may pass parsed JSON; AWS wire shape is a string.
+    if isinstance(content, (dict, list)):
+        content = json.dumps(content)
+    existing = [
+        v for k, v in _appconfig._hosted_versions.items()
+        if k.startswith(f"{app_id}/{profile_id}/")
+    ]
+    version_number = len(existing) + 1
+    # AWS optimistic-concurrency: if LatestVersionNumber is supplied, it must
+    # match the most-recent version_number — otherwise reject with a
+    # ConflictException-shape error (mirrors real AppConfig's lock check).
+    latest_lock = props.get("LatestVersionNumber")
+    if latest_lock is not None and int(latest_lock) != version_number - 1:
+        raise ValueError(
+            f"AWS::AppConfig::HostedConfigurationVersion LatestVersionNumber "
+            f"mismatch: supplied {latest_lock}, current latest is {version_number - 1}"
+        )
+    _appconfig._hosted_versions[f"{app_id}/{profile_id}/{version_number}"] = {
+        "ApplicationId": app_id,
+        "ConfigurationProfileId": profile_id,
+        "VersionNumber": version_number,
+        "ContentType": props.get("ContentType", "application/json"),
+        "Content": content,
+        "Description": props.get("Description", ""),
+        "VersionLabel": props.get("VersionLabel", ""),
+    }
+    # Ref → version number; GetAtt VersionNumber.
+    return str(version_number), {"VersionNumber": version_number}
+
+
+def _appconfig_hosted_version_delete(physical_id, props):
+    app_id = props.get("ApplicationId", "")
+    profile_id = props.get("ConfigurationProfileId", "")
+    _appconfig._hosted_versions.pop(
+        f"{app_id}/{profile_id}/{physical_id}", None
+    )
+
+
+# --- AppConfig DeploymentStrategy ---
+
+def _appconfig_deployment_strategy_create(logical_id, props, stack_name):
+    name = props.get("Name") or _physical_name(stack_name, logical_id, max_len=64)
+    strategy_id = _appconfig._gen_id()
+    _appconfig._deployment_strategies[strategy_id] = {
+        "Id": strategy_id,
+        "Name": name,
+        "Description": props.get("Description", ""),
+        "DeploymentDurationInMinutes": props.get("DeploymentDurationInMinutes", 0),
+        "GrowthType": props.get("GrowthType", "LINEAR"),
+        "GrowthFactor": props.get("GrowthFactor", 100.0),
+        "FinalBakeTimeInMinutes": props.get("FinalBakeTimeInMinutes", 0),
+        "ReplicateTo": props.get("ReplicateTo", "NONE"),
+    }
+    cfn_tags = props.get("Tags") or []
+    if cfn_tags:
+        _appconfig._apply_tags(
+            _appconfig._strategy_arn(strategy_id),
+            {t["Key"]: t["Value"] for t in cfn_tags if "Key" in t},
+        )
+    # Ref → deployment strategy ID; GetAtt is `Id` (singular) per AWS reference.
+    return strategy_id, {"Id": strategy_id}
+
+
+def _appconfig_deployment_strategy_delete(physical_id, props):
+    _appconfig._deployment_strategies.pop(physical_id, None)
+    _appconfig._tags.pop(_appconfig._strategy_arn(physical_id), None)
+
+
+# --- AppConfig Deployment ---
+
+def _appconfig_deployment_create(logical_id, props, stack_name):
+    app_id = props.get("ApplicationId")
+    env_id = props.get("EnvironmentId")
+    strategy_id = props.get("DeploymentStrategyId")
+    profile_id = props.get("ConfigurationProfileId")
+    if not all([app_id, env_id, strategy_id, profile_id]):
+        raise ValueError(
+            "AWS::AppConfig::Deployment requires ApplicationId, EnvironmentId, "
+            "DeploymentStrategyId, and ConfigurationProfileId"
+        )
+    existing = [
+        v for k, v in _appconfig._deployments.items()
+        if k.startswith(f"{app_id}/{env_id}/")
+    ]
+    deploy_num = len(existing) + 1
+    now = _appconfig._now_iso()
+    _appconfig._deployments[f"{app_id}/{env_id}/{deploy_num}"] = {
+        "ApplicationId": app_id,
+        "EnvironmentId": env_id,
+        "DeploymentStrategyId": strategy_id,
+        "ConfigurationProfileId": profile_id,
+        "DeploymentNumber": deploy_num,
+        "ConfigurationName": _appconfig._config_profiles.get(
+            f"{app_id}/{profile_id}", {}
+        ).get("Name", ""),
+        "ConfigurationLocationUri": "hosted",
+        "ConfigurationVersion": props.get("ConfigurationVersion", ""),
+        "Description": props.get("Description", ""),
+        "State": "COMPLETE",
+        "PercentageComplete": 100.0,
+        "StartedAt": now,
+        "CompletedAt": now,
+        "KmsKeyIdentifier": props.get("KmsKeyIdentifier", ""),
+        "DynamicExtensionParameters": props.get("DynamicExtensionParameters", []),
+    }
+    cfn_tags = props.get("Tags") or []
+    if cfn_tags:
+        # Deployment doesn't have its own ARN helper; use the standard AppConfig
+        # ARN shape so ListTagsForResource keeps working post-create.
+        deploy_arn = (
+            f"arn:aws:appconfig:{_appconfig.get_region()}:"
+            f"{_appconfig.get_account_id()}:application/{app_id}/"
+            f"environment/{env_id}/deployment/{deploy_num}"
+        )
+        _appconfig._apply_tags(
+            deploy_arn,
+            {t["Key"]: t["Value"] for t in cfn_tags if "Key" in t},
+        )
+    # GetAtt DeploymentNumber, State. Ref is documented as having no return
+    # value on the AWS CFN page; we return the deploy_num as the physical id
+    # so CDK templates that Ref a Deployment still resolve.
+    return str(deploy_num), {"DeploymentNumber": deploy_num, "State": "COMPLETE"}
+
+
+def _appconfig_deployment_delete(physical_id, props):
+    app_id = props.get("ApplicationId", "")
+    env_id = props.get("EnvironmentId", "")
+    _appconfig._deployments.pop(f"{app_id}/{env_id}/{physical_id}", None)
+    deploy_arn = (
+        f"arn:aws:appconfig:{_appconfig.get_region()}:"
+        f"{_appconfig.get_account_id()}:application/{app_id}/"
+        f"environment/{env_id}/deployment/{physical_id}"
+    )
+    _appconfig._tags.pop(deploy_arn, None)
+
+
 # --- CloudWatch Logs LogGroup ---
 
 def _cwlogs_create(logical_id, props, stack_name):
@@ -1047,6 +1294,292 @@ def _cfn_wait_condition_handle_create(logical_id, props, stack_name):
     pid = f"{stack_name}-{logical_id}-{new_uuid()[:8]}"
     url = f"https://cloudformation-waitcondition-{get_region()}.s3.amazonaws.com/{pid}"
     return pid, {"Ref": url}
+
+
+# --- CloudFormation Nested Stack (AWS::CloudFormation::Stack) ---
+
+def _cfn_nested_stack_deploy(logical_id, props, parent_stack_name, *,
+                             previous_physical_id=None, previous_props=None):
+    """Provision an `AWS::CloudFormation::Stack` nested-stack resource.
+
+    Mirrors the synchronous core of `stacks._deploy_stack_async` but runs
+    inline so the parent's deploy loop can read the child's Outputs (exposed
+    as `Outputs.<Name>` keys on the returned attrs dict so `Fn::GetAtt:
+    [Nested, Outputs.X]` resolves natively).
+
+    Returns ``(child_stack_id, attrs)`` where ``attrs["Outputs.<Name>"]``
+    carries each output value. ``Outputs.<Name>`` keys match the dotted
+    sub-attribute form CDK and console-built templates emit.
+    """
+    import copy
+    from ministack.core.responses import get_account_id, get_region, new_uuid
+    from ministack.services.cloudformation import (
+        _stack_events, _stacks,
+    )
+    from ministack.services.cloudformation.engine import (
+        _evaluate_conditions, _parse_template, _resolve_parameters,
+        _resolve_refs, _topological_sort,
+    )
+    from ministack.services.cloudformation.helpers import _resolve_template
+    from ministack.services.cloudformation.stacks import _add_event
+
+    template_url = props.get("TemplateURL")
+    if not template_url:
+        raise ValueError(
+            "AWS::CloudFormation::Stack requires TemplateURL "
+            "(inline TemplateBody is not supported by real AWS either)"
+        )
+
+    template_body, err = _resolve_template({"TemplateURL": [template_url]})
+    if err is not None:
+        raise ValueError(f"Failed to fetch nested-stack template: {template_url}")
+    if not template_body:
+        raise ValueError(f"Nested-stack template empty at {template_url}")
+
+    template = _parse_template(template_body)
+
+    raw_param_props = props.get("Parameters") or {}
+    if isinstance(raw_param_props, dict):
+        provided_params = [
+            {"Key": k, "Value": "" if v is None else str(v)}
+            for k, v in raw_param_props.items()
+        ]
+    else:
+        provided_params = []
+    param_values = _resolve_parameters(template, provided_params)
+
+    is_update = previous_physical_id is not None
+    if is_update and previous_physical_id in _stacks:
+        child_name = previous_physical_id
+        previous_stack_snapshot = copy.deepcopy(_stacks[child_name])
+    else:
+        child_name = f"{parent_stack_name}-{logical_id}-{new_uuid()[:12]}"
+        previous_stack_snapshot = None
+
+    child_stack_id = (
+        f"arn:aws:cloudformation:{get_region()}:{get_account_id()}:"
+        f"stack/{child_name}/{new_uuid()}"
+    )
+    if previous_stack_snapshot:
+        child_stack_id = previous_stack_snapshot.get("StackId", child_stack_id)
+
+    status_prefix = "UPDATE" if is_update else "CREATE"
+    child_stack = {
+        "StackName": child_name,
+        "StackId": child_stack_id,
+        "StackStatus": f"{status_prefix}_IN_PROGRESS",
+        "StackStatusReason": "",
+        "CreationTime": now_iso(),
+        "LastUpdatedTime": now_iso(),
+        "Description": template.get("Description", ""),
+        "Parameters": [
+            {"ParameterKey": k, "ParameterValue": v["Value"], "NoEcho": v["NoEcho"]}
+            for k, v in param_values.items()
+        ],
+        "Tags": [],
+        "Outputs": [],
+        "DisableRollback": True,
+        "_resources": (previous_stack_snapshot.get("_resources", {})
+                       if previous_stack_snapshot else {}),
+        "_template": template,
+        "_template_body": template_body,
+        "_resolved_params": param_values,
+        "_conditions": _evaluate_conditions(template, param_values),
+        "_parent_stack_name": parent_stack_name,
+        "RootId": _cr_stack_id(parent_stack_name),
+        "ParentId": _cr_stack_id(parent_stack_name),
+    }
+    _stacks[child_name] = child_stack
+    _stack_events.setdefault(child_stack_id, [])
+
+    _add_event(child_stack_id, child_name, child_name,
+               "AWS::CloudFormation::Stack", f"{status_prefix}_IN_PROGRESS",
+               physical_id=child_stack_id)
+
+    mappings = template.get("Mappings", {})
+    conditions = child_stack["_conditions"]
+    resources_defs = template.get("Resources", {})
+    outputs_defs = template.get("Outputs", {})
+
+    try:
+        ordered = _topological_sort(resources_defs, conditions)
+    except ValueError as exc:
+        child_stack["StackStatus"] = f"{status_prefix}_FAILED"
+        child_stack["StackStatusReason"] = str(exc)
+        _add_event(child_stack_id, child_name, child_name,
+                   "AWS::CloudFormation::Stack", f"{status_prefix}_FAILED",
+                   str(exc), child_stack_id)
+        raise
+
+    provisioned: dict = child_stack["_resources"]
+    prev_resources = (previous_stack_snapshot.get("_resources", {})
+                      if previous_stack_snapshot else {})
+
+    for child_logical_id in ordered:
+        res_def = resources_defs[child_logical_id]
+        cond = res_def.get("Condition")
+        if cond and not conditions.get(cond, True):
+            continue
+        resource_type = res_def.get("Type", "AWS::CloudFormation::CustomResource")
+        raw_props = res_def.get("Properties", {})
+        resolved_props = _resolve_refs(
+            copy.deepcopy(raw_props), provisioned, param_values,
+            conditions, mappings, child_name, child_stack_id,
+        )
+        if isinstance(resolved_props, dict):
+            resolved_props = {k: v for k, v in resolved_props.items()
+                              if v is not _NO_VALUE_SENTINEL()}
+
+        _add_event(child_stack_id, child_name, child_logical_id, resource_type,
+                   f"{status_prefix}_IN_PROGRESS")
+        try:
+            prev = prev_resources.get(child_logical_id)
+            if prev:
+                physical_id, attrs = _update_resource(
+                    resource_type, prev.get("PhysicalResourceId", child_logical_id),
+                    prev.get("Properties", {}), resolved_props, child_name,
+                    child_logical_id,
+                )
+            else:
+                physical_id, attrs = _provision_resource(
+                    resource_type, child_logical_id, resolved_props, child_name,
+                )
+        except Exception as exc:
+            child_stack["StackStatus"] = f"{status_prefix}_FAILED"
+            child_stack["StackStatusReason"] = (
+                f"Resource {child_logical_id} failed: {exc}"
+            )
+            _add_event(child_stack_id, child_name, child_logical_id, resource_type,
+                       f"{status_prefix}_FAILED", str(exc))
+            raise
+
+        provisioned[child_logical_id] = {
+            "PhysicalResourceId": physical_id,
+            "ResourceType": resource_type,
+            "ResourceStatus": f"{status_prefix}_COMPLETE",
+            "LogicalResourceId": child_logical_id,
+            "Properties": resolved_props,
+            "Attributes": attrs,
+            "Timestamp": now_iso(),
+        }
+        _add_event(child_stack_id, child_name, child_logical_id, resource_type,
+                   f"{status_prefix}_COMPLETE", physical_id=physical_id)
+
+    if is_update:
+        for stale_id in set(prev_resources) - set(provisioned):
+            old = prev_resources[stale_id]
+            try:
+                _delete_resource(old.get("ResourceType", ""),
+                                 old.get("PhysicalResourceId", ""),
+                                 old.get("Properties", {}),
+                                 child_name, stale_id)
+            except Exception as exc:
+                logger.warning("Nested-stack %s: failed to delete pruned %s: %s",
+                               child_name, stale_id, exc)
+
+    resolved_outputs = []
+    output_attrs: dict[str, str] = {}
+    for out_name, out_def in outputs_defs.items():
+        cond = out_def.get("Condition")
+        if cond and not conditions.get(cond, True):
+            continue
+        out_value = _resolve_refs(
+            copy.deepcopy(out_def.get("Value", "")),
+            provisioned, param_values, conditions,
+            mappings, child_name, child_stack_id,
+        )
+        resolved_outputs.append({
+            "OutputKey": out_name,
+            "OutputValue": str(out_value),
+            "Description": out_def.get("Description", ""),
+        })
+        output_attrs[f"Outputs.{out_name}"] = str(out_value)
+
+    child_stack["Outputs"] = resolved_outputs
+    child_stack["StackStatus"] = f"{status_prefix}_COMPLETE"
+    _add_event(child_stack_id, child_name, child_name,
+               "AWS::CloudFormation::Stack", f"{status_prefix}_COMPLETE",
+               physical_id=child_stack_id)
+
+    # Real AWS: Ref of AWS::CloudFormation::Stack returns the child StackId
+    # (ARN), not the stack name. DescribeStacks/_delete handlers below accept
+    # either form for lookup so callers using Ref->DescribeStacks keep working.
+    return child_stack_id, output_attrs
+
+
+def _NO_VALUE_SENTINEL():
+    from ministack.services.cloudformation.engine import _NO_VALUE
+    return _NO_VALUE
+
+
+def _cfn_nested_stack_create(logical_id, props, stack_name):
+    return _cfn_nested_stack_deploy(logical_id, props, stack_name)
+
+
+def _cfn_nested_stack_update(physical_id, old_props, new_props, stack_name):
+    return _cfn_nested_stack_deploy(
+        physical_id, new_props, stack_name,
+        previous_physical_id=_nested_stack_lookup_name(physical_id),
+        previous_props=old_props,
+    )
+
+
+def _nested_stack_lookup_name(physical_id_or_arn):
+    """Resolve a nested-stack physical id (StackId ARN or stack name) to its
+    `_stacks` dict key. Returns the input if no ARN match is found."""
+    from ministack.services.cloudformation import _stacks
+    if physical_id_or_arn in _stacks:
+        return physical_id_or_arn
+    for name, stk in _stacks.items():
+        if stk.get("StackId") == physical_id_or_arn:
+            return name
+    return physical_id_or_arn
+
+
+def _cfn_nested_stack_delete(physical_id, props):
+    from ministack.services.cloudformation import _exports, _stacks
+    child_name = _nested_stack_lookup_name(physical_id)
+    child_stack = _stacks.get(child_name)
+    if not child_stack:
+        return
+
+    child_stack_id = child_stack.get("StackId", physical_id)
+    resources = child_stack.get("_resources", {})
+    template = child_stack.get("_template", {})
+    res_defs = template.get("Resources", {}) if template else {}
+    conditions = child_stack.get("_conditions", {})
+    try:
+        from ministack.services.cloudformation.engine import _topological_sort
+        ordered = (_topological_sort(res_defs, conditions)
+                   if res_defs else list(resources.keys()))
+    except Exception:
+        ordered = list(resources.keys())
+
+    for child_logical_id in reversed(ordered):
+        res = resources.get(child_logical_id)
+        if not res:
+            continue
+        try:
+            _delete_resource(
+                res.get("ResourceType", ""),
+                res.get("PhysicalResourceId", ""),
+                res.get("Properties", {}),
+                child_name, child_logical_id,
+            )
+        except Exception as exc:
+            logger.warning("Nested-stack %s: delete of %s failed: %s",
+                           child_name, child_logical_id, exc)
+
+    for out in child_stack.get("Outputs", []):
+        export_name = out.get("ExportName")
+        if export_name:
+            _exports.pop(export_name, None)
+
+    child_stack["StackStatus"] = "DELETE_COMPLETE"
+    child_stack["_resources"] = {}
+    # Leave the stack entry in _stacks so DescribeStacks on the child id still
+    # returns DELETE_COMPLETE, matching real AWS behaviour for nested stacks
+    # whose parents are torn down.
 
 
 # --- CloudFormation Custom Resource ---
@@ -2948,7 +3481,7 @@ def _apigw_v2_api_create(logical_id, props, stack_name):
         "apiId": api_id,
         "name": name,
         "protocolType": protocol,
-        "apiEndpoint": f"http://{api_id}.execute-api.{os.environ.get('MINISTACK_HOST', 'localhost')}:{os.environ.get('GATEWAY_PORT', '4566')}",
+        "apiEndpoint": f"http://{api_id}.execute-api.{_MINISTACK_HOST}:{os.environ.get('GATEWAY_PORT', '4566')}",
         "createdDate": now_iso(),
         "routeSelectionExpression": props.get("RouteSelectionExpression", "$request.method $request.path"),
         "apiKeySelectionExpression": props.get("ApiKeySelectionExpression", "$request.header.x-api-key"),
@@ -3581,6 +4114,30 @@ _RESOURCE_HANDLERS = {
     "AWS::IAM::Policy": {"create": _iam_policy_create, "delete": _iam_policy_delete},
     "AWS::IAM::InstanceProfile": {"create": _iam_ip_create, "delete": _iam_ip_delete},
     "AWS::SSM::Parameter": {"create": _ssm_create, "delete": _ssm_delete},
+    "AWS::AppConfig::Application": {
+        "create": _appconfig_application_create,
+        "delete": _appconfig_application_delete,
+    },
+    "AWS::AppConfig::Environment": {
+        "create": _appconfig_environment_create,
+        "delete": _appconfig_environment_delete,
+    },
+    "AWS::AppConfig::ConfigurationProfile": {
+        "create": _appconfig_configuration_profile_create,
+        "delete": _appconfig_configuration_profile_delete,
+    },
+    "AWS::AppConfig::HostedConfigurationVersion": {
+        "create": _appconfig_hosted_version_create,
+        "delete": _appconfig_hosted_version_delete,
+    },
+    "AWS::AppConfig::DeploymentStrategy": {
+        "create": _appconfig_deployment_strategy_create,
+        "delete": _appconfig_deployment_strategy_delete,
+    },
+    "AWS::AppConfig::Deployment": {
+        "create": _appconfig_deployment_create,
+        "delete": _appconfig_deployment_delete,
+    },
     "AWS::Logs::LogGroup": {"create": _cwlogs_create, "delete": _cwlogs_delete},
     "AWS::Events::Rule": {"create": _eb_rule_create, "delete": _eb_rule_delete},
     "AWS::Events::EventBus": {"create": _eb_event_bus_create, "delete": _eb_event_bus_delete},
@@ -3589,6 +4146,11 @@ _RESOURCE_HANDLERS = {
     "AWS::Lambda::Version": {"create": _lambda_version_create},
     "AWS::CloudFormation::WaitCondition": {"create": _cfn_wait_condition_create},
     "AWS::CloudFormation::WaitConditionHandle": {"create": _cfn_wait_condition_handle_create},
+    "AWS::CloudFormation::Stack": {
+        "create": _cfn_nested_stack_create,
+        "update": _cfn_nested_stack_update,
+        "delete": _cfn_nested_stack_delete,
+    },
     # The "create" entry is load-bearing: without it, _provision_resource would
     # hit the generic "AWS::CloudFormation::*" no-op branch. Update and delete
     # are intentionally absent — they route through the explicit if-branches in

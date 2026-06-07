@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import threading
 import time
 import uuid as _uuid_mod
 import zipfile
@@ -123,6 +124,36 @@ def test_glue_table_v2(glue):
         glue.get_table(DatabaseName="glue_tbl_v2db", Name="tbl_v2")
     assert exc.value.response["Error"]["Code"] == "EntityNotFoundException"
 
+def test_glue_view_original_text_roundtrip(glue):
+    glue.create_database(DatabaseInput={"Name": "glue_view_db"})
+    original = "/* Presto View: eyJjYXRhbG9nIjoiaWNlYmVyZyJ9 */"
+    expanded = "/* Presto View */"
+    glue.create_table(
+        DatabaseName="glue_view_db",
+        TableInput={
+            "Name": "vw_x",
+            "TableType": "VIRTUAL_VIEW",
+            "ViewOriginalText": original,
+            "ViewExpandedText": expanded,
+        },
+    )
+    resp = glue.get_table(DatabaseName="glue_view_db", Name="vw_x")
+    assert resp["Table"]["ViewOriginalText"] == original
+    assert resp["Table"]["ViewExpandedText"] == expanded
+
+    glue.update_table(
+        DatabaseName="glue_view_db",
+        TableInput={
+            "Name": "vw_x",
+            "TableType": "VIRTUAL_VIEW",
+            "ViewOriginalText": original + " v2",
+            "ViewExpandedText": expanded + " v2",
+        },
+    )
+    resp2 = glue.get_table(DatabaseName="glue_view_db", Name="vw_x")
+    assert resp2["Table"]["ViewOriginalText"] == original + " v2"
+    assert resp2["Table"]["ViewExpandedText"] == expanded + " v2"
+
 def test_glue_list_v2(glue):
     glue.create_database(DatabaseInput={"Name": "glue_lst_v2db"})
     glue.create_table(
@@ -206,6 +237,17 @@ def test_glue_tags_v2(glue):
     glue.untag_resource(ResourceArn=arn, TagsToRemove=["team"])
     resp2 = glue.get_tags(ResourceArn=arn)
     assert resp2["Tags"] == {"env": "test"}
+
+
+def test_glue_create_database_persists_tags(glue):
+    """CreateDatabase top-level Tags must be stored (issue #1130 — real AWS shape)."""
+    glue.create_database(
+        DatabaseInput={"Name": "db_with_tags"},
+        Tags={"env": "prod", "owner": "data-platform"},
+    )
+    arn = "arn:aws:glue:us-east-1:000000000000:database/db_with_tags"
+    tags = glue.get_tags(ResourceArn=arn)["Tags"]
+    assert tags == {"env": "prod", "owner": "data-platform"}
 
 def test_glue_partition_v2(glue):
     glue.create_database(DatabaseInput={"Name": "glue_part_v2db"})
@@ -562,6 +604,114 @@ def test_glue_batch_create_partition(glue):
 
 
 # ---------------------------------------------------------------------------
+# BatchUpdatePartition
+# ---------------------------------------------------------------------------
+
+def test_glue_batch_update_partition(glue):
+    db = "qa-bup-db"
+    tbl = "qa-bup-tbl"
+    glue.create_database(DatabaseInput={"Name": db})
+    glue.create_table(
+        DatabaseName=db,
+        TableInput={
+            "Name": tbl,
+            "StorageDescriptor": {
+                "Columns": [],
+                "Location": "s3://b/k",
+                "InputFormat": "",
+                "OutputFormat": "",
+                "SerdeInfo": {},
+            },
+            "PartitionKeys": [{"Name": "dt", "Type": "string"}],
+        },
+    )
+    glue.batch_create_partition(
+        DatabaseName=db,
+        TableName=tbl,
+        PartitionInputList=[
+            {
+                "Values": ["2024-05"],
+                "StorageDescriptor": {
+                    "Columns": [],
+                    "Location": "s3://b/k/dt=2024-05",
+                    "InputFormat": "",
+                    "OutputFormat": "",
+                    "SerdeInfo": {},
+                },
+            },
+        ],
+    )
+    before = glue.get_partition(
+        DatabaseName=db,
+        TableName=tbl,
+        PartitionValues=["2024-05"],
+    )["Partition"]
+    creation_time = before["CreationTime"]
+    resp = glue.batch_update_partition(
+        DatabaseName=db,
+        TableName=tbl,
+        Entries=[
+            {
+                "PartitionValueList": ["2024-05"],
+                "PartitionInput": {
+                    "Values": ["2024-05"],
+                    "StorageDescriptor": {
+                        "Columns": [],
+                        "Location": "s3://b/k/dt=2024-05-updated",
+                        "InputFormat": "",
+                        "OutputFormat": "",
+                        "SerdeInfo": {},
+                    },
+                },
+            },
+        ],
+    )
+    assert resp.get("Errors", []) == []
+    part = glue.get_partition(
+        DatabaseName=db,
+        TableName=tbl,
+        PartitionValues=["2024-05"],
+    )["Partition"]
+    assert part["StorageDescriptor"]["Location"] == "s3://b/k/dt=2024-05-updated"
+    # CreationTime is preserved across an update (LastAccessTime is refreshed)
+    assert part["CreationTime"] == creation_time
+    # updating a partition that does not exist returns an error entry
+    resp2 = glue.batch_update_partition(
+        DatabaseName=db,
+        TableName=tbl,
+        Entries=[
+            {
+                "PartitionValueList": ["no-such"],
+                "PartitionInput": {
+                    "Values": ["no-such"],
+                    "StorageDescriptor": {
+                        "Columns": [],
+                        "Location": "s3://b/k/dt=no-such",
+                        "InputFormat": "",
+                        "OutputFormat": "",
+                        "SerdeInfo": {},
+                    },
+                },
+            },
+        ],
+    )
+    assert len(resp2["Errors"]) == 1
+    assert resp2["Errors"][0]["PartitionValueList"] == ["no-such"]
+    assert resp2["Errors"][0]["ErrorDetail"]["ErrorCode"] == "EntityNotFoundException"
+    # updating against a nonexistent table fails at the request level
+    with pytest.raises(ClientError) as exc:
+        glue.batch_update_partition(
+            DatabaseName=db,
+            TableName="no-such-tbl",
+            Entries=[{"PartitionValueList": ["x"], "PartitionInput": {"Values": ["x"]}}],
+        )
+    assert exc.value.response["Error"]["Code"] == "EntityNotFoundException"
+    # cleanup
+    glue.delete_table(DatabaseName=db, Name=tbl)
+    glue.delete_database(Name=db)
+
+
+# ---------------------------------------------------------------------------
 # GetCrawlerMetrics
 # ---------------------------------------------------------------------------
 
@@ -909,3 +1059,322 @@ def test_glue_partition_indexes(glue):
     # cleanup
     glue.delete_table(DatabaseName=db, Name=tbl)
     glue.delete_database(Name=db)
+
+
+# ── Spark job image selection (1.3.50) ─────────────────────
+
+def test_glue_spark_skips_docker_when_image_missing(glue):
+    """glueetl job falls back to subprocess when the Spark Docker image is not pulled.
+    The job should not crash MiniStack — it either runs via subprocess (and fails
+    on pyspark import) or stubs as SUCCEEDED if the script can't be resolved."""
+    import time
+    job_name = "test-spark-no-image"
+    try:
+        glue.delete_job(JobName=job_name)
+    except Exception:
+        pass
+
+    glue.create_job(
+        Name=job_name,
+        Role="arn:aws:iam::000000000000:role/GlueRole",
+        Command={"Name": "glueetl", "ScriptLocation": "s3://nonexistent/script.py"},
+        GlueVersion="4.0",
+    )
+    resp = glue.start_job_run(JobName=job_name)
+    run_id = resp["JobRunId"]
+
+    # Poll until terminal state
+    for _ in range(20):
+        run = glue.get_job_run(JobName=job_name, RunId=run_id)["JobRun"]
+        if run["JobRunState"] in ("SUCCEEDED", "FAILED", "TIMEOUT"):
+            break
+        time.sleep(0.5)
+
+    # Script can't be resolved (nonexistent S3 path) so it should stub as SUCCEEDED
+    # The key assertion: it does NOT hang or crash — it reaches a terminal state
+    assert run["JobRunState"] in ("SUCCEEDED", "FAILED"), (
+        f"Job should reach terminal state without Docker image. Got: {run['JobRunState']}"
+    )
+
+
+def test_glue_spark_image_for_version_maps_to_official_aws_image():
+    """`GlueVersion: 4.0` and `3.0` map to the canonical `amazon/aws-glue-libs`
+    images real AWS Glue uses for Spark. Override via `GLUE_DOCKER_IMAGE`."""
+    from ministack.services import glue as _glue
+
+    # Default mapping for supported Spark Glue versions
+    assert _glue._glue_image_for_version("4.0") == "amazon/aws-glue-libs:glue_libs_4.0.0_image_01"
+    assert _glue._glue_image_for_version("3.0") == "amazon/aws-glue-libs:glue_libs_3.0.0_image_01"
+
+    # Unknown GlueVersion falls back to 4.0 (latest supported)
+    assert _glue._glue_image_for_version("99.0") == "amazon/aws-glue-libs:glue_libs_4.0.0_image_01"
+
+
+def test_glue_spark_image_env_override(monkeypatch):
+    """Setting GLUE_DOCKER_IMAGE bypasses the per-version map."""
+    from ministack.services import glue as _glue
+
+    monkeypatch.setattr(_glue, "GLUE_DOCKER_IMAGE_OVERRIDE", "my-org/custom-glue:latest")
+    assert _glue._glue_image_for_version("4.0") == "my-org/custom-glue:latest"
+    assert _glue._glue_image_for_version("3.0") == "my-org/custom-glue:latest"
+
+
+def test_glue_is_spark_job_classifies_by_command_name():
+    """`glueetl` and `gluestreaming` are Spark; `pythonshell` is not."""
+    from ministack.services import glue as _glue
+
+    assert _glue._is_spark_job({"Command": {"Name": "glueetl"}}) is True
+    assert _glue._is_spark_job({"Command": {"Name": "gluestreaming"}}) is True
+    assert _glue._is_spark_job({"Command": {"Name": "pythonshell"}}) is False
+    assert _glue._is_spark_job({"Command": {}}) is False
+    assert _glue._is_spark_job({}) is False
+
+
+def test_glue_update_table_version_id_optimistic_concurrency(glue):
+    """UpdateTable with a stale VersionId must fail (#1183 — real AWS shape)."""
+    glue.create_database(DatabaseInput={"Name": "ver_db"})
+    glue.create_table(DatabaseName="ver_db", TableInput={"Name": "t1", "Description": "v1"})
+
+    # Read initial version.
+    t = glue.get_table(DatabaseName="ver_db", Name="t1")["Table"]
+    assert t["VersionId"] == "1"
+
+    # Update with matching VersionId — succeeds and bumps version.
+    glue.update_table(
+        DatabaseName="ver_db",
+        TableInput={"Name": "t1", "Description": "v2"},
+        VersionId="1",
+    )
+    t2 = glue.get_table(DatabaseName="ver_db", Name="t1")["Table"]
+    assert t2["VersionId"] == "2"
+    assert t2["Description"] == "v2"
+
+    # Update with stale VersionId — rejected.
+    with pytest.raises(ClientError) as exc:
+        glue.update_table(
+            DatabaseName="ver_db",
+            TableInput={"Name": "t1", "Description": "v3"},
+            VersionId="1",  # stale
+        )
+    assert exc.value.response["Error"]["Code"] == "ConcurrentModificationException"
+
+    # No VersionId passed — current ministack/AWS shape still allows (back-compat).
+    glue.update_table(DatabaseName="ver_db", TableInput={"Name": "t1", "Description": "v4"})
+    t4 = glue.get_table(DatabaseName="ver_db", Name="t1")["Table"]
+    assert t4["VersionId"] == "3"
+
+
+def test_glue_user_defined_function_crud(glue):
+    """CRUD lifecycle for Glue UserDefinedFunction APIs (#1186)."""
+    glue.create_database(DatabaseInput={"Name": "udf_db"})
+
+    glue.create_user_defined_function(
+        DatabaseName="udf_db",
+        FunctionInput={
+            "FunctionName": "upper_clean",
+            "ClassName": "com.example.UpperClean",
+            "OwnerName": "data-platform",
+            "OwnerType": "USER",
+            "ResourceUris": [{"ResourceType": "JAR", "Uri": "s3://my-bucket/udfs/upper.jar"}],
+        },
+    )
+
+    got = glue.get_user_defined_function(DatabaseName="udf_db", FunctionName="upper_clean")["UserDefinedFunction"]
+    assert got["FunctionName"] == "upper_clean"
+    assert got["ClassName"] == "com.example.UpperClean"
+    assert got["DatabaseName"] == "udf_db"
+    assert got["ResourceUris"][0]["Uri"] == "s3://my-bucket/udfs/upper.jar"
+
+    # Duplicate create rejected.
+    with pytest.raises(ClientError) as exc:
+        glue.create_user_defined_function(
+            DatabaseName="udf_db",
+            FunctionInput={"FunctionName": "upper_clean", "ClassName": "x"},
+        )
+    assert exc.value.response["Error"]["Code"] == "AlreadyExistsException"
+
+    glue.update_user_defined_function(
+        DatabaseName="udf_db",
+        FunctionName="upper_clean",
+        FunctionInput={"FunctionName": "upper_clean", "ClassName": "com.example.UpperClean2"},
+    )
+    got2 = glue.get_user_defined_function(DatabaseName="udf_db", FunctionName="upper_clean")["UserDefinedFunction"]
+    assert got2["ClassName"] == "com.example.UpperClean2"
+
+    # Pattern is a required AWS field (botocore enforces) — "*" matches everything.
+    listed = glue.get_user_defined_functions(DatabaseName="udf_db", Pattern="*")["UserDefinedFunctions"]
+    names = [u["FunctionName"] for u in listed]
+    assert "upper_clean" in names
+
+    glue.delete_user_defined_function(DatabaseName="udf_db", FunctionName="upper_clean")
+    with pytest.raises(ClientError) as exc2:
+        glue.get_user_defined_function(DatabaseName="udf_db", FunctionName="upper_clean")
+    assert exc2.value.response["Error"]["Code"] == "EntityNotFoundException"
+
+
+def test_glue_resolve_script_account_scoped(tmp_path, monkeypatch):
+    """_resolve_script finds an s3:// script persisted under the account-scoped
+    on-disk layout DATA_DIR/<account>/<bucket>/<key> (#827).
+
+    Regression: the on-disk lookup omitted the account id, so it could never
+    match an object written by the canonical account-scoped writer.
+    """
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    from ministack.services import glue as gluemod
+
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(gluemod, "S3_DATA_DIR", str(tmp_path))
+
+    # A non-default account also pins that the account segment is honoured,
+    # not just the hardcoded default.
+    token = respmod._request_account_id.set("111111111111")
+    try:
+        s3mod._persist_object("scripts-bucket", "jobs/etl.py", b"print('ok')\n")
+        persisted = s3mod._object_disk_path("scripts-bucket", "jobs/etl.py")
+        assert os.path.isfile(persisted)
+
+        resolved = gluemod._resolve_script("s3://scripts-bucket/jobs/etl.py")
+        assert resolved is not None, "script not resolved — on-disk path is unscoped"
+        assert "111111111111" in resolved
+        assert os.path.samefile(resolved, persisted)
+    finally:
+        respmod._request_account_id.reset(token)
+
+
+def test_glue_start_job_run_resolves_script_in_worker_thread(tmp_path, monkeypatch):
+    """StartJobRun's worker thread resolves the account-scoped script under the
+    caller's account, not the default (#827, cf. #639).
+
+    Regression: _execute runs on a bare threading.Thread, which does not copy
+    contextvars, so get_account_id() inside _resolve_script reverted to the
+    default account and a non-default account's script was never found.
+    """
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    from ministack.services import glue as gluemod
+
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(gluemod, "S3_DATA_DIR", str(tmp_path))
+
+    account = "210987654321"
+    captured = {}
+    done = threading.Event()
+
+    real_resolve = gluemod._resolve_script
+
+    def spy_resolve(location):
+        # Capture the account the worker thread actually runs under, then defer
+        # to the real resolver so the on-disk lookup is genuinely exercised.
+        captured["account"] = respmod.get_account_id()
+        captured["resolved"] = real_resolve(location)
+        done.set()
+        return captured["resolved"]
+
+    def noop_subprocess(run, job, args, resolved):
+        run["JobRunState"] = "SUCCEEDED"
+
+    monkeypatch.setattr(gluemod, "_resolve_script", spy_resolve)
+    monkeypatch.setattr(gluemod, "_execute_subprocess", noop_subprocess)
+
+    token = respmod._request_account_id.set(account)
+    try:
+        s3mod._persist_object("glue-scripts", "etl/main.py", b"print('ok')\n")
+        persisted = s3mod._object_disk_path("glue-scripts", "etl/main.py")
+
+        gluemod._create_job({
+            "Name": "ctx-job",
+            "Command": {"Name": "pythonshell", "ScriptLocation": "s3://glue-scripts/etl/main.py"},
+        })
+        gluemod._start_job_run({"JobName": "ctx-job"})
+
+        assert done.wait(5), "worker thread never invoked _resolve_script"
+        assert captured["account"] == account, (
+            f"worker ran under {captured.get('account')!r}, not caller account {account!r}"
+        )
+        assert captured["resolved"] is not None
+        assert os.path.samefile(captured["resolved"], persisted)
+    finally:
+        respmod._request_account_id.reset(token)
+        gluemod._jobs._data.pop((account, "ctx-job"), None)
+        gluemod._job_runs._data.pop((account, "ctx-job"), None)
+
+
+def test_glue_crawler_completes_for_non_default_account(monkeypatch):
+    """StartCrawler's finish timer returns the crawler to READY under the
+    caller's account, not the default (#827, cf. #639).
+
+    Regression: _finish_crawl runs on a bare threading.Timer, which does not
+    copy contextvars, so for a non-default account the `name in _crawlers`
+    guard (evaluated under the default account) was False and the crawler hung
+    in RUNNING forever with LastCrawl never recorded.
+    """
+    from ministack.core import responses as respmod
+    from ministack.services import glue as gluemod
+
+    # Shrink the 5s finish timer so the test is fast.
+    monkeypatch.setattr(gluemod, "CRAWLER_RUN_SECONDS", 0.2)
+
+    account = "555555555555"
+    name = "ctx-crawler"
+    token = respmod._request_account_id.set(account)
+    try:
+        gluemod._crawlers._data.pop((account, name), None)
+        gluemod._create_crawler({
+            "Name": name,
+            "Role": "arn:aws:iam::555555555555:role/GlueRole",
+            "Targets": {"S3Targets": [{"Path": "s3://b/data/"}]},
+        })
+        gluemod._start_crawler({"Name": name})
+        assert gluemod._crawlers[name]["State"] == "RUNNING"
+
+        # Wait for the finish timer (0.2s) to fire.
+        deadline = time.time() + 3
+        while time.time() < deadline and gluemod._crawlers[name]["State"] != "READY":
+            time.sleep(0.05)
+
+        assert gluemod._crawlers[name]["State"] == "READY", (
+            "crawler stuck in RUNNING — finish timer ran under the wrong account"
+        )
+        last_crawl = gluemod._crawlers[name]["LastCrawl"]
+        assert last_crawl is not None and last_crawl["Status"] == "SUCCEEDED"
+    finally:
+        respmod._request_account_id.reset(token)
+        gluemod._crawlers._data.pop((account, name), None)
+
+
+def test_glue_resolve_script_isolated_per_account(tmp_path, monkeypatch):
+    """A script persisted under one account is not resolvable from another (#827).
+
+    Guards the core multi-tenancy property: account-scoped resolution must not
+    leak one tenant's on-disk objects to another.
+    """
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    from ministack.services import glue as gluemod
+
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(gluemod, "S3_DATA_DIR", str(tmp_path))
+
+    owner = "111111111111"
+    other = "222222222222"
+    uri = "s3://scripts-bucket/jobs/etl.py"
+
+    tok_owner = respmod._request_account_id.set(owner)
+    try:
+        s3mod._persist_object("scripts-bucket", "jobs/etl.py", b"print('ok')\n")
+        owner_path = gluemod._resolve_script(uri)
+        assert owner_path is not None and owner in owner_path
+    finally:
+        respmod._request_account_id.reset(tok_owner)
+
+    tok_other = respmod._request_account_id.set(other)
+    try:
+        # 'other' has no such object on disk (scoped under its own account) or
+        # in memory, so the lookup must not surface 'owner's script.
+        assert gluemod._resolve_script(uri) is None
+    finally:
+        respmod._request_account_id.reset(tok_other)

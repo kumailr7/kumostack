@@ -51,10 +51,17 @@ from kumostack.core.responses import AccountScopedDict, apply_image_prefix, get_
 logger = logging.getLogger("rds")
 
 REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
+_MINISTACK_HOST = os.environ.get("MINISTACK_HOST", "localhost")
 BASE_PORT = int(os.environ.get("RDS_BASE_PORT", "15432"))
 RDS_TMPFS_SIZE = os.environ.get("RDS_TMPFS_SIZE", "256m")
 RDS_PERSIST = os.environ.get("RDS_PERSIST", "0").lower() in ("1", "true", "yes")
 DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "")
+# When set, skip ministack's own Docker network auto-detect so DescribeDBInstances
+# returns {MINISTACK_HOST, host_port} — the address that's actually reachable
+# from outside the Docker network (remote ministack deployments, host-side
+# clients of a containerised ministack). Off by default: existing in-network
+# behavior unchanged.
+RDS_PUBLIC_ENDPOINT = os.environ.get("MINISTACK_RDS_PUBLIC_ENDPOINT", "0").lower() in ("1", "true", "yes")
 
 _instances = AccountScopedDict()
 _clusters = AccountScopedDict()
@@ -110,29 +117,162 @@ def restore_state(data):
     if "port_counter" in data:
         _port_counter[0] = data["port_counter"]
     instances_data = data.get("instances", {})
+    to_respawn = []
     if isinstance(instances_data, AccountScopedDict):
         # New format: AccountScopedDict with full multi-account data
         for key, inst in list(instances_data._data.items()):
             inst["_docker_container_id"] = None
-            inst["DBInstanceStatus"] = "available"
+            inst["DBInstanceStatus"] = "creating"
             _instances._data[key] = inst
+            to_respawn.append((key[0], inst.get("DBInstanceIdentifier") or key[1], inst))
     else:
         # Legacy format: plain dict keyed by instance name
         for name, inst in instances_data.items():
             inst["_docker_container_id"] = None
-            inst["DBInstanceStatus"] = "available"
+            inst["DBInstanceStatus"] = "creating"
             _instances[name] = inst
+            to_respawn.append((None, name, inst))
+
+    # Re-spin backing containers for persisted instances. Mirrors the MWAA
+    # restore pattern: persistence saves the instance metadata but the Docker
+    # container itself is killed by the host restart, so the restore path has
+    # to bring it back. Without this, restored instances stay marked
+    # "available" with no running container, and StartDBInstance is
+    # metadata-only so it can't recover them either.
+    from ministack.core.responses import _request_account_id
+    for account_id, db_id, inst in to_respawn:
+        ctx = contextvars.copy_context()
+
+        def _runner(account_id=account_id, db_id=db_id, inst=inst):
+            if account_id is not None:
+                _request_account_id.set(account_id)
+            _start_rds_container_for_instance(db_id, inst)
+
+        threading.Thread(target=ctx.run, args=(_runner,), daemon=True).start()
 
 
-try:
-    _restored = load_state("rds")
-    if _restored:
-        restore_state(_restored)
-except Exception:
-    import logging
-    logging.getLogger(__name__).exception(
-        "Failed to restore persisted state; continuing with fresh store"
+def _start_rds_container_for_instance(db_id, instance):
+    """Re-spin (or re-attach to) the Docker container for a restored instance.
+
+    Reads engine, credentials, and endpoint info from the persisted instance
+    dict instead of CreateDBInstance request params. If a container with the
+    deterministic name ``ministack-rds-{db_id}`` already exists (e.g. host
+    rebooted but Docker preserved stopped containers), it is removed first so
+    a clean run can attach to the persistent named volume. Sets
+    ``DBInstanceStatus`` to ``available`` on success, ``failed`` on Docker
+    error.
+    """
+    docker_client = _get_docker()
+    if not docker_client:
+        instance["DBInstanceStatus"] = "available"
+        return
+
+    engine = instance.get("Engine", "postgres")
+    engine_version = instance.get("EngineVersion") or _default_engine_version(engine)
+    master_user = instance.get("MasterUsername", "admin")
+    master_pass = instance.get("_MasterUserPassword", "password")
+    db_name = instance.get("DBName") or "mydb"
+    endpoint = instance.get("Endpoint") or {}
+    # Host port must come from `_HostPort` (stored at create time), NOT from
+    # `Endpoint.Port` — the latter is overwritten to `container_port` (e.g.
+    # 5432 for postgres) to match real AWS, so reading it here would try to
+    # bind 5432 on the host and collide on every respawn (#692 follow-up).
+    # Legacy instances persisted before `_HostPort` was stored fall back to a
+    # fresh free port from `_next_port()`.
+    host_port = instance.get("_HostPort") or _next_port()
+    # If the stored host port was claimed by something else between
+    # restarts (another ministack, another db instance, a user app),
+    # docker bind would fail with "port is already allocated". Fall
+    # back to a fresh free port and persist it so subsequent restarts
+    # converge on a stable mapping again.
+    if not _is_host_port_free(host_port):
+        logger.info("RDS: persisted host port %d for %s is in use; "
+                    "allocating fresh free port", host_port, db_id)
+        host_port = _next_port()
+    instance["_HostPort"] = host_port
+
+    image, env_vars, container_port, data_path = _docker_image_for_engine(
+        engine, engine_version, master_user, master_pass, db_name,
     )
+    if not image:
+        instance["DBInstanceStatus"] = "available"
+        return
+
+    container_name = f"ministack-rds-{db_id}"
+    try:
+        existing = docker_client.containers.get(container_name)
+        # `force=True` stops AND removes in one shot, including
+        # half-spawned "Created" containers that didn't fully start
+        # — those still hold port mappings and would collide with
+        # the next `containers.run` (#692 follow-up: doodaz saw
+        # a `Created` container blocking the bind).
+        try:
+            existing.remove(force=True, v=False)
+        except Exception as e:
+            logger.warning("RDS: failed to remove stale container %s: %s",
+                           container_name, e)
+        # Verify the name is actually free now; if removal silently
+        # failed, abort respawn rather than crash inside `containers.run`
+        # with a confusing name-conflict error.
+        try:
+            docker_client.containers.get(container_name)
+            logger.warning("RDS: stale container %s still present after "
+                           "force-remove — aborting respawn", container_name)
+            instance["DBInstanceStatus"] = "failed"
+            return
+        except Exception:
+            pass  # Good — name is gone.
+    except Exception:
+        pass  # No existing container with that name — fine
+
+    ms_network = _get_kumostack_network(docker_client)
+    container_kwargs = dict(
+        image=image, detach=True,
+        environment=env_vars,
+        ports={f"{container_port}/tcp": host_port},
+        name=container_name,
+        labels={"ministack": "rds", "db_id": db_id},
+    )
+    if ms_network:
+        container_kwargs["network"] = ms_network
+    if RDS_PERSIST:
+        container_kwargs["volumes"] = {
+            f"ministack-rds-{db_id}-data": {"bind": data_path, "mode": "rw"},
+        }
+    else:
+        container_kwargs["tmpfs"] = {
+            data_path: f"rw,noexec,nosuid,size={RDS_TMPFS_SIZE}",
+        }
+
+    try:
+        container = docker_client.containers.run(**container_kwargs)
+    except Exception as e:
+        logger.warning("RDS: failed to respawn container for %s: %s", db_id, e)
+        instance["DBInstanceStatus"] = "failed"
+        return
+
+    instance["_docker_container_id"] = container.id
+
+    internal_host = None
+    internal_port = None
+    if ms_network:
+        try:
+            container.reload()
+            networks = container.attrs.get(
+                "NetworkSettings", {}).get("Networks", {})
+            container_ip = networks.get(ms_network, {}).get("IPAddress", "")
+            if container_ip:
+                internal_host = container_ip
+                internal_port = container_port
+                instance.setdefault("Endpoint", {})["Address"] = container_ip
+                instance["Endpoint"]["Port"] = container_port
+        except Exception:
+            pass
+    instance["_internal_address"] = internal_host
+    instance["_internal_port"] = internal_port
+    instance["DBInstanceStatus"] = "available"
+    logger.info("RDS: respawned container %s for instance %s",
+                container_name, db_id)
 
 
 def _get_docker():
@@ -147,8 +287,16 @@ def _get_docker():
 
 
 def _get_kumostack_network(docker_client):
-    """Detect the Docker network KumoStack is running on (if containerised)."""
+    """Detect the Docker network KumoStack is running on (if containerised).
+
+    Honors MINISTACK_RDS_PUBLIC_ENDPOINT — when set, returns None so the
+    DescribeDBInstances endpoint resolves to {MINISTACK_HOST, host_port}
+    instead of the container-internal address (useful for remote-kumostack
+    deployments where external clients can't reach the Docker network).
+    """
     global _kumostack_network
+    if RDS_PUBLIC_ENDPOINT:
+        return None
     if _kumostack_network is not None:
         return _kumostack_network or None
     if DOCKER_NETWORK:
@@ -325,8 +473,40 @@ def _refresh_cluster_status(cluster_id):
 _port_lock = threading.Lock()
 
 
+def _is_host_port_free(port: int) -> bool:
+    """Probe that no other process holds host TCP `port`. Best-effort
+    pre-flight check so respawn can pick a different port instead of
+    failing at `docker run` with `port is already allocated` (#692
+    follow-up). There is a small TOCTOU window between probe and
+    `containers.run`, but it closes the common case of stale or
+    user-process bindings."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("0.0.0.0", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def _next_port():
+    """Return the next free host port for an RDS container. Increments
+    the persisted counter, but skips ports that are already bound on the
+    host (e.g. by another ministack instance or the user's own services).
+    Caps probing to avoid infinite loops if the entire upper range is
+    saturated — in that pathological case the caller will get a port and
+    likely fail at `docker run`, but we won't spin forever."""
     with _port_lock:
+        for _ in range(200):
+            port = _port_counter[0]
+            _port_counter[0] += 1
+            if _is_host_port_free(port):
+                return port
+        # Saturated — return the next counter value and let docker surface
+        # whatever it surfaces. Better than a silent hang.
         port = _port_counter[0]
         _port_counter[0] += 1
         return port
@@ -518,8 +698,9 @@ def _create_db_instance(p):
 
     arn = f"arn:aws:rds:{get_region()}:{get_account_id()}:db:{db_id}"
     dbi_resource_id = f"db-{new_uuid().replace('-', '')[:20].upper()}"
-    endpoint_host = "localhost"
+    endpoint_host = _MINISTACK_HOST
     endpoint_port = port
+    host_port = None
     docker_container_id = None
     internal_host = None
     internal_port = None
@@ -535,6 +716,10 @@ def _create_db_instance(p):
         )
         if image:
             try:
+                # Create path: the `instance` dict doesn't exist yet
+                # (it's built ~70 lines below). Allocate a fresh free port
+                # and we'll stamp `_HostPort` onto the instance dict at
+                # construction time so subsequent respawns reuse it.
                 host_port = _next_port()
                 endpoint_port = host_port
                 container_kwargs = dict(
@@ -613,6 +798,11 @@ def _create_db_instance(p):
             "Port": endpoint_port,
             "HostedZoneId": "Z2R2ITUGPM61AM",
         },
+        # `_HostPort` is the actual docker host port; `Endpoint.Port` gets
+        # overwritten to the engine's container port later (5432 for
+        # postgres) to match real AWS, so respawn after restart needs the
+        # original host mapping stored separately (#692 follow-up).
+        "_HostPort": host_port,
         "AllocatedStorage": allocated_storage,
         "InstanceCreateTime": _format_time(now_ts),
         "PreferredBackupWindow": "03:00-04:00",
@@ -1006,7 +1196,7 @@ def _create_read_replica(p):
         "InstanceCreateTime": _format_time(time.time()),
         "ReadReplicaDBInstanceIdentifiers": [],
         "Endpoint": {
-            "Address": "localhost",
+            "Address": _MINISTACK_HOST,
             "Port": _next_port(),
             "HostedZoneId": "Z2R2ITUGPM61AM",
         },
@@ -1050,7 +1240,7 @@ def _restore_from_snapshot(p):
         "MasterUsername": snap.get("MasterUsername", "admin"),
         "DBName": snap.get("DBName", ""),
         "Endpoint": {
-            "Address": "localhost",
+            "Address": _MINISTACK_HOST,
             "Port": _next_port(),
             "HostedZoneId": "Z2R2ITUGPM61AM",
         },
@@ -2998,3 +3188,19 @@ def reset():
     _global_clusters.clear()
     _tags.clear()
     _port_counter[0] = BASE_PORT
+
+
+# Load persisted state at module import. Must run AFTER every helper this
+# code path may touch (notably `_get_docker`, `_docker_image_for_engine`,
+# `_get_kumostack_network`) is defined — `restore_state` spawns daemon threads
+# that race against the rest of module parsing, and a thread reaching an
+# undefined name raises NameError mid-restore (issue #692 follow-up).
+try:
+    _restored = load_state("rds")
+    if _restored:
+        restore_state(_restored)
+except Exception:
+    import logging
+    logging.getLogger(__name__).exception(
+        "Failed to restore persisted state; continuing with fresh store"
+    )

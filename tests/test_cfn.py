@@ -1402,6 +1402,175 @@ def test_cfn_ssm_parameter_timestamp_is_epoch(cfn, ssm):
         _wait_stack(cfn, "cfn-ssm-epoch")
 
 
+def test_cfn_appconfig_application(cfn, appconfig_client):
+    """AWS::AppConfig::Application provisions via CFN and is reachable via the
+    AppConfig API. Mirrors the CDK template from the reporter."""
+    template = json.dumps({
+        "Resources": {
+            "AppConfig1FDF3617": {
+                "Type": "AWS::AppConfig::Application",
+                "Properties": {
+                    "Name": "digital-cdk-template-test-master-AppConfig",
+                    "Tags": [
+                        {"Key": "application-id", "Value": "digital-cdk-template"},
+                    ],
+                },
+            },
+        },
+    })
+    cfn.create_stack(StackName="cfn-appconfig-app", TemplateBody=template)
+    _wait_stack(cfn, "cfn-appconfig-app")
+
+    try:
+        apps = appconfig_client.list_applications()["Items"]
+        match = [
+            a for a in apps
+            if a["Name"] == "digital-cdk-template-test-master-AppConfig"
+        ]
+        assert len(match) == 1
+        app_id = match[0]["Id"]
+
+        resources = cfn.describe_stack_resources(StackName="cfn-appconfig-app")
+        cfn_res = [
+            r for r in resources["StackResources"]
+            if r["LogicalResourceId"] == "AppConfig1FDF3617"
+        ]
+        assert len(cfn_res) == 1
+        assert cfn_res[0]["PhysicalResourceId"] == app_id
+    finally:
+        cfn.delete_stack(StackName="cfn-appconfig-app")
+        _wait_stack(cfn, "cfn-appconfig-app")
+
+    apps_after = appconfig_client.list_applications()["Items"]
+    assert not any(
+        a["Name"] == "digital-cdk-template-test-master-AppConfig"
+        for a in apps_after
+    )
+
+
+def test_cfn_appconfig_full_stack(cfn, appconfig_client):
+    """Issue #832: end-to-end AppConfig CFN stack — Application + Environment +
+    ConfigurationProfile + HostedConfigurationVersion + DeploymentStrategy +
+    Deployment, with Ref / Fn::GetAtt cross-references."""
+    template = json.dumps({
+        "Resources": {
+            "App": {
+                "Type": "AWS::AppConfig::Application",
+                "Properties": {"Name": "cfn-832-app"},
+            },
+            "Env": {
+                "Type": "AWS::AppConfig::Environment",
+                "Properties": {
+                    "ApplicationId": {"Ref": "App"},
+                    "Name": "cfn-832-env",
+                    "Description": "from cfn",
+                    "Tags": [{"Key": "stage", "Value": "test"}],
+                },
+            },
+            "Profile": {
+                "Type": "AWS::AppConfig::ConfigurationProfile",
+                "Properties": {
+                    "ApplicationId": {"Ref": "App"},
+                    "Name": "cfn-832-profile",
+                    "LocationUri": "hosted",
+                    "Type": "AWS.Freeform",
+                },
+            },
+            "HCV": {
+                "Type": "AWS::AppConfig::HostedConfigurationVersion",
+                "Properties": {
+                    "ApplicationId": {"Ref": "App"},
+                    "ConfigurationProfileId": {"Ref": "Profile"},
+                    "Content": '{"flag":true}',
+                    "ContentType": "application/json",
+                },
+            },
+            "Strategy": {
+                "Type": "AWS::AppConfig::DeploymentStrategy",
+                "Properties": {
+                    "Name": "cfn-832-strategy",
+                    "DeploymentDurationInMinutes": 0,
+                    "GrowthFactor": 100,
+                    "ReplicateTo": "NONE",
+                },
+            },
+            "Deploy": {
+                "Type": "AWS::AppConfig::Deployment",
+                "Properties": {
+                    "ApplicationId": {"Ref": "App"},
+                    "EnvironmentId": {"Ref": "Env"},
+                    "ConfigurationProfileId": {"Ref": "Profile"},
+                    "DeploymentStrategyId": {"Ref": "Strategy"},
+                    "ConfigurationVersion": {"Fn::GetAtt": ["HCV", "VersionNumber"]},
+                    "Tags": [{"Key": "owner", "Value": "cfn-832"}],
+                },
+            },
+        },
+    })
+    cfn.create_stack(StackName="cfn-832", TemplateBody=template)
+    _wait_stack(cfn, "cfn-832")
+
+    try:
+        # Application
+        app = next(a for a in appconfig_client.list_applications()["Items"]
+                   if a["Name"] == "cfn-832-app")
+        app_id = app["Id"]
+
+        # Environment
+        envs = appconfig_client.list_environments(ApplicationId=app_id)["Items"]
+        env = next(e for e in envs if e["Name"] == "cfn-832-env")
+        assert env["Description"] == "from cfn"
+
+        # ConfigurationProfile
+        profiles = appconfig_client.list_configuration_profiles(ApplicationId=app_id)["Items"]
+        profile = next(p for p in profiles if p["Name"] == "cfn-832-profile")
+        assert profile["LocationUri"] == "hosted"
+
+        # HostedConfigurationVersion — version number 1 for the first one.
+        hcvs = appconfig_client.list_hosted_configuration_versions(
+            ApplicationId=app_id, ConfigurationProfileId=profile["Id"],
+        )["Items"]
+        assert any(h["VersionNumber"] == 1 for h in hcvs)
+
+        # DeploymentStrategy
+        strategies = appconfig_client.list_deployment_strategies()["Items"]
+        strategy = next(s for s in strategies if s["Name"] == "cfn-832-strategy")
+        assert strategy["DeploymentDurationInMinutes"] == 0
+        assert strategy["ReplicateTo"] == "NONE"
+
+        # Deployment — uses Fn::GetAtt HCV.VersionNumber as ConfigurationVersion.
+        deployments = appconfig_client.list_deployments(
+            ApplicationId=app_id, EnvironmentId=env["Id"],
+        )["Items"]
+        assert len(deployments) == 1
+        # Fn::GetAtt HCV.VersionNumber resolves to the int 1; the Deployment
+        # stores whatever the engine hands the provisioner, so accept either
+        # form when asserting the wiring.
+        assert str(deployments[0]["ConfigurationVersion"]) == "1"
+        assert deployments[0]["State"] == "COMPLETE"
+
+        # Deployment Tags are stored and resolvable via ListTagsForResource.
+        deploy_arn = (
+            f"arn:aws:appconfig:us-east-1:000000000000:application/{app_id}/"
+            f"environment/{env['Id']}/deployment/{deployments[0]['DeploymentNumber']}"
+        )
+        tags = appconfig_client.list_tags_for_resource(ResourceArn=deploy_arn)["Tags"]
+        assert tags.get("owner") == "cfn-832"
+
+        # CFN-side: every logical resource resolved to a physical id.
+        resources = cfn.describe_stack_resources(StackName="cfn-832")["StackResources"]
+        by_logical = {r["LogicalResourceId"]: r["PhysicalResourceId"] for r in resources}
+        for logical in ("App", "Env", "Profile", "HCV", "Strategy", "Deploy"):
+            assert by_logical.get(logical), f"{logical} has no PhysicalResourceId"
+    finally:
+        cfn.delete_stack(StackName="cfn-832")
+        _wait_stack(cfn, "cfn-832")
+
+    # Post-delete: app is gone (cascade also wipes children).
+    apps_after = appconfig_client.list_applications()["Items"]
+    assert not any(a["Name"] == "cfn-832-app" for a in apps_after)
+
+
 def test_cfn_lambda_nodejs_inline_zip(cfn, lam):
     """CFN inline ZipFile with Node.js runtime should write index.js, not index.py."""
     template = json.dumps({
@@ -3085,3 +3254,86 @@ def test_cfn_apigateway_account_provisions(cfn, apigw_v1):
 
     cfn.delete_stack(StackName=stack_name)
     _wait_stack(cfn, stack_name)
+
+
+# ============================================================================
+# Nested Stacks (AWS::CloudFormation::Stack)
+# ============================================================================
+
+def test_cfn_nested_stack_basic(cfn, s3):
+    """Parent stack provisions a nested stack via TemplateURL. The nested
+    stack creates an S3 bucket and exposes its name as an Output, which the
+    parent reads back via Fn::GetAtt: [Nested, Outputs.BucketName]."""
+    suffix = _uuid_mod.uuid4().hex[:8]
+    templates_bucket = f"cfn-nested-templates-{suffix}"
+    s3.create_bucket(Bucket=templates_bucket)
+
+    child_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {
+            "BucketSuffix": {"Type": "String"},
+        },
+        "Resources": {
+            "ChildBucket": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {
+                    "BucketName": {"Fn::Sub": "cfn-nested-child-${BucketSuffix}"},
+                },
+            },
+        },
+        "Outputs": {
+            "BucketName": {"Value": {"Ref": "ChildBucket"}},
+        },
+    }
+    s3.put_object(Bucket=templates_bucket, Key="child.json",
+                  Body=json.dumps(child_template).encode())
+
+    parent_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Nested": {
+                "Type": "AWS::CloudFormation::Stack",
+                "Properties": {
+                    "TemplateURL": f"http://localhost:4566/{templates_bucket}/child.json",
+                    "Parameters": {"BucketSuffix": suffix},
+                },
+            },
+            "ParentParam": {
+                "Type": "AWS::SSM::Parameter",
+                "Properties": {
+                    "Name": f"/cfn-nested-parent-{suffix}/child-bucket",
+                    "Type": "String",
+                    "Value": {"Fn::GetAtt": ["Nested", "Outputs.BucketName"]},
+                },
+            },
+        },
+        "Outputs": {
+            "NestedBucketName": {
+                "Value": {"Fn::GetAtt": ["Nested", "Outputs.BucketName"]},
+            },
+        },
+    }
+
+    parent_name = f"cfn-nested-parent-{suffix}"
+    cfn.create_stack(StackName=parent_name,
+                     TemplateBody=json.dumps(parent_template))
+    stack = _wait_stack(cfn, parent_name)
+    assert stack["StackStatus"] == "CREATE_COMPLETE", stack.get("StackStatusReason")
+
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+    expected_bucket = f"cfn-nested-child-{suffix}"
+    assert outputs.get("NestedBucketName") == expected_bucket
+
+    # The nested-created bucket really exists
+    buckets = [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    assert expected_bucket in buckets
+
+    # Delete the parent — child resources are cleaned up too
+    cfn.delete_stack(StackName=parent_name)
+    _wait_stack(cfn, parent_name)
+    buckets_after = [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    assert expected_bucket not in buckets_after, \
+        "Nested stack delete did not propagate to child resources"
+
+    s3.delete_object(Bucket=templates_bucket, Key="child.json")
+    s3.delete_bucket(Bucket=templates_bucket)

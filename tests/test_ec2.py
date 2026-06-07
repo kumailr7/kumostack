@@ -217,14 +217,18 @@ def test_ec2_describe_images_has_root_device_and_block_mappings(ec2):
     assert win["BlockDeviceMappings"][0]["DeviceName"] == "/dev/sda1"
 
 def test_ec2_security_group_crud(ec2):
-    sg_id = ec2.create_security_group(GroupName="qa-ec2-sg", Description="test sg")["GroupId"]
+    created = ec2.create_security_group(GroupName="qa-ec2-sg", Description="test sg")
+    sg_id = created["GroupId"]
     assert sg_id.startswith("sg-")
+    assert created["SecurityGroupArn"] == f"arn:aws:ec2:us-east-1:000000000000:security-group/{sg_id}"
 
     desc = ec2.describe_security_groups(GroupIds=[sg_id])
     assert desc["SecurityGroups"][0]["GroupName"] == "qa-ec2-sg"
     assert desc["SecurityGroups"][0]["Description"] == "test sg"
 
-    ec2.delete_security_group(GroupId=sg_id)
+    deleted = ec2.delete_security_group(GroupId=sg_id)
+    assert deleted["Return"] is True
+    assert deleted["GroupId"] == sg_id
     desc2 = ec2.describe_security_groups()
     assert not any(sg["GroupId"] == sg_id for sg in desc2["SecurityGroups"])
 
@@ -233,6 +237,16 @@ def test_ec2_security_group_duplicate(ec2):
     with pytest.raises(ClientError) as exc:
         ec2.create_security_group(GroupName="qa-ec2-sg-dup", Description="d")
     assert exc.value.response["Error"]["Code"] == "InvalidGroup.Duplicate"
+
+
+def test_ec2_describe_security_groups_malformed_id(ec2):
+    with pytest.raises(ClientError) as exc:
+        ec2.describe_security_groups(GroupIds=["sg-0123456789abcdef0"])
+
+    error = exc.value.response["Error"]
+    assert error["Code"] == "InvalidGroupId.Malformed"
+    assert error["Message"] == 'Invalid id: "sg-0123456789abcdef0"'
+
 
 def test_ec2_sg_authorize_revoke_ingress(ec2):
     sg_id = ec2.create_security_group(GroupName="qa-ec2-sg-rules", Description="rules test")["GroupId"]
@@ -265,6 +279,31 @@ def test_ec2_sg_authorize_revoke_ingress(ec2):
     )
     desc2 = ec2.describe_security_groups(GroupIds=[sg_id])
     assert not any(p.get("FromPort") == 80 for p in desc2["SecurityGroups"][0]["IpPermissions"])
+
+    ec2.delete_security_group(GroupId=sg_id)
+
+
+def test_ec2_revoke_security_group_egress_returns_revoked_rules(ec2):
+    sg_id = ec2.create_security_group(GroupName="qa-ec2-sg-revoke-egress", Description="egress")["GroupId"]
+
+    resp = ec2.revoke_security_group_egress(
+        GroupId=sg_id,
+        IpPermissions=[
+            {
+                "IpProtocol": "-1",
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+            }
+        ],
+    )
+
+    assert resp["Return"] is True
+    revoked = resp["RevokedSecurityGroupRules"]
+    assert len(revoked) == 1
+    assert revoked[0]["SecurityGroupRuleId"].startswith("sgr-")
+    assert revoked[0]["GroupId"] == sg_id
+    assert revoked[0]["IsEgress"] is True
+    assert revoked[0]["IpProtocol"] == "-1"
+    assert revoked[0]["CidrIpv4"] == "0.0.0.0/0"
 
     ec2.delete_security_group(GroupId=sg_id)
 
@@ -598,7 +637,11 @@ def test_ec2_network_interface_attach_detach(ec2):
     assert attachment_id.startswith("eni-attach-")
 
     desc = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
-    assert desc["NetworkInterfaces"][0]["Status"] == "in-use"
+    eni = desc["NetworkInterfaces"][0]
+    assert eni["Status"] == "in-use"
+    # Real EC2 surfaces Attachment.AttachTime on every attached ENI. Issue #1178.
+    assert "AttachTime" in eni["Attachment"]
+    assert eni["Attachment"]["AttachTime"] is not None
 
     ec2.detach_network_interface(AttachmentId=attachment_id)
     desc2 = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
@@ -628,6 +671,28 @@ def test_ec2_vpc_endpoint_crud(ec2):
     assert not any(e["VpcEndpointId"] == vpce_id for e in desc2["VpcEndpoints"])
 
     ec2.delete_vpc(VpcId=vpc_id)
+
+
+def test_ec2_vpc_endpoint_tags(ec2):
+    vpc_id = ec2.create_vpc(CidrBlock="10.41.0.0/16")["Vpc"]["VpcId"]
+
+    vpce_id = ec2.create_vpc_endpoint(
+        VpcId=vpc_id,
+        ServiceName="com.amazonaws.us-east-1.s3",
+        VpcEndpointType="Gateway",
+        TagSpecifications=[{
+            "ResourceType": "vpc-endpoint",
+            "Tags": [{"Key": "Env", "Value": "test"}, {"Key": "Team", "Value": "infra"}],
+        }],
+    )["VpcEndpoint"]["VpcEndpointId"]
+
+    desc = ec2.describe_vpc_endpoints(VpcEndpointIds=[vpce_id])
+    tags = {t["Key"]: t["Value"] for t in desc["VpcEndpoints"][0].get("Tags", [])}
+    assert tags == {"Env": "test", "Team": "infra"}
+
+    ec2.delete_vpc_endpoints(VpcEndpointIds=[vpce_id])
+    ec2.delete_vpc(VpcId=vpc_id)
+
 
 def test_ec2_describe_vpc_endpoint_services(ec2):
     resp = ec2.describe_vpc_endpoint_services()
@@ -769,6 +834,34 @@ def test_ec2_flow_logs_crud(ec2):
     ec2.delete_flow_logs(FlowLogIds=fl_ids)
     desc2 = ec2.describe_flow_logs(FlowLogIds=fl_ids)
     assert len(desc2["FlowLogs"]) == 0
+
+
+def test_ec2_flow_log_tags(ec2):
+    vpc = ec2.create_vpc(CidrBlock="10.105.0.0/16")
+    vpc_id = vpc["Vpc"]["VpcId"]
+
+    fl_ids = ec2.create_flow_logs(
+        ResourceIds=[vpc_id],
+        ResourceType="VPC",
+        TrafficType="ALL",
+        LogDestinationType="cloud-watch-logs",
+        LogGroupName="/aws/vpc/flowlogs-tags",
+        TagSpecifications=[{
+            "ResourceType": "flow-log",
+            "Tags": [{"Key": "Project", "Value": "ministack"}],
+        }],
+    )["FlowLogIds"]
+
+    desc = ec2.describe_flow_logs(FlowLogIds=fl_ids)
+    tags = {t["Key"]: t["Value"] for t in desc["FlowLogs"][0].get("Tags", [])}
+    assert tags == {"Project": "ministack"}
+
+    ec2.delete_flow_logs(FlowLogIds=fl_ids)
+    tag_resp = ec2.describe_tags(Filters=[{"Name": "resource-id", "Values": fl_ids}])
+    assert tag_resp["Tags"] == []
+
+    ec2.delete_vpc(VpcId=vpc_id)
+
 
 def test_ec2_vpc_peering_crud(ec2):
     vpc1 = ec2.create_vpc(CidrBlock="10.105.0.0/16")
@@ -1561,6 +1654,39 @@ def test_ec2_launch_template_versions(ec2):
     ec2.delete_launch_template(LaunchTemplateId=lt_id)
 
 
+def test_ec2_create_launch_template_version_returns_version_number(ec2):
+    """CreateLaunchTemplateVersion must return VersionNumber at the
+    `launchTemplateVersion` root, not wrapped in `<item>` — otherwise the
+    Go SDK reads it as null and Terraform sends ``SetDefaultVersion=0`` to
+    the follow-up ModifyLaunchTemplate, which AWS rejects with
+    ``InvalidLaunchTemplateId.VersionNotFound``. Repro for issue #753."""
+    resp = ec2.create_launch_template(
+        LaunchTemplateName="qa-lt-vnum",
+        LaunchTemplateData={"InstanceType": "t3.micro"},
+    )
+    lt_id = resp["LaunchTemplate"]["LaunchTemplateId"]
+    try:
+        v2 = ec2.create_launch_template_version(
+            LaunchTemplateId=lt_id,
+            LaunchTemplateData={"InstanceType": "t3.small"},
+        )
+        # botocore parses the response shape; if the inner XML is wrong, this
+        # field reads as None / missing rather than the version number.
+        assert "LaunchTemplateVersion" in v2
+        v = v2["LaunchTemplateVersion"]
+        assert v.get("VersionNumber") == 2, v
+        assert v.get("LaunchTemplateId") == lt_id
+
+        # End-to-end: Terraform-style follow-up that previously failed.
+        modified = ec2.modify_launch_template(
+            LaunchTemplateId=lt_id,
+            DefaultVersion=str(v["VersionNumber"]),
+        )
+        assert modified["LaunchTemplate"]["DefaultVersionNumber"] == 2
+    finally:
+        ec2.delete_launch_template(LaunchTemplateId=lt_id)
+
+
 def test_ec2_launch_template_with_block_devices(ec2):
     """Create a template with block device mappings."""
     resp = ec2.create_launch_template(
@@ -1995,3 +2121,165 @@ def test_ebs_modify_volume_attribute(ec2):
     # Stub — just verify it doesn't error
     resp = ec2.describe_volume_attribute(VolumeId=vol_id, Attribute="autoEnableIO")
     assert resp["VolumeId"] == vol_id
+
+
+def test_ec2_create_describe_fleet(ec2):
+    lt = ec2.create_launch_template(
+        LaunchTemplateName="test-fleet-lt",
+        LaunchTemplateData={"ImageId": "ami-12345678", "InstanceType": "t2.small"}
+    )
+    lt_id = lt["LaunchTemplate"]["LaunchTemplateId"]
+
+    # Create fleet with overrides and tag specifications
+    fleet = ec2.create_fleet(
+        LaunchTemplateConfigs=[
+            {
+                "LaunchTemplateSpecification": {
+                    "LaunchTemplateId": lt_id,
+                    "Version": "1"
+                },
+                "Overrides": [
+                    {
+                        "InstanceType": "t2.medium"
+                    }
+                ]
+            }
+        ],
+        TargetCapacitySpecification={
+            "TotalTargetCapacity": 2,
+            "OnDemandTargetCapacity": 2,
+        },
+        Type="instant",
+        TagSpecifications=[
+            {
+                "ResourceType": "fleet",
+                "Tags": [
+                    {"Key": "Environment", "Value": "Production"}
+                ]
+            }
+        ]
+    )
+
+    fleet_id = fleet["FleetId"]
+    assert fleet_id.startswith("fleet-")
+    assert len(fleet["Instances"]) == 1
+    assert fleet["Instances"][0]["InstanceType"] == "t2.medium"
+    assert fleet["Instances"][0]["Lifecycle"] == "on-demand"
+    assert len(fleet["Instances"][0]["InstanceIds"]) == 2
+
+    # Verify instances are running
+    inst_ids = fleet["Instances"][0]["InstanceIds"]
+    desc_inst = ec2.describe_instances(InstanceIds=inst_ids)
+    reservations = desc_inst["Reservations"]
+    assert len(reservations) >= 1
+    launched_instances = [inst for r in reservations for inst in r["Instances"]]
+    assert len(launched_instances) == 2
+    for inst in launched_instances:
+        assert inst["InstanceType"] == "t2.medium"
+        assert inst["ImageId"] == "ami-12345678"
+
+    # Describe fleet and verify details and tags
+    resp = ec2.describe_fleets(FleetIds=[fleet_id])
+    assert len(resp["Fleets"]) == 1
+    f = resp["Fleets"][0]
+    assert f["FleetId"] == fleet_id
+    assert f["FulfilledCapacity"] == 2.0
+    assert f["FulfilledOnDemandCapacity"] == 2.0
+    assert f["TargetCapacitySpecification"]["TotalTargetCapacity"] == 2
+    assert any(t["Key"] == "Environment" and t["Value"] == "Production" for t in f.get("Tags", []))
+
+
+def test_create_fleet_default_capacity_type_spot(ec2):
+    """DefaultTargetCapacityType=spot drives lifecycle + capacity-slot accounting,
+    not the top-level Type (which is {request, maintain, instant})."""
+    lt = ec2.create_launch_template(
+        LaunchTemplateName=f"spot-lt-{_uuid_mod.uuid4().hex[:8]}",
+        LaunchTemplateData={"ImageId": "ami-deadbeef", "InstanceType": "t3.small"},
+    )
+    lt_id = lt["LaunchTemplate"]["LaunchTemplateId"]
+    resp = ec2.create_fleet(
+        LaunchTemplateConfigs=[{
+            "LaunchTemplateSpecification": {"LaunchTemplateId": lt_id, "Version": "1"},
+        }],
+        TargetCapacitySpecification={
+            "TotalTargetCapacity": 2,
+            "SpotTargetCapacity": 2,
+            "DefaultTargetCapacityType": "spot",
+        },
+        Type="instant",
+    )
+    desc = ec2.describe_fleets(FleetIds=[resp["FleetId"]])["Fleets"][0]
+    tcs = desc["TargetCapacitySpecification"]
+    assert tcs["DefaultTargetCapacityType"] == "spot"
+    assert tcs["SpotTargetCapacity"] == 2
+    assert tcs["OnDemandTargetCapacity"] == 0
+    assert desc["Instances"][0]["Lifecycle"] == "spot"
+
+
+def test_create_fleet_distributes_across_configs_and_overrides(ec2):
+    """Multi-config × multi-override should produce one Instances[*] item
+    per (config, override) bucket, with capacity round-robin'd across them."""
+    lt1 = ec2.create_launch_template(
+        LaunchTemplateName=f"multi-lt1-{_uuid_mod.uuid4().hex[:8]}",
+        LaunchTemplateData={"ImageId": "ami-aaaaaaaa", "InstanceType": "t3.micro"},
+    )["LaunchTemplate"]["LaunchTemplateId"]
+    lt2 = ec2.create_launch_template(
+        LaunchTemplateName=f"multi-lt2-{_uuid_mod.uuid4().hex[:8]}",
+        LaunchTemplateData={"ImageId": "ami-bbbbbbbb", "InstanceType": "t3.micro"},
+    )["LaunchTemplate"]["LaunchTemplateId"]
+    resp = ec2.create_fleet(
+        LaunchTemplateConfigs=[
+            {
+                "LaunchTemplateSpecification": {"LaunchTemplateId": lt1, "Version": "1"},
+                "Overrides": [
+                    {"InstanceType": "t3.small"},
+                    {"InstanceType": "t3.medium"},
+                ],
+            },
+            {
+                "LaunchTemplateSpecification": {"LaunchTemplateId": lt2, "Version": "1"},
+                "Overrides": [
+                    {"InstanceType": "t3.large"},
+                    {"InstanceType": "t3.xlarge"},
+                ],
+            },
+        ],
+        TargetCapacitySpecification={"TotalTargetCapacity": 4, "OnDemandTargetCapacity": 4},
+        Type="instant",
+    )
+    instance_types = sorted(i["InstanceType"] for i in resp["Instances"])
+    assert instance_types == ["t3.large", "t3.medium", "t3.small", "t3.xlarge"]
+    total_ids = [iid for item in resp["Instances"] for iid in item["InstanceIds"]]
+    assert len(total_ids) == 4
+
+
+def test_create_fleet_maintain_returns_fleetid_only(ec2):
+    """For Type=maintain (and request), AWS does not launch synchronously —
+    response carries FleetId only; no Instances / no Errors."""
+    lt = ec2.create_launch_template(
+        LaunchTemplateName=f"maintain-lt-{_uuid_mod.uuid4().hex[:8]}",
+        LaunchTemplateData={"ImageId": "ami-11111111", "InstanceType": "t2.micro"},
+    )["LaunchTemplate"]["LaunchTemplateId"]
+    resp = ec2.create_fleet(
+        LaunchTemplateConfigs=[{
+            "LaunchTemplateSpecification": {"LaunchTemplateId": lt, "Version": "1"},
+        }],
+        TargetCapacitySpecification={"TotalTargetCapacity": 3, "OnDemandTargetCapacity": 3},
+        Type="maintain",
+    )
+    assert resp["FleetId"].startswith("fleet-")
+    assert not resp.get("Instances")
+    assert not resp.get("Errors")
+    desc = ec2.describe_fleets(FleetIds=[resp["FleetId"]])["Fleets"][0]
+    assert desc["Type"] == "maintain"
+    assert desc["FulfilledCapacity"] == 0.0
+    assert desc["ActivityStatus"] == "pending_fulfillment"
+    assert desc.get("Instances", []) == []
+
+
+def test_describe_fleets_unknown_id_returns_invalid_fleet_id(ec2):
+    bogus = f"fleet-{_uuid_mod.uuid4().hex}"
+    with pytest.raises(ClientError) as exc:
+        ec2.describe_fleets(FleetIds=[bogus])
+    assert exc.value.response["Error"]["Code"] == "InvalidFleetId.NotFound"
+

@@ -186,6 +186,47 @@ def _local_tag_name(el) -> str:
     return t.split("}")[-1] if "}" in t else t
 
 
+def _add_xml_block(parent, source_el):
+    block = SubElement(parent, _local_tag_name(source_el))
+    block.text = source_el.text
+    block.attrib.update(source_el.attrib)
+    for child in source_el:
+        _add_xml_block(block, child)
+    return block
+
+
+def _add_config_block(parent, config_el, tag):
+    child = _find(config_el, tag)
+    if child is not None:
+        _add_xml_block(parent, child)
+
+
+# Minimal empty XML for each REQUIRED-block field on DistributionSummary.
+# Real AWS emits these even when the distribution was created with nothing
+# in them; SDKs that strict-parse (Go v2, Java v2) reject responses that
+# omit required members.
+_EMPTY_SUMMARY_BLOCKS = {
+    "Aliases": "<Aliases><Quantity>0</Quantity></Aliases>",
+    "Origins": "<Origins><Quantity>0</Quantity></Origins>",
+    "CacheBehaviors": "<CacheBehaviors><Quantity>0</Quantity></CacheBehaviors>",
+    "CustomErrorResponses": "<CustomErrorResponses><Quantity>0</Quantity></CustomErrorResponses>",
+    "ViewerCertificate": "<ViewerCertificate><CloudFrontDefaultCertificate>true</CloudFrontDefaultCertificate><MinimumProtocolVersion>TLSv1</MinimumProtocolVersion><CertificateSource>cloudfront</CertificateSource></ViewerCertificate>",
+    "Restrictions": "<Restrictions><GeoRestriction><RestrictionType>none</RestrictionType><Quantity>0</Quantity></GeoRestriction></Restrictions>",
+    "DefaultCacheBehavior": "<DefaultCacheBehavior><TargetOriginId></TargetOriginId><ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy></DefaultCacheBehavior>",
+}
+
+
+def _add_config_block_with_default(parent, config_el, tag):
+    """Like `_add_config_block` but emits a minimal-but-valid empty block
+    when the source config doesn't contain `tag` — keeps DistributionSummary
+    schema-complete for strict-parsing SDKs."""
+    child = _find(config_el, tag)
+    if child is not None:
+        _add_xml_block(parent, child)
+    elif tag in _EMPTY_SUMMARY_BLOCKS:
+        _add_xml_block(parent, fromstring(_EMPTY_SUMMARY_BLOCKS[tag]))
+
+
 def _unwrap_distribution_create_xml(root_el):
     """Return ``(DistributionConfig element, Tags element or None)``.
 
@@ -840,8 +881,24 @@ def _list_distributions():
                 SubElement(ds, "Status").text = dist["Status"]
                 SubElement(ds, "LastModifiedTime").text = dist["LastModifiedTime"]
                 SubElement(ds, "DomainName").text = dist["DomainName"]
+                config_el = fromstring(dist["config_xml"])
+                # Field order matches real AWS DistributionSummary shape so
+                # SDKs that strict-parse (Go v2, Java v2) don't reject it.
+                # All 19 fields below are REQUIRED per botocore service-2.json.
+                _add_config_block_with_default(ds, config_el, "Aliases")
+                _add_config_block_with_default(ds, config_el, "Origins")
+                _add_config_block_with_default(ds, config_el, "DefaultCacheBehavior")
+                _add_config_block_with_default(ds, config_el, "CacheBehaviors")
+                _add_config_block_with_default(ds, config_el, "CustomErrorResponses")
+                SubElement(ds, "Comment").text = _text(config_el, "Comment") or ""
+                SubElement(ds, "PriceClass").text = _text(config_el, "PriceClass") or "PriceClass_All"
                 SubElement(ds, "Enabled").text = str(dist["enabled"]).lower()
-                SubElement(ds, "Comment").text = _text(fromstring(dist["config_xml"]), "Comment")
+                _add_config_block_with_default(ds, config_el, "ViewerCertificate")
+                _add_config_block_with_default(ds, config_el, "Restrictions")
+                SubElement(ds, "WebACLId").text = _text(config_el, "WebACLId") or ""
+                SubElement(ds, "HttpVersion").text = _text(config_el, "HttpVersion") or "http2"
+                SubElement(ds, "IsIPV6Enabled").text = (_text(config_el, "IsIPV6Enabled") or "true").lower()
+                SubElement(ds, "Staging").text = str(dist.get("Staging", False)).lower()
 
     return _xml_response("DistributionList", build)
 
@@ -929,6 +986,29 @@ def _create_invalidation(dist_id, body):
             for child in items_el:
                 if child.text:
                     path_items.append(child.text)
+
+    invs = _invalidations[dist_id]
+    for existing in invs:
+        if existing["InvalidationBatch"]["CallerReference"] == caller_ref:
+            existing_paths = existing["InvalidationBatch"]["Paths"]["Items"]
+            if set(existing_paths) != set(path_items):
+                return _error(
+                    "InvalidationBatchAlreadyExists",
+                    "An invalidation batch with this CallerReference already exists.",
+                    400,
+                )
+
+            def build(root, _inv=existing):
+                _build_invalidation_xml(root, _inv)
+
+            return _xml_response(
+                "Invalidation",
+                build,
+                status=201,
+                extra_headers={
+                    "Location": f"/2020-05-31/distribution/{dist_id}/invalidation/{existing['Id']}",
+                },
+            )
 
     inv_id = _inv_id()
     now = _now_iso()

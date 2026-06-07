@@ -7,10 +7,14 @@ JSON-based API via X-Amz-Target (AWSGlue).
 Supports full Data Catalog: Databases, Tables, Partitions, Connections, Crawlers, Jobs, JobRuns.
 Also: SecurityConfigurations, Classifiers, PartitionIndexes, CrawlerMetrics, Tags,
       Triggers, Workflows.
-Job execution runs Python scripts via subprocess in background threads.
+Job execution: when Docker is available and the job command is ``glueetl`` or
+``gluestreaming``, runs the script inside an ``amazon/aws-glue-libs`` container
+with Spark + awsglue.  Falls back to plain ``python3`` subprocess for non-Spark
+scripts or when Docker is unavailable.
 Crawlers transition through RUNNING state with a configurable timer.
 """
 
+import contextvars
 import copy
 import fnmatch
 import json
@@ -36,6 +40,64 @@ logger = logging.getLogger("glue")
 REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 CRAWLER_RUN_SECONDS = int(os.environ.get("GLUE_CRAWLER_RUN_SECONDS", "5"))
 S3_DATA_DIR = os.environ.get("S3_DATA_DIR", "/tmp/kumostack-data/s3")
+DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "")
+
+# Glue Docker image — maps GlueVersion to the amazon/aws-glue-libs tag.
+# Users can override via GLUE_DOCKER_IMAGE env var.
+_GLUE_VERSION_IMAGES = {
+    "4.0": "amazon/aws-glue-libs:glue_libs_4.0.0_image_01",
+    "3.0": "amazon/aws-glue-libs:glue_libs_3.0.0_image_01",
+}
+GLUE_DOCKER_IMAGE_OVERRIDE = os.environ.get("GLUE_DOCKER_IMAGE", "")
+
+_docker = None
+_kumostack_network = None
+
+
+def _get_docker():
+    global _docker
+    if _docker is None:
+        try:
+            import docker
+            _docker = docker.from_env()
+        except Exception:
+            pass
+    return _docker
+
+
+def _get_kumostack_network(docker_client):
+    """Detect the Docker network KumoStack is running on (if containerised)."""
+    global _kumostack_network
+    if _kumostack_network is not None:
+        return _kumostack_network or None
+    if DOCKER_NETWORK:
+        _kumostack_network = DOCKER_NETWORK
+        return DOCKER_NETWORK
+    try:
+        self_container = docker_client.containers.get(
+            os.environ.get("HOSTNAME", ""))
+        nets = list(
+            self_container.attrs["NetworkSettings"]["Networks"].keys())
+        if nets:
+            _kumostack_network = nets[0]
+            return nets[0]
+    except Exception:
+        pass
+    _kumostack_network = ""
+    return None
+
+
+def _glue_image_for_version(glue_version):
+    """Return the Docker image for a given GlueVersion."""
+    if GLUE_DOCKER_IMAGE_OVERRIDE:
+        return GLUE_DOCKER_IMAGE_OVERRIDE
+    return _GLUE_VERSION_IMAGES.get(glue_version, _GLUE_VERSION_IMAGES.get("4.0"))
+
+
+def _is_spark_job(job):
+    """True if the job uses glueetl/gluestreaming (Spark-based)."""
+    cmd_name = job.get("Command", {}).get("Name", "")
+    return cmd_name in ("glueetl", "gluestreaming")
 
 _databases = AccountScopedDict()
 _tables = AccountScopedDict()       # "db_name/table_name" -> table dict
@@ -51,6 +113,7 @@ _classifiers = AccountScopedDict()
 _triggers = AccountScopedDict()     # trigger_name -> trigger dict
 _workflows = AccountScopedDict()    # workflow_name -> workflow dict
 _workflow_runs = AccountScopedDict() # workflow_name -> [run, ...]
+_user_defined_functions = AccountScopedDict()  # "db_name/function_name" -> udf dict
 
 _ALL_STATE = {
     "databases": _databases,
@@ -67,6 +130,7 @@ _ALL_STATE = {
     "triggers": _triggers,
     "workflows": _workflows,
     "workflow_runs": _workflow_runs,
+    "user_defined_functions": _user_defined_functions,
 }
 
 
@@ -125,6 +189,7 @@ async def handle_request(method, path, headers, body, query_params):
         "GetPartitions": _get_partitions,
         "BatchCreatePartition": _batch_create_partition,
         "BatchGetPartition": _batch_get_partition,
+        "BatchUpdatePartition": _batch_update_partition,
         # Partition Indexes
         "CreatePartitionIndex": _create_partition_index,
         "GetPartitionIndexes": _get_partition_indexes,
@@ -178,6 +243,12 @@ async def handle_request(method, path, headers, body, query_params):
         "DeleteWorkflow": _delete_workflow,
         "UpdateWorkflow": _update_workflow,
         "StartWorkflowRun": _start_workflow_run,
+        # User Defined Functions
+        "CreateUserDefinedFunction": _create_user_defined_function,
+        "UpdateUserDefinedFunction": _update_user_defined_function,
+        "DeleteUserDefinedFunction": _delete_user_defined_function,
+        "GetUserDefinedFunction": _get_user_defined_function,
+        "GetUserDefinedFunctions": _get_user_defined_functions,
         # Tags
         "TagResource": _tag_resource,
         "UntagResource": _untag_resource,
@@ -207,6 +278,8 @@ def _create_database(data):
         "CreateTime": int(time.time()),
         "CatalogId": get_account_id(),
     }
+    if data.get("Tags"):
+        _tags[_arn("database", name)] = dict(data["Tags"])
     return json_response({})
 
 
@@ -215,6 +288,7 @@ def _delete_database(data):
     if name not in _databases:
         return error_response_json("EntityNotFoundException", f"Database {name} not found", 400)
     del _databases[name]
+    _tags.pop(_arn("database", name), None)
     keys_to_del = [k for k in _tables if k.startswith(f"{name}/")]
     for k in keys_to_del:
         del _tables[k]
@@ -270,8 +344,16 @@ def _create_table(data):
         "PartitionKeys": table_input.get("PartitionKeys", []),
         "TableType": table_input.get("TableType", "EXTERNAL_TABLE"),
         "Parameters": table_input.get("Parameters", {}),
+        "ViewOriginalText": table_input.get("ViewOriginalText"),
+        "ViewExpandedText": table_input.get("ViewExpandedText"),
+        "ViewDefinition": table_input.get("ViewDefinition"),
+        "IsMultiDialectView": table_input.get("IsMultiDialectView"),
         "IsRegisteredWithLakeFormation": False,
         "CatalogId": get_account_id(),
+        # AWS Glue exposes a monotonically-increasing VersionId per table for
+        # optimistic concurrency on UpdateTable. Stored as a string per the
+        # botocore Table output shape.
+        "VersionId": "1",
     }
     return json_response({})
 
@@ -314,12 +396,28 @@ def _update_table(data):
     key = f"{db_name}/{name}"
     if key not in _tables:
         return error_response_json("EntityNotFoundException", f"Table {name} not found", 400)
+    # Optimistic-concurrency check: if the caller passes VersionId, it must
+    # match the table's current VersionId. Real AWS Glue rejects stale writes
+    # with ConcurrentModificationException. Issue #1183.
+    requested_version = data.get("VersionId")
+    current_version = _tables[key].get("VersionId", "1")
+    if requested_version is not None and str(requested_version) != current_version:
+        return error_response_json(
+            "ConcurrentModificationException",
+            f"Table {name} was modified by another process. Expected VersionId={current_version}, got {requested_version}.",
+            400,
+        )
     safe_keys = {"Description", "Owner", "StorageDescriptor", "PartitionKeys",
-                 "TableType", "Parameters", "ViewOriginalText", "ViewExpandedText"}
+                 "TableType", "Parameters", "ViewOriginalText", "ViewExpandedText",
+                 "ViewDefinition", "IsMultiDialectView"}
     for k in safe_keys:
         if k in table_input:
             _tables[key][k] = table_input[k]
     _tables[key]["UpdateTime"] = int(time.time())
+    try:
+        _tables[key]["VersionId"] = str(int(current_version) + 1)
+    except (TypeError, ValueError):
+        _tables[key]["VersionId"] = "1"
     return json_response({})
 
 
@@ -439,6 +537,41 @@ def _batch_get_partition(data):
         else:
             unprocessed.append(entry)
     return json_response({"Partitions": partitions, "UnprocessedKeys": unprocessed})
+
+
+def _batch_update_partition(data):
+    db_name = data.get("DatabaseName")
+    table_name = data.get("TableName")
+    key = f"{db_name}/{table_name}"
+    if key not in _tables:
+        return error_response_json("EntityNotFoundException",
+            f"Table {table_name} not found in {db_name}", 400)
+    parts = _partitions.get(key, [])
+    errors = []
+    for entry in data.get("Entries", []):
+        values = entry.get("PartitionValueList", [])
+        partition_input = entry.get("PartitionInput", {})
+        target = None
+        for p in parts:
+            if p.get("Values") == values:
+                target = p
+                break
+        if target is None:
+            errors.append({"PartitionValueList": values, "ErrorDetail": {
+                "ErrorCode": "EntityNotFoundException",
+                "ErrorMessage": "Partition not found"}})
+            continue
+        creation_time = target.get("CreationTime")
+        target.clear()
+        target.update({
+            **partition_input,
+            "DatabaseName": db_name,
+            "TableName": table_name,
+            "CreationTime": creation_time,
+            "LastAccessTime": int(time.time()),
+            "CatalogId": get_account_id(),
+        })
+    return json_response({"Errors": errors})
 
 
 # ---- Partition Indexes ----
@@ -595,7 +728,12 @@ def _start_crawler(data):
             }
             logger.info("Glue: Crawler %s finished after %ss", name, CRAWLER_RUN_SECONDS)
 
-    timer = threading.Timer(CRAWLER_RUN_SECONDS, _finish_crawl)
+    # threading.Timer (like threading.Thread) does NOT copy contextvars, so
+    # without this snapshot _finish_crawl runs under the default account and the
+    # account-scoped _crawlers guard never matches — the crawler would hang in
+    # RUNNING forever for non-default accounts. See issue #639 / stepfunctions.
+    ctx = contextvars.copy_context()
+    timer = threading.Timer(CRAWLER_RUN_SECONDS, lambda: ctx.run(_finish_crawl))
     timer.daemon = True
     timer.start()
 
@@ -701,7 +839,11 @@ def _update_job(data):
 
 
 def _resolve_script(script_location):
-    """Resolve a script location to a local path. Supports local paths and s3:// URIs."""
+    """Resolve a script location to a local path. Supports local paths and s3:// URIs.
+
+    For S3 URIs, first checks the on-disk S3_DATA_DIR (file-backed S3).
+    If not found, fetches from KumoStack's in-memory S3 service to a temp file.
+    """
     if not script_location:
         return None
     if os.path.exists(script_location):
@@ -711,9 +853,31 @@ def _resolve_script(script_location):
         parts = stripped.split("/", 1)
         bucket = parts[0]
         key = parts[1] if len(parts) > 1 else ""
-        local_path = os.path.join(S3_DATA_DIR, bucket, key)
+        # Check on-disk first. Objects are persisted account-scoped at
+        # DATA_DIR/<account>/<bucket>/<key> (see s3._object_disk_path), so the
+        # account id MUST be part of the lookup path or it never matches.
+        local_path = os.path.join(S3_DATA_DIR, get_account_id(), bucket, key)
         if os.path.exists(local_path):
             return local_path
+        # Fetch from in-memory S3
+        try:
+            import kumostack.services.s3 as _s3_svc
+            s3_bucket = _s3_svc._buckets.get(bucket)
+            if s3_bucket:
+                obj = s3_bucket.get("objects", {}).get(key)
+                if obj and obj.get("body"):
+                    tmp_dir = os.path.join(tempfile.gettempdir(), "kumostack-glue-scripts")
+                    os.makedirs(tmp_dir, exist_ok=True)
+                    tmp_path = os.path.join(tmp_dir, os.path.basename(key))
+                    data = obj["body"]
+                    if isinstance(data, memoryview):
+                        data = bytes(data)
+                    with open(tmp_path, "wb") as f:
+                        f.write(data)
+                    logger.info("Glue: resolved script from S3: s3://%s/%s -> %s", bucket, key, tmp_path)
+                    return tmp_path
+        except Exception as e:
+            logger.debug("Glue: failed to fetch script from S3: %s", e)
     return None
 
 
@@ -757,30 +921,23 @@ def _start_job_run(data):
 
         script_location = job.get("Command", {}).get("ScriptLocation", "")
         resolved = _resolve_script(script_location)
-        if resolved and resolved.endswith(".py"):
+
+        docker_client = _get_docker()
+        use_docker = False
+        if _is_spark_job(job) and docker_client and resolved:
+            image = _glue_image_for_version(job.get("GlueVersion", "4.0"))
             try:
-                env = dict(os.environ)
-                for k, v in args.items():
-                    env_key = k.lstrip("-")
-                    if env_key:
-                        env[env_key] = str(v)
-                proc = subprocess.run(
-                    ["python3", resolved],
-                    capture_output=True, text=True,
-                    timeout=min(job.get("Timeout", 300), 600),
-                    env=env,
-                )
-                if proc.returncode == 0:
-                    run["JobRunState"] = "SUCCEEDED"
-                else:
-                    run["JobRunState"] = "FAILED"
-                    run["ErrorMessage"] = proc.stderr[:2000] if proc.stderr else f"Exit code {proc.returncode}"
-            except subprocess.TimeoutExpired:
-                run["JobRunState"] = "TIMEOUT"
-                run["ErrorMessage"] = "Job execution timed out"
-            except Exception as e:
-                run["JobRunState"] = "FAILED"
-                run["ErrorMessage"] = str(e)[:2000]
+                docker_client.images.get(image)
+                use_docker = True
+            except Exception:
+                logger.info("Glue: image %s not available — stubbing job %s", image, job_name)
+
+        if use_docker:
+            _execute_spark_docker(run, job, job_name, args, resolved, docker_client)
+        elif _is_spark_job(job):
+            run["JobRunState"] = "SUCCEEDED"
+        elif resolved and resolved.endswith(".py"):
+            _execute_subprocess(run, job, args, resolved)
         else:
             run["JobRunState"] = "SUCCEEDED"
 
@@ -788,10 +945,193 @@ def _start_job_run(data):
         run["ExecutionTime"] = int(run["CompletedOn"] - run["StartedOn"])
         run["LastModifiedOn"] = int(time.time())
 
-    thread = threading.Thread(target=_execute, daemon=True)
+    # threading.Thread does NOT copy contextvars, so without this snapshot the
+    # worker would run under the default account and fail to resolve the
+    # account-scoped on-disk script (and AccountScopedDict lookups). Carry the
+    # request's account/region into the thread. See issue #639 / stepfunctions.
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(target=ctx.run, args=(_execute,), daemon=True)
     thread.start()
 
     return json_response({"JobRunId": run_id})
+
+
+def _execute_subprocess(run, job, args, resolved):
+    """Run a Glue script as a plain Python subprocess (non-Spark fallback)."""
+    try:
+        env = dict(os.environ)
+        for k, v in args.items():
+            env_key = k.lstrip("-")
+            if env_key:
+                env[env_key] = str(v)
+        proc = subprocess.run(
+            ["python3", resolved],
+            capture_output=True, text=True,
+            timeout=min(job.get("Timeout", 300), 600),
+            env=env,
+        )
+        if proc.returncode == 0:
+            run["JobRunState"] = "SUCCEEDED"
+        else:
+            run["JobRunState"] = "FAILED"
+            run["ErrorMessage"] = proc.stderr[:2000] if proc.stderr else f"Exit code {proc.returncode}"
+    except subprocess.TimeoutExpired:
+        run["JobRunState"] = "TIMEOUT"
+        run["ErrorMessage"] = "Job execution timed out"
+    except Exception as e:
+        run["JobRunState"] = "FAILED"
+        run["ErrorMessage"] = str(e)[:2000]
+
+
+def _execute_spark_docker(run, job, job_name, args, script_path, docker_client):
+    """Run a Glue Spark job inside an amazon/aws-glue-libs Docker container."""
+    glue_version = job.get("GlueVersion", "4.0")
+    image = _glue_image_for_version(glue_version)
+    container_name = f"kumostack-glue-{job_name}-{run['Id'][:8]}"
+
+    # Remove stale container with same name
+    try:
+        existing = docker_client.containers.get(container_name)
+        existing.remove(force=True)
+    except Exception:
+        pass
+
+    ms_network = _get_kumostack_network(docker_client)
+
+    # Determine KumoStack's S3 endpoint from inside the container.
+    # If on a Docker network, use the kumostack container's IP; otherwise localhost.
+    kumostack_host = os.environ.get("MINISTACK_HOST", "")
+    kumostack_port = os.environ.get("EDGE_PORT", "4566")
+    if ms_network and not kumostack_host:
+        # Try to resolve from HOSTNAME
+        try:
+            ms_container = docker_client.containers.get(
+                os.environ.get("HOSTNAME", ""))
+            ms_container.reload()
+            nets = ms_container.attrs.get("NetworkSettings", {}).get("Networks", {})
+            ip = nets.get(ms_network, {}).get("IPAddress", "")
+            if ip:
+                kumostack_host = ip
+        except Exception:
+            pass
+    if not kumostack_host:
+        kumostack_host = "host.docker.internal"
+
+    s3_endpoint = f"http://{kumostack_host}:{kumostack_port}"
+
+    # Build Spark submit arguments from Glue job arguments.
+    # Glue args use --key value; spark-submit uses --conf key=value for Spark conf.
+    spark_args = []
+    for k, v in args.items():
+        spark_args.extend([k, str(v)])
+
+    # Extra py files (Glue --extra-py-files)
+    extra_py = args.get("--extra-py-files", "")
+
+    # Build environment for the container
+    container_env = {
+        "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID", "test"),
+        "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY", "test"),
+        "AWS_DEFAULT_REGION": get_region(),
+        "AWS_REGION": get_region(),
+        "DISABLE_SSL": "true",
+    }
+
+    # Build the spark-submit command.
+    # The aws-glue-libs image has /home/glue_user/spark/bin/spark-submit.
+    cmd = [
+        "spark-submit",
+        "--master", "local[*]",
+        "--conf", f"spark.hadoop.fs.s3a.endpoint={s3_endpoint}",
+        "--conf", "spark.hadoop.fs.s3a.path.style.access=true",
+        "--conf", f"spark.hadoop.fs.s3a.access.key={container_env['AWS_ACCESS_KEY_ID']}",
+        "--conf", f"spark.hadoop.fs.s3a.secret.key={container_env['AWS_SECRET_ACCESS_KEY']}",
+        "--conf", "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "--conf", "spark.hadoop.fs.s3a.connection.ssl.enabled=false",
+    ]
+
+    # Add extra-py-files if present
+    if extra_py:
+        cmd.extend(["--py-files", extra_py])
+
+    # Add Spark/Iceberg conf from job arguments
+    conf_arg = args.get("--conf", "")
+    if conf_arg:
+        for conf in conf_arg.split(" --conf "):
+            conf = conf.strip()
+            if conf:
+                cmd.extend(["--conf", conf])
+
+    # The script path inside the container
+    container_script = f"/tmp/{os.path.basename(script_path)}"
+    cmd.append(container_script)
+
+    # Append Glue job arguments (--key value pairs) after the script
+    cmd.extend(spark_args)
+
+    container_kwargs = {
+        "image": image,
+        "name": container_name,
+        "command": cmd,
+        "environment": container_env,
+        "detach": True,
+        "labels": {"kumostack": "glue", "job_name": job_name},
+    }
+
+    if ms_network:
+        container_kwargs["network"] = ms_network
+
+    logger.info(
+        "Glue: starting Spark container for %s (image=%s, network=%s)",
+        job_name, image, ms_network or "host",
+    )
+
+    try:
+        container = docker_client.containers.create(**container_kwargs)
+        # Copy script into container (avoids Docker-in-Docker volume mount issues)
+        import io
+        import tarfile
+        script_data = open(script_path, "rb").read()
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=os.path.basename(script_path))
+            info.size = len(script_data)
+            tar.addfile(info, io.BytesIO(script_data))
+        tar_buf.seek(0)
+        container.put_archive("/tmp", tar_buf)
+        container.start()
+    except Exception as e:
+        logger.warning("Glue: failed to start Spark container for %s: %s", job_name, e)
+        run["JobRunState"] = "FAILED"
+        run["ErrorMessage"] = f"Docker container start failed: {e}"[:2000]
+        try:
+            container.remove(force=True)
+        except Exception:
+            pass
+        return
+
+    # Wait for container to finish
+    try:
+        result = container.wait(timeout=min(job.get("Timeout", 2880) * 60, 3600))
+        exit_code = result.get("StatusCode", -1)
+        logs = container.logs(tail=200).decode("utf-8", errors="replace")
+
+        if exit_code == 0:
+            run["JobRunState"] = "SUCCEEDED"
+            logger.info("Glue: Spark job %s completed successfully", job_name)
+        else:
+            run["JobRunState"] = "FAILED"
+            run["ErrorMessage"] = logs[-2000:] if logs else f"Exit code {exit_code}"
+            logger.warning("Glue: Spark job %s failed (exit %d)", job_name, exit_code)
+    except Exception as e:
+        run["JobRunState"] = "FAILED"
+        run["ErrorMessage"] = f"Container execution error: {e}"[:2000]
+        logger.warning("Glue: Spark container for %s error: %s", job_name, e)
+    finally:
+        try:
+            container.remove(force=True)
+        except Exception:
+            pass
 
 
 def _get_job_run(data):
@@ -1105,6 +1445,99 @@ def _start_workflow_run(data):
     }
     _workflow_runs.setdefault(name, []).append(run)
     return json_response({"RunId": run_id})
+
+
+# ---- User Defined Functions ----
+
+def _udf_key(db_name: str, func_name: str) -> str:
+    return f"{db_name}/{func_name}"
+
+
+def _udf_record(db_name: str, fn_input: dict) -> dict:
+    """Build a UserDefinedFunction record matching the botocore output shape:
+    UserDefinedFunction { FunctionName, DatabaseName, ClassName, OwnerName,
+    OwnerType, CreateTime, ResourceUris, CatalogId }."""
+    return {
+        "FunctionName": fn_input.get("FunctionName"),
+        "DatabaseName": db_name,
+        "ClassName": fn_input.get("ClassName"),
+        "OwnerName": fn_input.get("OwnerName"),
+        "OwnerType": fn_input.get("OwnerType"),
+        "CreateTime": int(time.time()),
+        "ResourceUris": fn_input.get("ResourceUris", []),
+        "CatalogId": get_account_id(),
+    }
+
+
+def _create_user_defined_function(data):
+    db_name = data.get("DatabaseName")
+    if db_name not in _databases:
+        return error_response_json("EntityNotFoundException", f"Database {db_name} not found.", 400)
+    fn_input = data.get("FunctionInput") or {}
+    func_name = fn_input.get("FunctionName")
+    if not func_name:
+        return error_response_json("InvalidInputException", "FunctionInput.FunctionName is required", 400)
+    if not fn_input.get("ClassName"):
+        return error_response_json("InvalidInputException", "FunctionInput.ClassName is required", 400)
+    key = _udf_key(db_name, func_name)
+    if key in _user_defined_functions:
+        return error_response_json("AlreadyExistsException", f"User-defined function {func_name} already exists", 400)
+    _user_defined_functions[key] = _udf_record(db_name, fn_input)
+    return json_response({})
+
+
+def _update_user_defined_function(data):
+    db_name = data.get("DatabaseName")
+    func_name = data.get("FunctionName")
+    key = _udf_key(db_name, func_name)
+    if key not in _user_defined_functions:
+        return error_response_json("EntityNotFoundException", f"User-defined function {func_name} not found in {db_name}", 400)
+    fn_input = data.get("FunctionInput") or {}
+    existing = _user_defined_functions[key]
+    for field in ("ClassName", "OwnerName", "OwnerType", "ResourceUris"):
+        if field in fn_input:
+            existing[field] = fn_input[field]
+    # AWS allows renaming the function via FunctionInput.FunctionName.
+    new_name = fn_input.get("FunctionName")
+    if new_name and new_name != func_name:
+        existing["FunctionName"] = new_name
+        _user_defined_functions[_udf_key(db_name, new_name)] = existing
+        del _user_defined_functions[key]
+    return json_response({})
+
+
+def _delete_user_defined_function(data):
+    db_name = data.get("DatabaseName")
+    func_name = data.get("FunctionName")
+    key = _udf_key(db_name, func_name)
+    if key not in _user_defined_functions:
+        return error_response_json("EntityNotFoundException", f"User-defined function {func_name} not found in {db_name}", 400)
+    del _user_defined_functions[key]
+    return json_response({})
+
+
+def _get_user_defined_function(data):
+    db_name = data.get("DatabaseName")
+    func_name = data.get("FunctionName")
+    key = _udf_key(db_name, func_name)
+    udf = _user_defined_functions.get(key)
+    if not udf:
+        return error_response_json("EntityNotFoundException", f"User-defined function {func_name} not found in {db_name}", 400)
+    return json_response({"UserDefinedFunction": udf})
+
+
+def _get_user_defined_functions(data):
+    db_name = data.get("DatabaseName")
+    pattern = data.get("Pattern") or ""
+    # Real AWS accepts DatabaseName="*" or omitted to span all databases in the
+    # catalog. Botocore marks DatabaseName as optional.
+    if db_name and db_name != "*":
+        items = [u for k, u in _user_defined_functions.items() if k.startswith(f"{db_name}/")]
+    else:
+        items = list(_user_defined_functions.values())
+    if pattern:
+        items = [u for u in items if _simple_glob_match(pattern, u.get("FunctionName", ""))]
+    return json_response({"UserDefinedFunctions": items})
 
 
 # ---- Tags ----
