@@ -1,0 +1,25 @@
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    uid: kumostack-tempo
+    type: tempo
+    access: proxy
+    url: http://kumostack-tempo:3200
+    isDefault: false
+    jsonData:
+      httpMethod: GET
+      tracesToLogsV2:
+        datasourceUid: efm6yb1q95p8gc   # Loki uid
+        filterByTraceID: true
+        filterBySpanID: true
+      tracesToMetrics:
+        datasourceUid: dfm6ljattwav4f   # Prometheus uid
+      serviceMap:
+        datasourceUid: dfm6ljattwav4f   # Prometheus uid (span-metrics from Tempo metrics-generator)
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      lokiSearch:
+        datasourceUid: efm6yb1q95p8gc
