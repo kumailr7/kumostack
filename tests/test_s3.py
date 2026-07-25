@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import uuid as _uuid_mod
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -306,6 +307,17 @@ def test_s3_head_object(s3):
     assert resp["ContentType"] == "application/octet-stream"
     assert "ETag" in resp
 
+def test_s3_head_object_website_redirection(s3):
+    s3.create_bucket(Bucket="intg-s3-website-redirection")
+    s3.put_object(
+        Bucket="intg-s3-website-redirection",
+        Key="redirect",
+        WebsiteRedirectLocation='http://my-redirect-website',
+    )
+    resp = s3.head_object(Bucket="intg-s3-website-redirection", Key="redirect")
+    assert resp["ContentLength"] == 0
+    assert resp["WebsiteRedirectLocation"] == "http://my-redirect-website"
+
 def test_s3_head_object_not_found(s3):
     s3.create_bucket(Bucket="intg-s3-headobj404")
     with pytest.raises(ClientError) as exc:
@@ -604,6 +616,168 @@ def test_s3_bucket_tagging(s3):
         s3.get_bucket_tagging(Bucket=bkt)
     assert exc.value.response["Error"]["Code"] == "NoSuchTagSet"
 
+def test_s3_create_bucket_with_tags(s3):
+    """Tags supplied in the CreateBucket request body must be applied to the
+    bucket, so a follow-up GetBucketTagging returns them.
+    """
+    bkt = "intg-s3-createbkt-tags"
+    s3.create_bucket(
+        Bucket=bkt,
+        CreateBucketConfiguration={
+            "Tags": [
+                {"Key": "project", "Value": "Trinity"},
+                {"Key": "env", "Value": "prod"},
+            ]
+        },
+    )
+    resp = s3.get_bucket_tagging(Bucket=bkt)
+    tags = {t["Key"]: t["Value"] for t in resp["TagSet"]}
+    assert tags == {"project": "Trinity", "env": "prod"}
+
+def test_s3_create_bucket_with_tags_and_location(s3):
+    """Tags and LocationConstraint can be supplied together in the CreateBucket
+    body; both must take effect."""
+    bkt = "intg-s3-createbkt-tags-loc"
+    s3.create_bucket(
+        Bucket=bkt,
+        CreateBucketConfiguration={
+            "LocationConstraint": "us-west-2",
+            "Tags": [{"Key": "project", "Value": "Trinity"}],
+        },
+    )
+    resp = s3.get_bucket_tagging(Bucket=bkt)
+    tags = {t["Key"]: t["Value"] for t in resp["TagSet"]}
+    assert tags == {"project": "Trinity"}
+    loc = s3.get_bucket_location(Bucket=bkt)
+    assert loc["LocationConstraint"] == "us-west-2"
+
+def test_s3_create_bucket_without_tags_has_no_tag_set(s3):
+    """A CreateBucket with no tags must not create an empty tag set — a
+    GetBucketTagging should still return NoSuchTagSet."""
+    bkt = "intg-s3-createbkt-notags"
+    s3.create_bucket(Bucket=bkt)
+    with pytest.raises(ClientError) as exc:
+        s3.get_bucket_tagging(Bucket=bkt)
+    assert exc.value.response["Error"]["Code"] == "NoSuchTagSet"
+
+def test_s3_create_bucket_empty_tag_value_allowed(s3):
+    """Tag values may be empty (minimum length 0); only the key is required."""
+    bkt = "intg-s3-createbkt-emptyval"
+    s3.create_bucket(
+        Bucket=bkt,
+        CreateBucketConfiguration={"Tags": [{"Key": "project", "Value": ""}]},
+    )
+    resp = s3.get_bucket_tagging(Bucket=bkt)
+    assert resp["TagSet"] == [{"Key": "project", "Value": ""}]
+
+def test_s3_create_bucket_rejects_key_too_long(s3):
+    """A tag key longer than 128 characters is rejected with InvalidTag."""
+    bkt = "intg-s3-createbkt-longkey"
+    with pytest.raises(ClientError) as exc:
+        s3.create_bucket(
+            Bucket=bkt,
+            CreateBucketConfiguration={"Tags": [{"Key": "p" * 129, "Value": "Trinity"}]},
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidTag"
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert err["Message"] == "The TagKey you have provided is invalid"
+    # The bucket must not have been created.
+    with pytest.raises(ClientError):
+        s3.head_bucket(Bucket=bkt)
+
+def test_s3_create_bucket_rejects_value_too_long(s3):
+    """A tag value longer than 256 characters is rejected with InvalidTag."""
+    bkt = "intg-s3-createbkt-longval"
+    with pytest.raises(ClientError) as exc:
+        s3.create_bucket(
+            Bucket=bkt,
+            CreateBucketConfiguration={"Tags": [{"Key": "project", "Value": "T" * 257}]},
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidTag"
+    assert err["Message"] == "The TagValue you have provided is invalid"
+    # The bucket must not have been created.
+    with pytest.raises(ClientError):
+        s3.head_bucket(Bucket=bkt)
+
+def test_s3_create_bucket_rejects_reserved_aws_prefix(s3):
+    """Tag keys starting with the reserved 'aws:' prefix are rejected."""
+    bkt = "intg-s3-createbkt-awsprefix"
+    with pytest.raises(ClientError) as exc:
+        s3.create_bucket(
+            Bucket=bkt,
+            CreateBucketConfiguration={"Tags": [{"Key": "aws:project", "Value": "Trinity"}]},
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidTag"
+    assert err["Message"] == (
+        'User-defined tag keys can\'t start with "aws:". This prefix is '
+        'reserved for system tags. Remove "aws:" from your tag keys and '
+        "try again."
+    )
+    # The bucket must not have been created.
+    with pytest.raises(ClientError):
+        s3.head_bucket(Bucket=bkt)
+
+def test_s3_create_bucket_duplicate_keys_internal_error(s3):
+    """A duplicate tag key in a CreateBucket body returns a 500 InternalError."""
+    bkt = "intg-s3-createbkt-dupkey"
+    with pytest.raises(ClientError) as exc:
+        s3.create_bucket(
+            Bucket=bkt,
+            CreateBucketConfiguration={
+                "Tags": [
+                    {"Key": "env", "Value": "prod"},
+                    {"Key": "env", "Value": "staging"},
+                ]
+            },
+        )
+    assert exc.value.response["Error"]["Code"] == "InternalError"
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 500
+    # The bucket must not have been created.
+    with pytest.raises(ClientError):
+        s3.head_bucket(Bucket=bkt)
+
+def test_s3_create_bucket_rejects_too_many_tags(s3):
+    """A bucket accepts at most 50 tags in the CreateBucket body."""
+    bkt = "intg-s3-createbkt-toomany"
+    with pytest.raises(ClientError) as exc:
+        s3.create_bucket(
+            Bucket=bkt,
+            CreateBucketConfiguration={
+                "Tags": [{"Key": f"project{i}", "Value": "Trinity"} for i in range(51)]
+            },
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "BadRequest"
+    assert err["Message"] == "Bucket tag count cannot be greater than 50"
+    # The bucket must not have been created.
+    with pytest.raises(ClientError):
+        s3.head_bucket(Bucket=bkt)
+
+def test_s3_create_bucket_tags_readable_via_s3control(s3):
+    """Tags set in the CreateBucket body must also be visible through the
+    S3 Control ListTagsForResource API, not just GetBucketTagging."""
+    from conftest import make_client
+
+    bkt = "intg-s3control-createbkt-tags"
+    s3.create_bucket(
+        Bucket=bkt,
+        CreateBucketConfiguration={
+            "Tags": [
+                {"Key": "project", "Value": "Trinity"},
+                {"Key": "env", "Value": "prod"},
+            ]
+        },
+    )
+    s3control = make_client("s3control")
+    account_id = "123456789012"
+    arn = f"arn:aws:s3:::{bkt}"
+    resp = s3control.list_tags_for_resource(AccountId=account_id, ResourceArn=arn)
+    tags = {t["Key"]: t["Value"] for t in resp.get("Tags", [])}
+    assert tags == {"project": "Trinity", "env": "prod"}
+
 def test_s3_control_list_tags_for_resource(s3):
     """S3 Control ListTagsForResource must return tags set via PutBucketTagging.
 
@@ -809,6 +983,24 @@ def test_s3_object_tagging(s3):
     assert tags["priority"] == "high"
 
 
+def test_s3_get_object_returns_tag_count(s3):
+    """GetObject must surface x-amz-tagging-count as TagCount when the object has
+    tags, and omit it when it has none (matches AWS / boto3 behavior) — #1026."""
+    bkt = "intg-s3-tagcount"
+    s3.create_bucket(Bucket=bkt)
+    s3.put_object(
+        Bucket=bkt, Key="tagged.txt", Body=b"hi",
+        Tagging="environment=dev&owner=test&project=p&version=1.0&region=eu",
+    )
+    resp = s3.get_object(Bucket=bkt, Key="tagged.txt")
+    assert resp["TagCount"] == 5
+
+    # An object with no tags: AWS omits the header, so boto3 has no TagCount key.
+    s3.put_object(Bucket=bkt, Key="untagged.txt", Body=b"hi")
+    resp2 = s3.get_object(Bucket=bkt, Key="untagged.txt")
+    assert "TagCount" not in resp2
+
+
 def test_s3_object_tagging_per_version(s3):
     """Tags must be stored per object version, not collapsed onto the key.
 
@@ -871,10 +1063,18 @@ def test_s3_public_access_block(s3):
     assert cfg["BlockPublicAcls"] is True
     assert cfg["BlockPublicPolicy"] is False
     s3.delete_public_access_block(Bucket=bkt)
+    # After delete the config is gone: GetPublicAccessBlock must 404 instead of
+    # returning a default block (otherwise Terraform's delete waiter times out).
+    with pytest.raises(ClientError) as exc:
+        s3.get_public_access_block(Bucket=bkt)
+    assert exc.value.response["Error"]["Code"] == "NoSuchPublicAccessBlockConfiguration"
 
 def test_s3_ownership_controls(s3):
     bkt = "intg-s3-ownership"
     s3.create_bucket(Bucket=bkt)
+    # Never configured: real S3 reports the default Object Ownership, not a 404.
+    resp = s3.get_bucket_ownership_controls(Bucket=bkt)
+    assert resp["OwnershipControls"]["Rules"][0]["ObjectOwnership"] == "BucketOwnerEnforced"
     s3.put_bucket_ownership_controls(
         Bucket=bkt,
         OwnershipControls={"Rules": [{"ObjectOwnership": "BucketOwnerPreferred"}]},
@@ -882,6 +1082,11 @@ def test_s3_ownership_controls(s3):
     resp = s3.get_bucket_ownership_controls(Bucket=bkt)
     assert resp["OwnershipControls"]["Rules"][0]["ObjectOwnership"] == "BucketOwnerPreferred"
     s3.delete_bucket_ownership_controls(Bucket=bkt)
+    # After delete the config is gone: GetBucketOwnershipControls must 404 instead
+    # of returning a default block (otherwise Terraform's delete waiter times out).
+    with pytest.raises(ClientError) as exc:
+        s3.get_bucket_ownership_controls(Bucket=bkt)
+    assert exc.value.response["Error"]["Code"] == "OwnershipControlsNotFoundError"
 
 def test_s3_object_lock_configuration(s3):
     bkt = "intg-s3-objlock-cfg"
@@ -1076,6 +1281,22 @@ def test_s3_put_object_with_tagging_header(s3):
     tags = {t["Key"]: t["Value"] for t in resp["TagSet"]}
     assert tags["env"] == "prod"
     assert tags["team"] == "backend"
+
+def test_s3_put_object_with_tagging_header_no_value(s3):
+    """A --tagging value with no '=' (bare key, e.g. `tagging-hdr-no-value`) is a valid tag
+    with an empty value — matches real AWS, repro from `aws s3api put-object
+    --tagging tagging-hdr-no-value` followed by `get-object-tagging` returning
+    {"Key": "tagging-hdr-no-value", "Value": ""}."""
+    bkt = "intg-s3-put-tag-hdr-noval"
+    s3.create_bucket(Bucket=bkt)
+    s3.put_object(
+        Bucket=bkt,
+        Key="tagged-without-value.txt",
+        Body=b"hello",
+        Tagging="tagging-hdr-no-value",
+    )
+    resp = s3.get_object_tagging(Bucket=bkt, Key="tagged-without-value.txt")
+    assert resp["TagSet"] == [{"Key": "tagging-hdr-no-value", "Value": ""}]
 
 def test_s3_default_retention_applied(s3):
     bkt = "intg-s3-default-ret"
@@ -1304,6 +1525,212 @@ def test_s3_put_notification_sends_test_event(s3, sqs):
     assert "Records" not in body
 
 
+@pytest.mark.parametrize(
+    ("config_key", "arn_key", "target_arn"),
+    [
+        ("QueueConfigurations", "QueueArn", "not-an-arn"),
+        ("QueueConfigurations", "QueueArn", "arn:aws:rds:us-east-1:000000000000:db:wrong-service"),
+        ("TopicConfigurations", "TopicArn", "arn:aws:sqs:us-east-1:000000000000:wrong-service"),
+        (
+            "LambdaFunctionConfigurations",
+            "LambdaFunctionArn",
+            "arn:aws:sns:us-east-1:000000000000:wrong-service",
+        ),
+        ("QueueConfigurations", "QueueArn", "arn:aws:sqs:us-east-1:000000000001:s3-foreign-account-q"),
+        ("TopicConfigurations", "TopicArn", "arn:aws:sns:us-east-1:000000000001:s3-foreign-account-topic"),
+        (
+            "LambdaFunctionConfigurations",
+            "LambdaFunctionArn",
+            "arn:aws:lambda:us-east-1:000000000001:function:s3-foreign-account-fn",
+        ),
+        ("QueueConfigurations", "QueueArn", "arn:aws:sqs:us-west-2:000000000000:s3-foreign-region-q"),
+        ("TopicConfigurations", "TopicArn", "arn:aws:sns:us-west-2:000000000000:s3-foreign-region-topic"),
+        (
+            "LambdaFunctionConfigurations",
+            "LambdaFunctionArn",
+            "arn:aws:lambda:us-west-2:000000000000:function:s3-foreign-region-fn",
+        ),
+    ],
+)
+def test_s3_notification_rejects_invalid_or_out_of_scope_target_arns(
+    s3, config_key, arn_key, target_arn,
+):
+    bkt = f"s3-evt-invalid-arn-{_uuid_mod.uuid4().hex[:8]}"
+    s3.create_bucket(Bucket=bkt)
+
+    with pytest.raises(ClientError) as exc:
+        s3.put_bucket_notification_configuration(
+            Bucket=bkt,
+            NotificationConfiguration={
+                config_key: [
+                    {
+                        arn_key: target_arn,
+                        "Events": ["s3:ObjectCreated:*"],
+                    }
+                ],
+            },
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidArgument"
+
+
+def test_s3_notification_validates_target_region_against_bucket_region(s3):
+    bkt = f"s3-evt-bucket-region-{_uuid_mod.uuid4().hex[:8]}"
+    s3.create_bucket(
+        Bucket=bkt,
+        CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+    )
+
+    s3.put_bucket_notification_configuration(
+        Bucket=bkt,
+        NotificationConfiguration={
+            "QueueConfigurations": [
+                {
+                    "QueueArn": "arn:aws:sqs:us-west-2:000000000000:s3-west-region-q",
+                    "Events": ["s3:ObjectCreated:*"],
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ClientError) as exc:
+        s3.put_bucket_notification_configuration(
+            Bucket=bkt,
+            NotificationConfiguration={
+                "QueueConfigurations": [
+                    {
+                        "QueueArn": "arn:aws:sqs:us-east-1:000000000000:s3-east-region-q",
+                        "Events": ["s3:ObjectCreated:*"],
+                    }
+                ],
+            },
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidArgument"
+
+
+@pytest.mark.parametrize(
+    "target_arn",
+    [
+        "arn:aws:sqs:us-east-1:000000000001:shared-q",
+        "arn:aws:sqs:us-west-2:000000000000:shared-q",
+    ],
+)
+def test_s3_notification_sqs_delivery_rejects_out_of_scope_arns_without_name_fallback(
+    monkeypatch, target_arn,
+):
+    from ministack.services import s3 as s3mod
+    from ministack.services import sqs as sqsmod
+
+    messages = []
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+    monkeypatch.setattr(sqsmod, "_queue_url", lambda name: f"url/{name}")
+    monkeypatch.setattr(sqsmod, "_queues", {"url/shared-q": {"messages": messages}})
+    monkeypatch.setattr(sqsmod, "_ensure_msg_fields", lambda msg: None)
+
+    s3mod._deliver_event_to_sqs(target_arn, {"Records": []}, "us-east-1")
+
+    assert messages == []
+
+
+@pytest.mark.parametrize(
+    "target_arn",
+    [
+        "arn:aws:sns:us-east-1:000000000001:shared-topic",
+        "arn:aws:sns:us-west-2:000000000000:shared-topic",
+    ],
+)
+def test_s3_notification_sns_delivery_rejects_out_of_scope_arns_before_fanout(
+    monkeypatch, target_arn,
+):
+    from ministack.services import s3 as s3mod
+    from ministack.services import sns as snsmod
+
+    fanouts = []
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+    monkeypatch.setattr(snsmod, "_topics", {target_arn: {"subscriptions": []}})
+    monkeypatch.setattr(snsmod, "_fanout", lambda *args, **kwargs: fanouts.append(args))
+
+    s3mod._deliver_event_to_sns(target_arn, {"Records": []}, "us-east-1")
+
+    assert fanouts == []
+
+
+@pytest.mark.parametrize(
+    "target_arn",
+    [
+        "arn:aws:lambda:us-east-1:000000000001:function:shared-fn",
+        "arn:aws:lambda:us-west-2:000000000000:function:shared-fn",
+    ],
+)
+def test_s3_notification_lambda_delivery_rejects_out_of_scope_arns_before_lookup(
+    monkeypatch, target_arn,
+):
+    from ministack.services import lambda_svc as lambdamod
+    from ministack.services import s3 as s3mod
+
+    lookups = []
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+    monkeypatch.setattr(
+        lambdamod,
+        "_get_func_record_for_ref",
+        lambda ref: lookups.append(ref) or ({}, {}, "shared-fn"),
+    )
+
+    s3mod._deliver_event_to_lambda(target_arn, {"Records": []}, "us-east-1")
+
+    assert lookups == []
+def test_s3_event_notification_cross_account():
+    """Regression for #876: S3 event notifications must fire for non-default
+    accounts. The event is delivered from a background thread; if that thread
+    does not inherit the request's account context it falls back to
+    000000000000, the account-scoped bucket-notification lookup comes back
+    empty, and the event is silently dropped. Every other notification test
+    runs under the default account, so none of them exercise this path."""
+    import boto3
+    from botocore.config import Config
+
+    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    account = "512354813215"
+
+    def _acct_client(service):
+        return boto3.client(
+            service,
+            endpoint_url=endpoint,
+            aws_access_key_id=account,
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+            config=Config(retries={"max_attempts": 0}),
+        )
+
+    s3c = _acct_client("s3")
+    sqsc = _acct_client("sqs")
+
+    s3c.create_bucket(Bucket="s3-evt-xacct-bkt")
+    queue_url = sqsc.create_queue(QueueName="s3-evt-xacct-q")["QueueUrl"]
+    queue_arn = sqsc.get_queue_attributes(
+        QueueUrl=queue_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+    # Confirm the clients really resolve to the non-default account.
+    assert f":{account}:" in queue_arn
+
+    s3c.put_bucket_notification_configuration(
+        Bucket="s3-evt-xacct-bkt",
+        NotificationConfiguration={
+            "QueueConfigurations": [
+                {"QueueArn": queue_arn, "Events": ["s3:ObjectCreated:*"]}
+            ],
+        },
+    )
+    s3c.put_object(Bucket="s3-evt-xacct-bkt", Key="x.txt", Body=b"hello")
+    time.sleep(0.5)
+    msgs = sqsc.receive_message(
+        QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=2
+    )
+    s3_msgs = [m for m in msgs.get("Messages", []) if "Records" in json.loads(m["Body"])]
+    assert len(s3_msgs) > 0, "no S3 event delivered to the non-default account queue (#876)"
+    body = json.loads(s3_msgs[0]["Body"])
+    assert body["Records"][0]["s3"]["object"]["key"] == "x.txt"
+
+
 def _wait_lambda_invoked(logs_client, function_name, marker, timeout=5.0):
     """Poll the function's log group for a marker substring. Returns True on
     first match, False after timeout."""
@@ -1328,13 +1755,27 @@ def _wait_lambda_invoked(logs_client, function_name, marker, timeout=5.0):
     return False
 
 
-def _create_event_lambda(lam, name):
+def _regional_client(service: str, region: str):
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        service,
+        endpoint_url=os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566"),
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region,
+        config=Config(region_name=region, retries={"mode": "standard"}, max_pool_connections=50),
+    )
+
+
+def _create_event_lambda(lam, name, marker="S3EVT"):
     import io as _io
     import zipfile as _zip
     code = (
         "def handler(event, context):\n"
         "    import json\n"
-        "    print('S3EVT', json.dumps(event))\n"
+        f"    print('{marker}', context.invoked_function_arn, json.dumps(event))\n"
         "    return {'ok': True}\n"
     )
     buf = _io.BytesIO()
@@ -1371,6 +1812,43 @@ def test_s3_event_notification_to_lambda_boto3_default(s3, lam, logs):
         "Lambda was not invoked for boto3-shaped notification config"
 
 
+def test_s3_event_notification_to_lambda_validates_bucket_region(s3, lam):
+    fname = "s3-evt-lam-region"
+    _create_event_lambda(lam, fname, marker="east")
+    west_lam = _regional_client("lambda", "us-west-2")
+    west_logs = _regional_client("logs", "us-west-2")
+    west_arn = _create_event_lambda(west_lam, fname, marker="west")
+
+    s3.create_bucket(Bucket="s3-evt-lam-region-bkt")
+    with pytest.raises(ClientError) as exc:
+        s3.put_bucket_notification_configuration(
+            Bucket="s3-evt-lam-region-bkt",
+            NotificationConfiguration={
+                "LambdaFunctionConfigurations": [
+                    {"LambdaFunctionArn": west_arn, "Events": ["s3:ObjectCreated:*"]},
+                ],
+            },
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidArgument"
+
+    s3.create_bucket(
+        Bucket="s3-evt-lam-west-bkt",
+        CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+    )
+    s3.put_bucket_notification_configuration(
+        Bucket="s3-evt-lam-west-bkt",
+        NotificationConfiguration={
+            "LambdaFunctionConfigurations": [
+                {"LambdaFunctionArn": west_arn, "Events": ["s3:ObjectCreated:*"]},
+            ],
+        },
+    )
+    s3.put_object(Bucket="s3-evt-lam-west-bkt", Key="regional.txt", Body=b"hi")
+
+    assert _wait_lambda_invoked(west_logs, fname, "regional.txt"), \
+        "S3 notification did not invoke the Lambda from the ARN's region"
+
+
 def test_s3_event_notification_to_lambda_modern_xml(s3, lam, logs):
     """Issue #649: AWS SDK for Java v2, Go SDK, Terraform, and hand-crafted XML
     all send <LambdaFunctionArn> instead of the legacy <CloudFunction> tag.
@@ -1393,7 +1871,7 @@ def test_s3_event_notification_to_lambda_modern_xml(s3, lam, logs):
         '</NotificationConfiguration>'
     )
     req = _urlreq.Request(
-        "http://localhost:4566/s3-evt-lam-modern-bkt?notification",
+        f"{os.environ.get('MINISTACK_ENDPOINT', 'http://localhost:4566')}/s3-evt-lam-modern-bkt?notification",
         data=modern_xml.encode(),
         method="PUT",
         headers={"Content-Type": "application/xml", "Authorization": "AWS test:test"},
@@ -1424,7 +1902,7 @@ def test_s3_event_notification_to_lambda_with_filter(s3, lam, logs):
         '</NotificationConfiguration>'
     )
     req = _urlreq.Request(
-        "http://localhost:4566/s3-evt-lam-filter-bkt?notification",
+        f"{os.environ.get('MINISTACK_ENDPOINT', 'http://localhost:4566')}/s3-evt-lam-filter-bkt?notification",
         data=modern_xml.encode(), method="PUT",
         headers={"Content-Type": "application/xml", "Authorization": "AWS test:test"},
     )
@@ -1462,7 +1940,13 @@ def test_s3_put_notification_no_test_event_for_missing_bucket(s3, sqs):
 
 
 def test_s3_eventbridge_notification(s3, sqs, eb):
-    """S3 EventBridgeConfiguration sends events to EventBridge, routed to SQS via rule."""
+    """S3 EventBridgeConfiguration sends AWS-conformant events to EventBridge, routed to SQS.
+
+    The emitted ``detail-type`` must be the fixed value Amazon S3 uses (``Object Created``),
+    not the granular ``s3:ObjectCreated:Put`` event name — so the rule below matches on the
+    documented detail-type, not on ``source`` alone, and would fail to route a non-conformant
+    event.
+    """
     s3.create_bucket(Bucket="s3-eb-bkt")
     queue_url = sqs.create_queue(QueueName="s3-eb-target-q")["QueueUrl"]
     queue_arn = sqs.get_queue_attributes(
@@ -1475,10 +1959,10 @@ def test_s3_eventbridge_notification(s3, sqs, eb):
         NotificationConfiguration={"EventBridgeConfiguration": {}},
     )
 
-    # Create EventBridge rule matching S3 events → SQS target
+    # Rule matches the AWS-documented detail-type, not source alone.
     eb.put_rule(
         Name="s3-to-sqs-rule",
-        EventPattern=json.dumps({"source": ["aws.s3"]}),
+        EventPattern=json.dumps({"source": ["aws.s3"], "detail-type": ["Object Created"]}),
         State="ENABLED",
     )
     eb.put_targets(
@@ -1494,8 +1978,123 @@ def test_s3_eventbridge_notification(s3, sqs, eb):
     assert "Messages" in msgs and len(msgs["Messages"]) > 0
     body = json.loads(msgs["Messages"][0]["Body"])
     assert body["source"] == "aws.s3"
+    assert body["detail-type"] == "Object Created"
     assert body["detail"]["bucket"]["name"] == "s3-eb-bkt"
     assert body["detail"]["object"]["key"] == "hello.txt"
+    assert body["detail"]["reason"] == "PutObject"
+
+
+def test_s3_eventbridge_notification_dispatches_in_bucket_region(s3):
+    """S3 EventBridge delivery should use the bucket region, not the request region."""
+    uid = _uuid_mod.uuid4().hex[:8]
+    bucket_name = f"s3-eb-west-bkt-{uid}"
+    queue_name = f"s3-eb-west-q-{uid}"
+    rule_name = f"s3-eb-west-rule-{uid}"
+    west_eb = _regional_client("events", "us-west-2")
+    west_sqs = _regional_client("sqs", "us-west-2")
+
+    s3.create_bucket(
+        Bucket=bucket_name,
+        CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+    )
+    queue_url = west_sqs.create_queue(QueueName=queue_name)["QueueUrl"]
+    queue_arn = west_sqs.get_queue_attributes(
+        QueueUrl=queue_url, AttributeNames=["QueueArn"],
+    )["Attributes"]["QueueArn"]
+    assert ":us-west-2:" in queue_arn
+
+    s3.put_bucket_notification_configuration(
+        Bucket=bucket_name,
+        NotificationConfiguration={"EventBridgeConfiguration": {}},
+    )
+    west_eb.put_rule(
+        Name=rule_name,
+        EventPattern=json.dumps({"source": ["aws.s3"], "detail-type": ["Object Created"]}),
+        State="ENABLED",
+    )
+    west_eb.put_targets(
+        Rule=rule_name,
+        Targets=[{"Id": "west-sqs-target", "Arn": queue_arn}],
+    )
+
+    # The S3 client fixture is signed for us-east-1; the bucket itself is us-west-2.
+    s3.put_object(Bucket=bucket_name, Key="west-region.txt", Body=b"world")
+    time.sleep(0.5)
+
+    msgs = west_sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=2)
+    assert "Messages" in msgs and len(msgs["Messages"]) > 0
+    body = json.loads(msgs["Messages"][0]["Body"])
+    assert body["region"] == "us-west-2"
+    assert body["detail"]["bucket"]["name"] == bucket_name
+    assert body["detail"]["object"]["key"] == "west-region.txt"
+
+
+def test_s3_eventbridge_notification_copy_reason(s3, sqs, eb):
+    """A CopyObject create carries reason ``CopyObject`` (not a hardcoded ``PutObject``)."""
+    s3.create_bucket(Bucket="s3-eb-copy-bkt")
+    queue_url = sqs.create_queue(QueueName="s3-eb-copy-q")["QueueUrl"]
+    queue_arn = sqs.get_queue_attributes(
+        QueueUrl=queue_url, AttributeNames=["QueueArn"],
+    )["Attributes"]["QueueArn"]
+    s3.put_bucket_notification_configuration(
+        Bucket="s3-eb-copy-bkt",
+        NotificationConfiguration={"EventBridgeConfiguration": {}},
+    )
+    eb.put_rule(
+        Name="s3-copy-rule",
+        EventPattern=json.dumps(
+            {
+                "source": ["aws.s3"],
+                "detail-type": ["Object Created"],
+                "detail": {"reason": ["CopyObject"]},
+            }
+        ),
+        State="ENABLED",
+    )
+    eb.put_targets(Rule="s3-copy-rule", Targets=[{"Id": "t", "Arn": queue_arn}])
+
+    s3.put_object(Bucket="s3-eb-copy-bkt", Key="src.txt", Body=b"x")
+    s3.copy_object(
+        Bucket="s3-eb-copy-bkt", Key="dst.txt", CopySource="s3-eb-copy-bkt/src.txt"
+    )
+    time.sleep(0.5)
+
+    msgs = sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=2)
+    assert "Messages" in msgs and len(msgs["Messages"]) > 0
+    body = json.loads(msgs["Messages"][0]["Body"])
+    assert body["detail-type"] == "Object Created"
+    assert body["detail"]["object"]["key"] == "dst.txt"
+    assert body["detail"]["reason"] == "CopyObject"
+
+
+def test_s3_eventbridge_notification_object_deleted(s3, sqs, eb):
+    """A delete emits ``Object Deleted`` with reason ``DeleteObject`` and a deletion-type."""
+    s3.create_bucket(Bucket="s3-eb-del-bkt")
+    queue_url = sqs.create_queue(QueueName="s3-eb-del-q")["QueueUrl"]
+    queue_arn = sqs.get_queue_attributes(
+        QueueUrl=queue_url, AttributeNames=["QueueArn"],
+    )["Attributes"]["QueueArn"]
+    s3.put_bucket_notification_configuration(
+        Bucket="s3-eb-del-bkt",
+        NotificationConfiguration={"EventBridgeConfiguration": {}},
+    )
+    eb.put_rule(
+        Name="s3-del-rule",
+        EventPattern=json.dumps({"source": ["aws.s3"], "detail-type": ["Object Deleted"]}),
+        State="ENABLED",
+    )
+    eb.put_targets(Rule="s3-del-rule", Targets=[{"Id": "t", "Arn": queue_arn}])
+
+    s3.put_object(Bucket="s3-eb-del-bkt", Key="gone.txt", Body=b"x")
+    s3.delete_object(Bucket="s3-eb-del-bkt", Key="gone.txt")
+    time.sleep(0.5)
+
+    msgs = sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=2)
+    assert "Messages" in msgs and len(msgs["Messages"]) > 0
+    body = json.loads(msgs["Messages"][0]["Body"])
+    assert body["detail-type"] == "Object Deleted"
+    assert body["detail"]["reason"] == "DeleteObject"
+    assert body["detail"]["deletion-type"] == "Permanently Deleted"
 
 def test_s3_list_object_versions(s3):
     s3.create_bucket(Bucket="s3-ver-bkt")
@@ -1776,6 +2375,68 @@ def test_s3_put_object_content_type_preserved(s3):
     resp = s3.get_object(Bucket="qa-s3-ct", Key="page.html")
     assert "text/html" in resp["ContentType"]
 
+
+def test_s3_versioned_get_object_preserves_content_type(s3):
+    """Content-Type set on PutObject is returned when reading by VersionId."""
+    bucket = "qa-s3-versioned-ct"
+    s3.create_bucket(Bucket=bucket)
+    s3.put_bucket_versioning(
+        Bucket=bucket,
+        VersioningConfiguration={"Status": "Enabled"},
+    )
+
+    put = s3.put_object(
+        Bucket=bucket,
+        Key="page.html",
+        Body=b"<html/>",
+        ContentType="text/html; charset=utf-8",
+    )
+
+    response = s3.get_object(
+        Bucket=bucket,
+        Key="page.html",
+        VersionId=put["VersionId"],
+    )
+    assert response["ContentType"] == "text/html; charset=utf-8"
+
+
+def test_s3_versioned_get_object_preserves_content_type_per_version(s3):
+    """Each object version returns the Content-Type supplied for that version."""
+    bucket = "qa-s3-versioned-ct-history"
+    s3.create_bucket(Bucket=bucket)
+    s3.put_bucket_versioning(
+        Bucket=bucket,
+        VersioningConfiguration={"Status": "Enabled"},
+    )
+
+    text_version = s3.put_object(
+        Bucket=bucket,
+        Key="document",
+        Body=b"plain text",
+        ContentType="text/plain",
+    )["VersionId"]
+    json_version = s3.put_object(
+        Bucket=bucket,
+        Key="document",
+        Body=b'{"value": 1}',
+        ContentType="application/json",
+    )["VersionId"]
+
+    text_response = s3.get_object(
+        Bucket=bucket,
+        Key="document",
+        VersionId=text_version,
+    )
+    json_response = s3.get_object(
+        Bucket=bucket,
+        Key="document",
+        VersionId=json_version,
+    )
+
+    assert text_response["ContentType"] == "text/plain"
+    assert json_response["ContentType"] == "application/json"
+
+
 def test_s3_put_object_storage_class_roundtrip(s3):
     """PutObject with StorageClass is returned by GetObject and HeadObject (#534)."""
     s3.create_bucket(Bucket="qa-s3-sc")
@@ -1920,7 +2581,7 @@ def test_s3_post_object_unquoted_field_names(s3):
         f"--{boundary}--\r\n"
     ).encode()
     r = requests.post(
-        f"http://localhost:4566/qa-s3-post-tok",
+        "http://localhost:4566/qa-s3-post-tok",
         data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
@@ -1985,6 +2646,114 @@ def test_s3_storage_class_persisted_to_disk(tmp_path, monkeypatch):
                                  os.path.join(str(tmp_path), "000000000000", "qa-bucket"))
     restored = s3mod._buckets._data[("000000000000", "qa-bucket")]["objects"]["k"]
     assert restored["storage_class"] == "GLACIER"
+
+
+def test_s3_version_id_persisted_to_disk(tmp_path, monkeypatch):
+    """version_id survives _persist_object → _load_persisted_bucket round-trip (#1058)."""
+    from ministack.services import s3 as s3mod
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+
+    obj = {
+        "body": b"hello",
+        "content_type": "application/octet-stream",
+        "content_encoding": None,
+        "etag": '"abc"',
+        "last_modified": s3mod.now_iso(),
+        "size": 5,
+        "metadata": {},
+        "preserved_headers": {},
+        "storage_class": "STANDARD",
+        "version_id": "test-version-1058",
+    }
+    s3mod._persist_object("ver-bucket", "k", obj)
+
+    meta_path = os.path.join(str(tmp_path), "000000000000", "ver-bucket", "k.meta.json")
+    with open(meta_path) as mf:
+        assert json.load(mf)["version_id"] == "test-version-1058"
+
+    s3mod._buckets._data.pop(("000000000000", "ver-bucket"), None)
+    try:
+        s3mod._load_persisted_bucket(
+            "000000000000", "ver-bucket",
+            os.path.join(str(tmp_path), "000000000000", "ver-bucket"))
+        restored = s3mod._buckets._data[("000000000000", "ver-bucket")]["objects"]["k"]
+        assert restored["version_id"] == "test-version-1058"
+    finally:
+        s3mod._buckets._data.pop(("000000000000", "ver-bucket"), None)
+
+
+def test_s3_version_id_get_object_after_restore(tmp_path, monkeypatch):
+    """GetObject(VersionId=...) must work after _load_persisted_bucket restores
+    from disk. The version index (_object_versions) must be rebuilt so lookups
+    by VersionId succeed (#1065)."""
+    from ministack.services import s3 as s3mod
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+
+    version_id = "test-version-1065"
+    obj = {
+        "body": b"version-data",
+        "content_type": "application/octet-stream",
+        "content_encoding": None,
+        "etag": '"abc"',
+        "last_modified": s3mod.now_iso(),
+        "size": 12,
+        "metadata": {},
+        "preserved_headers": {},
+        "storage_class": "STANDARD",
+        "version_id": version_id,
+    }
+    s3mod._persist_object("ver-get-bucket", "k", obj)
+
+    # Clear in-memory state to simulate restart
+    s3mod._buckets._data.pop(("000000000000", "ver-get-bucket"), None)
+    s3mod._object_versions._data.pop(("000000000000", ("ver-get-bucket", "k")), None)
+
+    try:
+        s3mod._load_persisted_bucket(
+            "000000000000", "ver-get-bucket",
+            os.path.join(str(tmp_path), "000000000000", "ver-get-bucket"))
+
+        # Verify _object_versions was rebuilt
+        versions = s3mod._object_versions._data.get(("000000000000", ("ver-get-bucket", "k")), [])
+        assert len(versions) == 1
+        assert versions[0]["version_id"] == version_id
+        assert versions[0]["data"] is None  # body stays on disk
+
+        # Verify GetObject by VersionId returns the body from disk
+        data = s3mod._get_object_data("ver-get-bucket", "k", version_id=version_id)
+        assert data == b"version-data"
+    finally:
+        s3mod._buckets._data.pop(("000000000000", "ver-get-bucket"), None)
+        s3mod._object_versions._data.pop(("000000000000", ("ver-get-bucket", "k")), None)
+
+
+def test_s3_put_object_sidecar_carries_version_id(tmp_path, monkeypatch):
+    """PutObject on a versioned bucket must persist AFTER version_id assignment,
+    so the on-disk .meta.json carries the id returned in x-amz-version-id (#1058)."""
+    from ministack.core import responses as respmod
+    from ministack.services import s3 as s3mod
+    monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(s3mod, "S3_PERSIST", True)
+    monkeypatch.setattr(s3mod, "get_account_id", lambda: "000000000000")
+    monkeypatch.setattr(respmod, "get_account_id", lambda: "000000000000")
+    try:
+        s3mod._create_bucket("ver-put-bucket", b"")
+        s3mod._bucket_versioning["ver-put-bucket"] = "Enabled"
+        status, resp_headers, _ = s3mod._put_object("ver-put-bucket", "k", b"hello", {})
+        assert status == 200
+        version_id = resp_headers["x-amz-version-id"]
+        meta_path = os.path.join(
+            str(tmp_path), "000000000000", "ver-put-bucket", "k.meta.json")
+        with open(meta_path) as mf:
+            assert json.load(mf)["version_id"] == version_id
+    finally:
+        s3mod._buckets._data.pop(("000000000000", "ver-put-bucket"), None)
+        s3mod._bucket_versioning.pop("ver-put-bucket", None)
+        s3mod._object_versions.pop(("ver-put-bucket", "k"), None)
 
 
 def test_s3_create_bucket_persists_account_scoped(tmp_path, monkeypatch):
@@ -2558,7 +3327,9 @@ def test_s3_put_object_acl_canned(s3):
 def test_s3_put_object_acl_invalid_canned(s3):
     """Invalid x-amz-acl values are rejected with InvalidArgument (400)."""
     import uuid as _u
+
     from botocore.exceptions import ClientError
+
     bucket = f"acl-bad-{_u.uuid4().hex[:8]}"
     s3.create_bucket(Bucket=bucket)
     s3.put_object(Bucket=bucket, Key="k", Body=b"x")
@@ -2572,7 +3343,9 @@ def test_s3_put_object_acl_invalid_canned(s3):
 def test_s3_get_object_acl_no_such_key(s3):
     """GetObjectAcl on a missing key returns NoSuchKey (404)."""
     import uuid as _u
+
     from botocore.exceptions import ClientError
+
     bucket = f"acl-missing-{_u.uuid4().hex[:8]}"
     s3.create_bucket(Bucket=bucket)
     with pytest.raises(ClientError) as exc:
@@ -2777,3 +3550,103 @@ def test_s3_put_object_with_crc32_checksum_roundtrips(s3):
 
     s3.delete_object(Bucket=bucket, Key="k")
     s3.delete_bucket(Bucket=bucket)
+
+
+def test_s3_delete_object_by_version_id_purges_version(s3):
+    """DeleteObject with an explicit VersionId must physically remove exactly
+    that version (not add a delete marker). Repro for the versioned-delete bug:
+    the handler ignored VersionId and always appended a delete marker, so the
+    version count went UP instead of to zero."""
+    bkt = "intg-s3-verdel-single"
+    s3.create_bucket(Bucket=bkt)
+    s3.put_bucket_versioning(Bucket=bkt, VersioningConfiguration={"Status": "Enabled"})
+
+    v1 = s3.put_object(Bucket=bkt, Key="a", Body=b"v1")["VersionId"]
+    v2 = s3.put_object(Bucket=bkt, Key="a", Body=b"v2")["VersionId"]
+    assert v1 != v2
+
+    # Delete the older version by id — the newer one must survive.
+    s3.delete_object(Bucket=bkt, Key="a", VersionId=v1)
+    versions = s3.list_object_versions(Bucket=bkt, Prefix="a").get("Versions", [])
+    ids = [v["VersionId"] for v in versions]
+    assert ids == [v2], f"expected only {v2!r} to remain, got {ids!r}"
+    assert not s3.list_object_versions(Bucket=bkt, Prefix="a").get("DeleteMarkers")
+
+    # Delete the last version by id — nothing should remain.
+    s3.delete_object(Bucket=bkt, Key="a", VersionId=v2)
+    listing = s3.list_object_versions(Bucket=bkt, Prefix="a")
+    assert listing.get("Versions", []) == []
+    assert listing.get("DeleteMarkers", []) == []
+
+
+def test_s3_delete_object_without_version_id_still_creates_marker(s3):
+    """Regression guard: DeleteObject WITHOUT a VersionId must keep creating a
+    delete marker (logical delete) rather than purging history."""
+    bkt = "intg-s3-verdel-marker"
+    s3.create_bucket(Bucket=bkt)
+    s3.put_bucket_versioning(Bucket=bkt, VersioningConfiguration={"Status": "Enabled"})
+
+    s3.put_object(Bucket=bkt, Key="a", Body=b"v1")
+    resp = s3.delete_object(Bucket=bkt, Key="a")
+    assert resp.get("DeleteMarker") is True
+
+    listing = s3.list_object_versions(Bucket=bkt, Prefix="a")
+    assert len(listing.get("Versions", [])) == 1
+    assert len(listing.get("DeleteMarkers", [])) == 1
+    # The current version is now the delete marker → HeadObject 404s.
+    with pytest.raises(ClientError) as exc:
+        s3.head_object(Bucket=bkt, Key="a")
+    assert exc.value.response["Error"]["Code"] in ("404", "NoSuchKey")
+
+
+def test_s3_delete_objects_batch_by_version_id_purges_all(s3):
+    """Batch DeleteObjects with explicit {Key, VersionId} entries must remove
+    every addressed version AND delete marker. This is the reported repro:
+    2 versions + 1 delete marker, purged by id, must leave ListObjectVersions
+    completely empty."""
+    bkt = "intg-s3-verdel-batch"
+    s3.create_bucket(Bucket=bkt)
+    s3.put_bucket_versioning(Bucket=bkt, VersioningConfiguration={"Status": "Enabled"})
+
+    s3.put_object(Bucket=bkt, Key="a", Body=b"v1")
+    s3.put_object(Bucket=bkt, Key="a", Body=b"v2")
+    s3.delete_object(Bucket=bkt, Key="a")  # delete marker
+
+    listing = s3.list_object_versions(Bucket=bkt, Prefix="a")
+    assert len(listing.get("Versions", [])) == 2
+    assert len(listing.get("DeleteMarkers", [])) == 1
+
+    objects = [
+        {"Key": o["Key"], "VersionId": o["VersionId"]}
+        for o in listing.get("Versions", []) + listing.get("DeleteMarkers", [])
+    ]
+    resp = s3.delete_objects(Bucket=bkt, Delete={"Objects": objects})
+    assert len(resp.get("Deleted", [])) == 3
+    assert resp.get("Errors", []) == []
+
+    after = s3.list_object_versions(Bucket=bkt, Prefix="a")
+    assert after.get("Versions", []) == []
+    assert after.get("DeleteMarkers", []) == []
+
+
+def test_s3_delete_delete_marker_by_version_id_restores_object(s3):
+    """Deleting the latest delete marker by its VersionId must make the object
+    visible again (its previous version becomes current)."""
+    bkt = "intg-s3-verdel-restore"
+    s3.create_bucket(Bucket=bkt)
+    s3.put_bucket_versioning(Bucket=bkt, VersioningConfiguration={"Status": "Enabled"})
+
+    s3.put_object(Bucket=bkt, Key="a", Body=b"hello")
+    marker_id = s3.delete_object(Bucket=bkt, Key="a")["VersionId"]
+
+    # Marker shadows the object.
+    with pytest.raises(ClientError):
+        s3.head_object(Bucket=bkt, Key="a")
+
+    # Remove the marker → the object reappears.
+    s3.delete_object(Bucket=bkt, Key="a", VersionId=marker_id)
+    got = s3.get_object(Bucket=bkt, Key="a")
+    assert got["Body"].read() == b"hello"
+
+    markers = s3.list_object_versions(Bucket=bkt, Prefix="a").get("DeleteMarkers", [])
+    assert markers == []

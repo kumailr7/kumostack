@@ -9,7 +9,9 @@ Supports: CreateTopic, DeleteTopic, ListTopics, GetTopicAttributes, SetTopicAttr
           GetSubscriptionAttributes, SetSubscriptionAttributes,
           Publish, PublishBatch,
           ListTagsForResource, TagResource, UntagResource,
-          CreatePlatformApplication, CreatePlatformEndpoint.
+          CreatePlatformApplication, DeletePlatformApplication,
+          CreatePlatformEndpoint, GetEndpointAttributes, SetEndpointAttributes,
+          DeleteEndpoint.
 SNS → Lambda fanout dispatches via _execute_function (synchronous).
 FIFO topics: .fifo naming validation, MessageGroupId/MessageDeduplicationId enforcement,
              5-minute deduplication window, sequence numbers, content-based deduplication,
@@ -30,7 +32,8 @@ _HOST = os.environ.get("MINISTACK_HOST", "localhost")
 _PORT = os.environ.get("GATEWAY_PORT", "4566")
 
 import kumostack.services.lambda_svc as _lambda_svc
-from kumostack.core.responses import AccountScopedDict, get_account_id, get_region, new_uuid
+from kumostack.core.arn import ArnParseError, parse_arn
+from kumostack.core.responses import AccountRegionScopedDict, get_account_id, get_region, new_uuid
 from kumostack.services import sqs as _sqs
 
 logger = logging.getLogger("sns")
@@ -50,12 +53,79 @@ def _normalize_arn(arn: str) -> str:
         return _re.sub(r"(arn:aws:sns:[^:]+)::", rf"\1:{get_account_id()}:", arn)
     return arn
 
+
+def _sqs_queue_name_from_arn_spec(spec) -> str | None:
+    if spec.service != "sqs" or not spec.resource or ":" in spec.resource or "/" in spec.resource:
+        return None
+    return spec.resource
+
+
+def _lambda_function_name_from_arn_spec(spec) -> str | None:
+    if spec.service != "lambda":
+        return None
+    parts = spec.resource.split(":", 2)
+    if len(parts) < 2 or parts[0] != "function" or not parts[1]:
+        return None
+    return parts[1]
+
+
+def _invalid_subscription_endpoint(protocol: str, endpoint: str):
+    return _error(
+        "InvalidParameterException",
+        f"Invalid parameter: Endpoint {endpoint} is not a valid {protocol.upper()} ARN",
+        400,
+    )
+
+
+def _validate_subscription_endpoint(protocol: str, endpoint: str):
+    if protocol not in {"sqs", "lambda"}:
+        return None
+    try:
+        spec = parse_arn(endpoint)
+    except ArnParseError:
+        return _invalid_subscription_endpoint(protocol, endpoint)
+
+    if not spec.region or not spec.account_id:
+        return _invalid_subscription_endpoint(protocol, endpoint)
+    if protocol == "sqs" and not _sqs_queue_name_from_arn_spec(spec):
+        return _invalid_subscription_endpoint(protocol, endpoint)
+    if protocol == "lambda" and not _lambda_function_name_from_arn_spec(spec):
+        return _invalid_subscription_endpoint(protocol, endpoint)
+    return None
+
+
+def _resolve_topic_tag_arn(arn: str):
+    arn = _normalize_arn(arn)
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return arn, None, _error("InvalidParameterException", f"Invalid SNS topic ARN: {arn}", 400)
+
+    if (
+        spec.partition != "aws"
+        or spec.service != "sns"
+        or not spec.region
+        or not spec.account_id
+        or not spec.resource
+        or ":" in spec.resource
+        or "/" in spec.resource
+    ):
+        return arn, None, _error("InvalidParameterException", f"Invalid SNS topic ARN: {arn}", 400)
+
+    if spec.region != get_region() or spec.account_id != get_account_id():
+        return arn, None, _error("ResourceNotFoundException", "Resource not found", 404)
+
+    topic = _topics.get(arn)
+    if not topic:
+        return arn, None, _error("ResourceNotFoundException", "Resource not found", 404)
+    return arn, topic, None
+
 from kumostack.core.persistence import PERSIST_STATE, load_state
 
-_topics = AccountScopedDict()
-_sub_arn_to_topic = AccountScopedDict()
-_platform_applications = AccountScopedDict()
-_platform_endpoints = AccountScopedDict()
+_topics = AccountRegionScopedDict()
+_sub_arn_to_topic = AccountRegionScopedDict()
+_platform_applications = AccountRegionScopedDict()
+_platform_endpoints = AccountRegionScopedDict()
 
 
 # ── Persistence ────────────────────────────────────────────
@@ -116,6 +186,10 @@ async def handle_request(method: str, path: str, headers: dict, body: bytes, que
         "UntagResource": _untag_resource,
         "CreatePlatformApplication": _create_platform_application,
         "CreatePlatformEndpoint": _create_platform_endpoint,
+        "DeletePlatformApplication": _delete_platform_application,
+        "GetEndpointAttributes": _get_endpoint_attributes,
+        "SetEndpointAttributes": _set_endpoint_attributes,
+        "DeleteEndpoint": _delete_endpoint,
     }
 
     handler = handlers.get(action)
@@ -296,6 +370,9 @@ def _subscribe(params):
 
     if not protocol:
         return _error("InvalidParameterException", "Protocol is required", 400)
+    endpoint_error = _validate_subscription_endpoint(protocol, endpoint)
+    if endpoint_error:
+        return endpoint_error
 
     for existing in topic["subscriptions"]:
         if existing["protocol"] == protocol and existing["endpoint"] == endpoint:
@@ -541,6 +618,9 @@ def _publish(params):
     subject = _p(params, "Subject")
     message_structure = _p(params, "MessageStructure")
 
+    if isinstance(message, (dict, list)):
+        message = json.dumps(message)
+
     if phone_number and not topic_arn:
         msg_id = new_uuid()
         logger.info("SNS SMS stub to %s: %s", phone_number, message[:80])
@@ -552,6 +632,14 @@ def _publish(params):
                       "TopicArn, TargetArn, or PhoneNumber is required", 400)
 
     if topic_arn not in _topics:
+        # Publishing directly to a mobile-push platform endpoint (TargetArn) is
+        # valid in AWS — https://docs.aws.amazon.com/sns/latest/api/API_Publish.html
+        # We don't deliver anything, but the call must succeed.
+        if topic_arn in _platform_endpoints:
+            msg_id = new_uuid()
+            logger.info("SNS platform-endpoint publish stub to %s", topic_arn)
+            return _xml(200, "PublishResponse",
+                        f"<PublishResult><MessageId>{msg_id}</MessageId></PublishResult>")
         return _error("NotFound", f"Topic does not exist: {topic_arn}", 404)
 
     topic = _topics[topic_arn]
@@ -848,7 +936,16 @@ def _fanout(topic_arn: str, msg_id: str, message: str, subject: str,
                 daemon=True,
             ).start()
         elif protocol == "lambda":
-            _deliver_to_lambda(endpoint, envelope, topic_arn, sub["arn"], msg_id, effective_message, message_attributes or {})
+            # SNS delivers to Lambda asynchronously: Publish returns as soon as
+            # the notification is accepted and must not block on the
+            # subscriber's execution. Deliver on a background thread, mirroring
+            # the http(s) path above; a slow or failing subscriber Lambda no
+            # longer stalls the Publish call (or its upstream caller).
+            _threading.Thread(
+                target=_deliver_to_lambda,
+                args=(endpoint, envelope, topic_arn, sub["arn"], msg_id, effective_message, message_attributes or {}),
+                daemon=True,
+            ).start()
         elif protocol == "email" or protocol == "email-json":
             logger.info("SNS fanout → email %s (stub)", endpoint)
         elif protocol == "sms":
@@ -860,9 +957,19 @@ def _fanout(topic_arn: str, msg_id: str, message: str, subject: str,
 def _deliver_to_sqs(endpoint: str, envelope: str, raw: bool, raw_message: str,
                     message_group_id: str = "", message_dedup_id: str = "",
                     message_attributes: dict | None = None):
-    queue_name = endpoint.split(":")[-1]
-    queue_url = _sqs._queue_url(queue_name)
-    queue = _sqs._queues.get(queue_url)
+    try:
+        spec = parse_arn(endpoint)
+    except ArnParseError:
+        logger.warning("SNS fanout: invalid SQS endpoint ARN %s", endpoint)
+        return
+    queue_name = _sqs_queue_name_from_arn_spec(spec)
+    if not queue_name:
+        logger.warning("SNS fanout: invalid SQS endpoint ARN %s", endpoint)
+        return
+    if spec.account_id != get_account_id():
+        logger.warning("SNS fanout: SQS queue %s is outside the current account scope", queue_name)
+        return
+    queue = _sqs._queue_by_arn(str(spec))
     if not queue:
         logger.warning("SNS fanout: SQS queue %s not found", queue_name)
         return
@@ -898,9 +1005,8 @@ def _deliver_to_lambda(endpoint: str, envelope: str, topic_arn: str, sub_arn: st
                        msg_id: str, raw_message: str, message_attributes: dict):
     """Invoke a Lambda function with the SNS Records envelope (AWS format)."""
     # endpoint is a Lambda ARN: arn:aws:lambda:region:account:function:name
-    func_name = endpoint.split(":")[-1]
-    func = _lambda_svc._functions.get(func_name)
-    if not func:
+    func, config, func_name = _lambda_svc._get_func_record_for_ref(endpoint)
+    if not func or not config:
         logger.warning("SNS fanout: Lambda function %s not found", func_name)
         return
     event = {
@@ -914,7 +1020,8 @@ def _deliver_to_lambda(endpoint: str, envelope: str, topic_arn: str, sub_arn: st
         ]
     }
     try:
-        _lambda_svc._execute_function(func, event)
+        exec_record = _lambda_svc._execution_record_for_config(func, config)
+        _lambda_svc._execute_function_with_config_scope(exec_record, event)
         logger.info("SNS fanout → Lambda %s", func_name)
     except Exception as exc:
         logger.error("SNS fanout → Lambda %s failed: %s", func_name, exc)
@@ -927,7 +1034,7 @@ def _http_post_sync(endpoint: str, payload: str, sns_message_type: str) -> int:
     which silently skipped every HTTP subscription confirmation (#460).
 
     Handles `http://user:pass@host/path` userinfo by stripping it from the URL
-    and promoting to an Authorization: Basic header, matching real AWS SNS
+    and promoting it to the HTTP auth header, matching real AWS SNS
     behaviour for HTTP(S) endpoints with embedded credentials. urllib leaves
     userinfo in the URL by default, which would break the Host header."""
     import base64 as _b64
@@ -993,21 +1100,20 @@ async def _send_subscription_confirmation(topic_arn: str, sub: dict):
 # ---------------------------------------------------------------------------
 
 def _list_tags_for_resource(params):
-    arn = _normalize_arn(_p(params, "ResourceArn"))
-    topic = _topics.get(arn)
+    arn, topic, err = _resolve_topic_tag_arn(_p(params, "ResourceArn"))
+    if err:
+        return err
     tags_xml = ""
-    if topic:
-        for k, v in topic.get("tags", {}).items():
-            tags_xml += f"<member><Key>{k}</Key><Value>{v}</Value></member>"
+    for k, v in topic.get("tags", {}).items():
+        tags_xml += f"<member><Key>{k}</Key><Value>{v}</Value></member>"
     return _xml(200, "ListTagsForResourceResponse",
                 f"<ListTagsForResourceResult><Tags>{tags_xml}</Tags></ListTagsForResourceResult>")
 
 
 def _tag_resource(params):
-    arn = _normalize_arn(_p(params, "ResourceArn"))
-    topic = _topics.get(arn)
-    if not topic:
-        return _error("ResourceNotFoundException", "Resource not found", 404)
+    _arn, topic, err = _resolve_topic_tag_arn(_p(params, "ResourceArn"))
+    if err:
+        return err
     i = 1
     while _p(params, f"Tags.member.{i}.Key"):
         key = _p(params, f"Tags.member.{i}.Key")
@@ -1018,13 +1124,13 @@ def _tag_resource(params):
 
 
 def _untag_resource(params):
-    arn = _normalize_arn(_p(params, "ResourceArn"))
-    topic = _topics.get(arn)
-    if topic:
-        i = 1
-        while _p(params, f"TagKeys.member.{i}"):
-            topic.get("tags", {}).pop(_p(params, f"TagKeys.member.{i}"), None)
-            i += 1
+    _arn, topic, err = _resolve_topic_tag_arn(_p(params, "ResourceArn"))
+    if err:
+        return err
+    i = 1
+    while _p(params, f"TagKeys.member.{i}"):
+        topic.get("tags", {}).pop(_p(params, f"TagKeys.member.{i}"), None)
+        i += 1
     return _xml(200, "UntagResourceResponse", "<UntagResourceResult/>")
 
 
@@ -1068,7 +1174,8 @@ def _create_platform_endpoint(params):
     if not token:
         return _error("InvalidParameterException", "Token is required", 400)
 
-    endpoint_arn = f"{app_arn}/{new_uuid()}"
+    # CustomUserData is a top-level request param (not an Attributes entry).
+    custom_user_data = _p(params, "CustomUserData")
 
     attrs = {"Enabled": "true", "Token": token}
     i = 1
@@ -1077,7 +1184,34 @@ def _create_platform_endpoint(params):
         val = _p(params, f"Attributes.entry.{i}.value")
         attrs[key] = val
         i += 1
+    if custom_user_data:
+        attrs["CustomUserData"] = custom_user_data
 
+    # AWS dedups by Token within a platform application: re-requesting the same
+    # Token returns the existing endpoint when CustomUserData matches, but
+    # raises if it differs — so callers know to Get/Set the existing endpoint.
+    # Idempotency per https://docs.aws.amazon.com/sns/latest/api/API_CreatePlatformEndpoint.html
+    # ("if the requester already owns an endpoint with the same device token and
+    # attributes, that endpoint's ARN is returned"); duplicate-token error string
+    # + parse-the-ARN guidance per
+    # https://aws.amazon.com/blogs/mobile/mobile-token-management-with-amazon-sns
+    for existing in _platform_endpoints.values():
+        if (existing["application_arn"] == app_arn
+                and existing["attributes"].get("Token") == token):
+            if (existing["attributes"].get("CustomUserData", "")
+                    == attrs.get("CustomUserData", "")):
+                return _xml(200, "CreatePlatformEndpointResponse",
+                            f"<CreatePlatformEndpointResult>"
+                            f"<EndpointArn>{existing['arn']}</EndpointArn>"
+                            f"</CreatePlatformEndpointResult>")
+            return _error(
+                "InvalidParameter",
+                f"Endpoint {existing['arn']} already exists with the same Token, "
+                f"but different attributes.",
+                400,
+            )
+
+    endpoint_arn = f"{app_arn}/{new_uuid()}"
     _platform_endpoints[endpoint_arn] = {
         "arn": endpoint_arn,
         "application_arn": app_arn,
@@ -1087,6 +1221,56 @@ def _create_platform_endpoint(params):
                 f"<CreatePlatformEndpointResult>"
                 f"<EndpointArn>{endpoint_arn}</EndpointArn>"
                 f"</CreatePlatformEndpointResult>")
+
+
+def _delete_platform_application(params):
+    # Idempotent in AWS. Also drop the application's endpoints.
+    # https://docs.aws.amazon.com/sns/latest/api/API_DeletePlatformApplication.html
+    arn = _p(params, "PlatformApplicationArn")
+    _platform_applications.pop(arn, None)
+    stale = [e["arn"] for e in _platform_endpoints.values()
+             if e["application_arn"] == arn]
+    for ep_arn in stale:
+        _platform_endpoints.pop(ep_arn, None)
+    return _xml(200, "DeletePlatformApplicationResponse", "")
+
+
+def _get_endpoint_attributes(params):
+    # https://docs.aws.amazon.com/sns/latest/api/API_GetEndpointAttributes.html
+    arn = _p(params, "EndpointArn")
+    endpoint = _platform_endpoints.get(arn)
+    if endpoint is None:
+        return _error("NotFound", f"Endpoint does not exist: {arn}", 404)
+    entries = "".join(
+        f"<entry><key>{_xml_escape(k)}</key><value>{_xml_escape(v)}</value></entry>"
+        for k, v in endpoint["attributes"].items()
+    )
+    return _xml(200, "GetEndpointAttributesResponse",
+                f"<GetEndpointAttributesResult><Attributes>{entries}</Attributes>"
+                f"</GetEndpointAttributesResult>")
+
+
+def _set_endpoint_attributes(params):
+    # https://docs.aws.amazon.com/sns/latest/api/API_SetEndpointAttributes.html
+    arn = _p(params, "EndpointArn")
+    endpoint = _platform_endpoints.get(arn)
+    if endpoint is None:
+        return _error("NotFound", f"Endpoint does not exist: {arn}", 404)
+    i = 1
+    while _p(params, f"Attributes.entry.{i}.key"):
+        key = _p(params, f"Attributes.entry.{i}.key")
+        val = _p(params, f"Attributes.entry.{i}.value")
+        endpoint["attributes"][key] = val
+        i += 1
+    return _xml(200, "SetEndpointAttributesResponse", "")
+
+
+def _delete_endpoint(params):
+    # AWS DeleteEndpoint is idempotent — succeeds even if already gone.
+    # https://docs.aws.amazon.com/sns/latest/api/API_DeleteEndpoint.html
+    arn = _p(params, "EndpointArn")
+    _platform_endpoints.pop(arn, None)
+    return _xml(200, "DeleteEndpointResponse", "")
 
 
 # ---------------------------------------------------------------------------

@@ -3,9 +3,11 @@ Integration tests for EKS service emulator.
 Tests cluster CRUD, nodegroup CRUD, tags, and CloudFormation provisioning.
 k3s Docker container tests require Docker socket access.
 """
+import asyncio
 import json
 import time
 import uuid
+from urllib.parse import quote
 
 import boto3
 import pytest
@@ -31,6 +33,46 @@ def cfn():
 
 def _uid():
     return uuid.uuid4().hex[:8]
+
+
+@pytest.fixture
+def eks_mod(monkeypatch):
+    from ministack.core.responses import set_request_account_id, set_request_region
+    from ministack.services import eks as eks_service
+
+    monkeypatch.setattr(eks_service, "_get_docker", lambda: None)
+    set_request_account_id("000000000000")
+    set_request_region(REGION)
+    eks_service.reset()
+    yield eks_service
+    eks_service.reset()
+
+
+def _eks_direct(eks_service, method, path, body=None, query=None):
+    payload = json.dumps(body or {}).encode("utf-8") if body is not None else b""
+    status, headers, raw_body = asyncio.run(
+        eks_service.handle_request(method, path, {}, payload, query or {})
+    )
+    if raw_body:
+        parsed_body = json.loads(raw_body.decode("utf-8"))
+    else:
+        parsed_body = {}
+    return status, headers, parsed_body
+
+
+def _eks_direct_create_cluster(eks_service, name):
+    status, _headers, body = _eks_direct(
+        eks_service,
+        "POST",
+        "/clusters",
+        {
+            "name": name,
+            "roleArn": "arn:aws:iam::000000000000:role/eks-role",
+            "resourcesVpcConfig": {},
+        },
+    )
+    assert status == 200
+    return body["cluster"]["arn"]
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +249,139 @@ def test_eks_tag_cluster(eks):
     eks.delete_cluster(name=name)
 
 
+def test_eks_tag_resource_accepts_supported_local_arn_shapes_direct(eks_mod):
+    cluster = f"tag-shapes-{_uid()}"
+    cluster_arn = _eks_direct_create_cluster(eks_mod, cluster)
+
+    status, _headers, body = _eks_direct(
+        eks_mod,
+        "POST",
+        f"/clusters/{cluster}/node-groups",
+        {
+            "nodegroupName": "workers",
+            "nodeRole": "arn:aws:iam::000000000000:role/node-role",
+            "subnets": ["subnet-1"],
+        },
+    )
+    assert status == 200
+    nodegroup_arn = body["nodegroup"]["nodegroupArn"]
+
+    status, _headers, body = _eks_direct(
+        eks_mod,
+        "POST",
+        f"/clusters/{cluster}/addons",
+        {"addonName": "vpc-cni"},
+    )
+    assert status == 200
+    addon_arn = body["addon"]["addonArn"]
+
+    principal = "arn:aws:iam::000000000000:role/eks-access"
+    status, _headers, body = _eks_direct(
+        eks_mod,
+        "POST",
+        f"/clusters/{cluster}/access-entries",
+        {"principalArn": principal},
+    )
+    assert status == 200
+    access_entry_arn = body["accessEntry"]["accessEntryArn"]
+
+    status, _headers, _body = _eks_direct(
+        eks_mod,
+        "POST",
+        f"/clusters/{cluster}/identity-provider-configs/associate",
+        {
+            "oidc": {
+                "identityProviderConfigName": "tag-idp",
+                "issuerUrl": "https://example/issuer",
+                "clientId": "client-1",
+            },
+        },
+    )
+    assert status == 200
+    status, _headers, body = _eks_direct(
+        eks_mod,
+        "POST",
+        f"/clusters/{cluster}/identity-provider-configs/describe",
+        {"identityProviderConfig": {"type": "oidc", "name": "tag-idp"}},
+    )
+    assert status == 200
+    idp_arn = body["identityProviderConfig"]["oidc"]["identityProviderConfigArn"]
+
+    for arn in (cluster_arn, nodegroup_arn, addon_arn, access_entry_arn, idp_arn):
+        path_arn = quote(arn, safe="") if arn == cluster_arn else arn
+        status, _headers, body = _eks_direct(
+            eks_mod,
+            "POST",
+            f"/tags/{path_arn}",
+            {"tags": {"scope": "local"}},
+        )
+        assert status == 200
+        assert body == {}
+
+        status, _headers, body = _eks_direct(eks_mod, "GET", f"/tags/{path_arn}")
+        assert status == 200
+        assert body["tags"]["scope"] == "local"
+        assert eks_mod._tags.get(arn) == {"scope": "local"}
+
+
+def test_eks_tag_apis_reject_invalid_resource_arns_before_tags_direct(eks_mod):
+    cluster = f"tag-invalid-{_uid()}"
+    cluster_arn = _eks_direct_create_cluster(eks_mod, cluster)
+    _eks_direct(eks_mod, "POST", f"/tags/{cluster_arn}", {"tags": {"existing": "tag"}})
+    existing_tags = dict(eks_mod._tags.items())
+
+    invalid_arns = [
+        "not-an-arn",
+        cluster_arn.replace("arn:aws:", "arn:aws-cn:"),
+        cluster_arn.replace(":eks:", ":sqs:"),
+        cluster_arn.replace(":000000000000:", ":111111111111:"),
+        cluster_arn.replace(f":{REGION}:", ":us-west-2:"),
+        f"{cluster_arn}/extra",
+        f"arn:aws:eks:{REGION}:000000000000:fargateprofile/{cluster}/fp/abc123",
+    ]
+
+    for arn in invalid_arns:
+        for method, request_body, query in (
+            ("GET", None, None),
+            ("POST", {"tags": {"bad": "tag"}}, None),
+            ("DELETE", None, {"tagKeys": "existing"}),
+        ):
+            status, _headers, body = _eks_direct(
+                eks_mod,
+                method,
+                f"/tags/{arn}",
+                request_body,
+                query,
+            )
+            assert status == 400
+            assert body["__type"] == "InvalidParameterException"
+            assert dict(eks_mod._tags.items()) == existing_tags
+
+
+def test_eks_tag_apis_reject_missing_local_resources_before_tags_direct(eks_mod):
+    cluster = f"tag-missing-{_uid()}"
+    cluster_arn = _eks_direct_create_cluster(eks_mod, cluster)
+    _eks_direct(eks_mod, "POST", f"/tags/{cluster_arn}", {"tags": {"existing": "tag"}})
+    existing_tags = dict(eks_mod._tags.items())
+    missing_arn = f"arn:aws:eks:{REGION}:000000000000:cluster/no-such-cluster"
+
+    for method, request_body, query in (
+        ("GET", None, None),
+        ("POST", {"tags": {"bad": "tag"}}, None),
+        ("DELETE", None, {"tagKeys": "existing"}),
+    ):
+        status, _headers, body = _eks_direct(
+            eks_mod,
+            method,
+            f"/tags/{missing_arn}",
+            request_body,
+            query,
+        )
+        assert status == 404
+        assert body["__type"] == "ResourceNotFoundException"
+        assert dict(eks_mod._tags.items()) == existing_tags
+
+
 # ---------------------------------------------------------------------------
 # CloudFormation
 # ---------------------------------------------------------------------------
@@ -301,6 +476,45 @@ def test_eks_k3s_run_kwargs_container_name_and_labels():
     kwargs = _k3s_run_kwargs(name="my-cluster", port=16443)
     assert kwargs["name"] == "kumostack-eks-my-cluster"
     assert kwargs["labels"] == {"kumostack": "eks", "cluster_name": "my-cluster"}
+
+
+def test_eks_k3s_run_kwargs_host_gateway_extra_host():
+    """The k3s node must be able to reach a host-run MiniStack for ECR
+    registry mirroring (#1054) — host.docker.internal via host-gateway."""
+    from ministack.services.eks import _k3s_run_kwargs
+
+    kwargs = _k3s_run_kwargs(name="c1", port=16443)
+    assert kwargs["extra_hosts"] == {"host.docker.internal": "host-gateway"}
+
+
+def test_eks_ecr_registry_hosts_from_cluster_arn():
+    """ECR mirror hostnames derive from the cluster ARN, not contextvars,
+    so restore/restart paths (no request context) behave like create (#1054)."""
+    from ministack.services.eks import _ecr_registry_hosts
+
+    cluster = {"arn": "arn:aws:eks:eu-west-1:123456789012:cluster/my-cluster"}
+    assert _ecr_registry_hosts(cluster) == ["123456789012.dkr.ecr.eu-west-1.amazonaws.com"]
+    assert _ecr_registry_hosts({"arn": "not-an-arn"}) == []
+    assert _ecr_registry_hosts({}) == []
+
+
+def test_eks_k3s_registries_yaml_shape(monkeypatch):
+    """registries.yaml maps the cluster's ECR hostname to the gateway; with
+    no shared network the endpoint goes through host.docker.internal (#1054)."""
+    from ministack.services.eks import _k3s_registries_yaml
+
+    monkeypatch.delenv("GATEWAY_PORT", raising=False)
+    monkeypatch.delenv("EDGE_PORT", raising=False)
+    yaml_bytes = _k3s_registries_yaml(
+        None, None, ["123456789012.dkr.ecr.eu-west-1.amazonaws.com"])
+    text = yaml_bytes.decode()
+    assert text == (
+        "mirrors:\n"
+        '  "123456789012.dkr.ecr.eu-west-1.amazonaws.com":\n'
+        "    endpoint:\n"
+        '      - "http://host.docker.internal:4566"\n'
+    )
+    assert _k3s_registries_yaml(None, None, []) is None
 
 
 def test_eks_addon_lifecycle(eks):
@@ -485,6 +699,33 @@ def test_eks_oidc_discovery_document(eks):
             eks.delete_cluster(name=cn)
         except Exception:
             pass
+
+
+def test_eks_oidc_issuer_scheme_https_when_tls(monkeypatch):
+    """With USE_SSL=1 the gateway serves TLS, so the advertised OIDC issuer and
+    the discovery document both report https (terraform's
+    aws_iam_openid_connect_provider rejects non-https urls). Called in-process."""
+    from ministack.services import eks as eks_svc
+
+    monkeypatch.setenv("USE_SSL", "1")
+    oidc_id = eks_svc._new_oidc_id()
+    issuer = eks_svc._issuer_url(oidc_id)
+    assert issuer.startswith("https://"), issuer
+    assert "/oidc/id/" in issuer, issuer
+
+    status, _headers, body = eks_svc._oidc_discovery(oidc_id)
+    assert status == 200
+    doc = json.loads(body)
+    assert doc["issuer"] == issuer
+    assert doc["jwks_uri"] == f"{issuer}/keys"
+
+
+def test_eks_oidc_issuer_scheme_http_without_tls(monkeypatch):
+    """Default (no TLS) keeps http, matching what the plain-http gateway serves."""
+    from ministack.services import eks as eks_svc
+
+    monkeypatch.delenv("USE_SSL", raising=False)
+    assert eks_svc._ministack_issuer_base().startswith("http://")
 
 
 # ---------------------------------------------------------------------------
@@ -805,7 +1046,8 @@ def test_only_one_oidc_idp_per_cluster(eks):
 
 def test_idp_tags_returned_by_list_tags_for_resource(eks):
     """Tags set at associate time must be reachable via list_tags_for_resource
-    on the identityProviderConfigArn, and must clear after disassociate."""
+    on the identityProviderConfigArn, and the ARN must stop resolving after
+    disassociate removes the local IdP config."""
     cn = f"idp-tags-{_uid()}"
     _create_cluster_for_idp(eks, cn)
     try:
@@ -832,8 +1074,9 @@ def test_idp_tags_returned_by_list_tags_for_resource(eks):
             clusterName=cn,
             identityProviderConfig={"type": "oidc", "name": "tag-idp"},
         )
-        tags_after = eks.list_tags_for_resource(resourceArn=arn)["tags"]
-        assert tags_after == {}
+        with pytest.raises(ClientError) as exc:
+            eks.list_tags_for_resource(resourceArn=arn)
+        assert exc.value.response["Error"]["Code"] == "ResourceNotFoundException"
     finally:
         try:
             eks.delete_cluster(name=cn)
@@ -872,3 +1115,51 @@ def test_eks_k3s_run_kwargs_appends_node_labels():
     # Existing server flags must still be present — refactor must not regress them.
     assert "server" in run_kwargs["command"]
     assert "--https-listen-port=6443" in run_kwargs["command"]
+
+
+# ---------------------------------------------------------------------------
+# DescribeCluster endpoint (host-published port)
+# ---------------------------------------------------------------------------
+
+def test_eks_cluster_endpoint_defaults_to_host_form():
+    """Advertises the host-published port — reachable from the host
+    (aws eks update-kubeconfig + kubectl), not a docker-internal IP."""
+    from ministack.services import eks as eks_mod
+
+    assert eks_mod._cluster_endpoint(16443) == "https://localhost:16443"
+
+
+def test_eks_cluster_endpoint_honours_ministack_host(monkeypatch):
+    """Host form uses MINISTACK_HOST so a remote-host deployment is reachable."""
+    from ministack.services import eks as eks_mod
+
+    monkeypatch.setattr(eks_mod, "_MINISTACK_HOST", "10.0.0.5")
+    assert eks_mod._cluster_endpoint(16443) == "https://10.0.0.5:16443"
+
+
+def test_eks_restore_state_normalizes_endpoint_to_localhost():
+    """A persisted cluster restores with no running container, so its endpoint is
+    normalized to the stable https://localhost:{port} form (not a dead container
+    IP, and never empty — it is still reported ACTIVE)."""
+    from ministack.services import eks as eks_mod
+
+    eks_mod.reset()
+    try:
+        eks_mod._clusters["c-restore"] = {
+            "name": "c-restore",
+            "status": "ACTIVE",
+            "_port": 16443,
+            "endpoint": "https://172.18.0.9:6443",  # stale container IP from prev run
+            "_docker_id": "deadbeef",
+        }
+        state = eks_mod.get_state()
+        eks_mod.reset()
+
+        eks_mod.restore_state(state)
+
+        restored = eks_mod._clusters.get("c-restore")
+        assert restored["endpoint"] == "https://localhost:16443"
+        assert restored["_docker_id"] is None
+        assert restored["status"] == "ACTIVE"  # endpoint stays non-empty for ACTIVE
+    finally:
+        eks_mod.reset()

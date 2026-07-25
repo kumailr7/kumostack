@@ -41,8 +41,10 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from datetime import datetime, timezone
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import PERSIST_STATE, load_state
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
@@ -122,24 +124,24 @@ def _get_mock_response(sm_name: str, test_case: str, state_name: str, attempt: i
                 continue
     return None
 
-_state_machines = AccountScopedDict()
-_executions = AccountScopedDict()
-_task_tokens = AccountScopedDict()
-_tags = AccountScopedDict()
-_activities = AccountScopedDict()
-_activity_tasks = AccountScopedDict()
+_state_machines = AccountRegionScopedDict()
+_executions = AccountRegionScopedDict()
+_task_tokens = AccountRegionScopedDict()
+_tags = AccountRegionScopedDict()
+_activities = AccountRegionScopedDict()
+_activity_tasks = AccountRegionScopedDict()
 
 # version_arn -> {stateMachineVersionArn, stateMachineRevisionId,
 #                 description, creationDate, definition, roleArn, type,
 #                 loggingConfiguration}
 # Version ARN shape: arn:aws:states:<region>:<acct>:stateMachine:<name>:<N>
-_state_machine_versions = AccountScopedDict()
+_state_machine_versions = AccountRegionScopedDict()
 
 # alias_arn -> {stateMachineAliasArn, name, description,
 #               routingConfiguration: [{stateMachineVersionArn, weight}],
 #               creationDate, updateDate}
 # Alias ARN shape: arn:aws:states:<region>:<acct>:stateMachine:<name>:<aliasName>
-_state_machine_aliases = AccountScopedDict()
+_state_machine_aliases = AccountRegionScopedDict()
 
 # ── Persistence ────────────────────────────────────────────
 
@@ -165,7 +167,7 @@ def restore_state(data):
     _state_machine_aliases.update(data.get("state_machine_aliases", {}))
     # Executions that were RUNNING when the process died cannot resume —
     # mark them FAILED, following the ECS precedent (tasks → STOPPED).
-    for exc in _executions.values():
+    for exc in _executions.all_values():
         if exc.get("status") == "RUNNING":
             exc["status"] = "FAILED"
             exc["stopDate"] = now_iso()
@@ -573,12 +575,12 @@ def _start_execution(data):
         ],
     }
 
-    # Propagate the request's contextvars (notably the account ID set by
+    # Propagate the request's contextvars (notably the account ID and region set by
     # set_request_account_id) into the background execution thread. Python's
     # threading.Thread does NOT automatically copy contextvars, so without
-    # this snapshot the worker runs under the default account and silently
-    # fails to find the execution stored in AccountScopedDict under the
-    # caller's account. See issue #639.
+    # this snapshot the worker runs under the default scope and silently
+    # fails to find the execution stored under the caller's account and
+    # region. See issue #639.
     ctx_snapshot = contextvars.copy_context()
     threading.Thread(
         target=ctx_snapshot.run,
@@ -894,7 +896,13 @@ async def _get_activity_task(data):
 def _tag_resource(data):
     arn = data.get("resourceArn")
     new_tags = data.get("tags", [])
-    existing = _tags.setdefault(arn, [])
+    account_id, region, error = _tag_resource_scope_from_arn(arn)
+    if error:
+        return error
+    existing = _tags.get_scoped(account_id, region, arn)
+    if existing is None:
+        existing = []
+        _tags.set_scoped(account_id, region, arn, existing)
     existing_map = {t["key"]: i for i, t in enumerate(existing)}
     for tag in new_tags:
         idx = existing_map.get(tag["key"])
@@ -909,14 +917,57 @@ def _tag_resource(data):
 def _untag_resource(data):
     arn = data.get("resourceArn")
     keys_to_remove = set(data.get("tagKeys", []))
-    existing = _tags.get(arn, [])
-    _tags[arn] = [t for t in existing if t["key"] not in keys_to_remove]
+    account_id, region, error = _tag_resource_scope_from_arn(arn)
+    if error:
+        return error
+    existing = _tags.get_scoped(account_id, region, arn, [])
+    _tags.set_scoped(
+        account_id,
+        region,
+        arn,
+        [t for t in existing if t["key"] not in keys_to_remove],
+    )
     return json_response({})
 
 
 def _list_tags_for_resource(data):
     arn = data.get("resourceArn")
-    return json_response({"tags": _tags.get(arn, [])})
+    account_id, region, error = _tag_resource_scope_from_arn(arn)
+    if error:
+        return error
+    return json_response({"tags": _tags.get_scoped(account_id, region, arn, [])})
+
+
+def _tag_resource_scope_from_arn(arn):
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return None, None, _invalid_tag_resource_arn(arn)
+    if spec.service != "states" or not _is_stepfunctions_taggable_resource(spec.resource):
+        return None, None, _invalid_tag_resource_arn(arn)
+    if spec.account_id != get_account_id():
+        return None, None, error_response_json(
+            "AccessDeniedException",
+            "User is not authorized to access this resource.",
+            400,
+        )
+    if spec.region != get_region():
+        return None, None, error_response_json(
+            "InvalidArn",
+            f"Invalid ARN: {arn} is expected to be within the request region {get_region()}.",
+            400,
+        )
+    return spec.account_id, spec.region, None
+
+
+def _is_stepfunctions_taggable_resource(resource):
+    return isinstance(resource, str) and (
+        resource.startswith("stateMachine:") or resource.startswith("activity:")
+    )
+
+
+def _invalid_tag_resource_arn(arn):
+    return error_response_json("InvalidArn", f"Invalid resource ARN: {arn}", 400)
 
 
 # ---------------------------------------------------------------------------
@@ -1331,7 +1382,7 @@ def _execute_pass(state_def, raw_input, ctx=None):
         return output, _next_or_end(state_def)
 
     effective = _apply_input_path(state_def, raw_input)
-    effective = _apply_parameters(state_def, effective)
+    effective = _apply_parameters(state_def, effective, ctx)
 
     result = state_def.get("Result", effective)
     result = _apply_result_selector(state_def, result)
@@ -1350,6 +1401,7 @@ def _execute_task(state_def, raw_input, execution, ctx):
     query_language = _state_query_language(state_def, ctx)
 
     # SFN mock config — return canned response if configured (AWS SFN Local format)
+    _mock_throw = None
     if _sfn_mock_config and execution:
         test_case = execution.get("testCase", "")
         sm_name = ctx.get("StateMachine", {}).get("Name", "")
@@ -1360,23 +1412,27 @@ def _execute_task(state_def, raw_input, execution, ctx):
         if mock is not None:
             attempts[state_name] = attempt + 1
             if "Throw" in mock:
-                raise _ExecutionError(
+                # Feed the mocked error into the same Retry/Catch machinery a real
+                # task failure uses (#903). Raising here bypassed Catch entirely.
+                _mock_throw = _ExecutionError(
                     mock["Throw"].get("Error", "MockError"),
                     mock["Throw"].get("Cause", "Mocked failure"))
-            mock_result = mock.get("Return", {})
-            if query_language == "JSONata":
-                output = _apply_jsonata_output(
-                    state_def,
-                    raw_input,
-                    ctx,
-                    result=mock_result,
-                    default=mock_result,
-                )
             else:
-                result = _apply_result_selector(state_def, mock_result)
-                output = _apply_result_path(state_def, raw_input, result)
-                output = _apply_output_path(state_def, output)
-            return output, _next_or_end(state_def)
+                mock_result = mock.get("Return", {})
+                if query_language == "JSONata":
+                    output = _apply_jsonata_output(
+                        state_def,
+                        raw_input,
+                        ctx,
+                        result=mock_result,
+                        default=mock_result,
+                    )
+                    _apply_state_assign(state_def, raw_input, ctx, result=mock_result)
+                else:
+                    result = _apply_result_selector(state_def, mock_result)
+                    output = _apply_result_path(state_def, raw_input, result)
+                    output = _apply_output_path(state_def, output)
+                return output, _next_or_end(state_def)
 
     if is_callback:
         ctx["Task"] = {"Token": new_uuid()}
@@ -1402,6 +1458,9 @@ def _execute_task(state_def, raw_input, execution, ctx):
                     "resource": resource,
                 },
             })
+
+            if _mock_throw is not None:
+                raise _mock_throw
 
             if is_callback:
                 task_result = _invoke_with_callback(
@@ -1482,16 +1541,15 @@ def _execute_task(state_def, raw_input, execution, ctx):
 def _invoke_resource(resource, input_data):
     """Dispatch to Lambda or return a mock/passthrough."""
     if "states:::lambda:invoke" in resource:
-        func_name = input_data.get("FunctionName", "")
+        func_ref = input_data.get("FunctionName", "")
         payload = input_data.get("Payload", input_data)
-        if ":function:" in func_name:
-            func_name = func_name.split(":function:")[-1].split(":")[0]
-        result = _call_lambda(func_name, payload)
+        func_ref = _resolve_lambda_function_ref(func_ref, optimized=True)
+        result = _call_lambda(func_ref, payload)
         return {"StatusCode": 200, "Payload": result}
 
-    func_name = _extract_lambda_name(resource)
-    if func_name:
-        return _call_lambda(func_name, input_data)
+    func_ref = _extract_lambda_ref(resource)
+    if func_ref:
+        return _call_lambda(func_ref, input_data)
 
     # Activity resource — enqueue task and wait for worker to call GetActivityTask + SendTask*
     if ":activity:" in resource:
@@ -1554,17 +1612,42 @@ def _invoke_with_callback(resource, input_data, token, state_def):
         "event": evt, "result": None, "error": None, "heartbeat": None}
 
     clean_resource = resource.replace(".waitForTaskToken", "")
-    func_name = _extract_lambda_name(clean_resource)
-    if not func_name and "states:::lambda:invoke" in clean_resource:
-        func_name = input_data.get("FunctionName", "")
-        if ":function:" in func_name:
-            func_name = func_name.split(":function:")[-1].split(":")[0]
+    func_ref = _extract_lambda_ref(clean_resource)
+    if not func_ref and "states:::lambda:invoke" in clean_resource:
+        func_ref = input_data.get("FunctionName", "")
+        func_ref = _resolve_lambda_function_ref(func_ref, optimized=True)
 
-    if func_name:
+    if func_ref:
+        # For lambda:invoke[.waitForTaskToken] the resolved Parameters wrap the
+        # Lambda event under "Payload" (alongside "FunctionName"). Deliver only
+        # the Payload, mirroring the synchronous lambda:invoke path
+        # (_invoke_resource). Otherwise the handler receives the integration
+        # envelope ({"FunctionName": ..., "Payload": {...}}) instead of its
+        # input and fails to find the task token / its arguments.
+        lambda_payload = input_data.get("Payload", input_data) \
+            if isinstance(input_data, dict) else input_data
         try:
-            _call_lambda(func_name, input_data)
+            _call_lambda(func_ref, lambda_payload)
         except _ExecutionError:
             pass
+    else:
+        # Non-Lambda service integrations (sqs:sendMessage, sns:publish, …) must
+        # actually perform the call — delivering the payload that carries the
+        # task token — before we block for the callback. Without this the task is
+        # scheduled but nothing is ever sent and the execution hangs forever
+        # (#959). A failed integration fails the task (propagates) rather than
+        # hanging.
+        try:
+            for prefix, handler in _SERVICE_DISPATCH.items():
+                if clean_resource.startswith(prefix):
+                    handler(clean_resource, input_data)
+                    break
+            else:
+                if "aws-sdk:" in clean_resource:
+                    _invoke_aws_sdk_integration(clean_resource, input_data)
+        except _ExecutionError:
+            _task_tokens.pop(token, None)
+            raise
 
     timeout = state_def.get("TimeoutSeconds", 99999)
     if not evt.wait(timeout=timeout):
@@ -1584,28 +1667,35 @@ def _invoke_with_callback(resource, input_data, token, state_def):
         return result_raw
 
 
-def _call_lambda(func_name, event):
+def _call_lambda(func_ref, event):
     """Invoke a Lambda via the co-located lambda_svc module (synchronous)."""
     try:
         from kumostack.services import lambda_svc
     except ImportError:
-        logger.warning("lambda_svc unavailable; returning passthrough for %s", func_name)
+        logger.warning("lambda_svc unavailable; returning passthrough for %s", func_ref)
         return event
 
-    func = lambda_svc._functions.get(func_name)
-    if not func:
+    func, config, func_name = lambda_svc._get_func_record_for_ref(func_ref)
+    if not func or not config:
         raise _ExecutionError(
             "Lambda.ResourceNotFoundException",
             f"Function not found: {func_name}")
 
-    result = lambda_svc._execute_function(func, event)
+    exec_record = lambda_svc._execution_record_for_config(func, config)
+    result = lambda_svc._execute_function_with_config_scope(exec_record, event)
 
     if result.get("error"):
         body = result.get("body", {})
         if isinstance(body, dict):
+            # AWS reports a failed Lambda task with Error set to the function's
+            # errorType and Cause set to a JSON-encoded string of the error
+            # payload ({"errorType": ..., "errorMessage": ..., "trace": [...]}),
+            # NOT the bare errorMessage. Consumers (Catch handlers, downstream
+            # tasks) routinely json.loads(Cause) to read errorType/errorMessage,
+            # so emit the JSON form to match.
             raise _ExecutionError(
                 body.get("errorType", "Lambda.Unknown"),
-                body.get("errorMessage", str(body)))
+                json.dumps(body))
         raise _ExecutionError("Lambda.Unknown", str(body))
 
     body = result.get("body")
@@ -1810,7 +1900,7 @@ def _execute_parallel(state_def, raw_input, execution, ctx):
             errors[idx] = exc
 
     # Each branch runs in its own thread; propagate the parent's contextvars
-    # so AccountScopedDict lookups (account ID, region) keep resolving to the
+    # so scoped store lookups (account ID, region) keep resolving to the
     # current execution's tenant. Take a fresh copy_context() per branch —
     # a single Context cannot be entered by two threads concurrently. See
     # issue #639.
@@ -1876,7 +1966,7 @@ def _execute_map(state_def, raw_input, execution, ctx):
     workers = max_conc if max_conc > 0 else (len(items) or 1)
     # ThreadPoolExecutor workers do not inherit the submitting thread's
     # contextvars, so wrap each submitted callable with copy_context().run
-    # to keep AccountScopedDict lookups bound to the current tenant. Take
+    # to keep scoped store lookups bound to the current tenant. Take
     # a fresh copy_context() per item — a single Context cannot be entered
     # by two threads concurrently. See issue #639.
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -2885,7 +2975,7 @@ def _jsonata_now(*args):
     # With picture: XPath-3.1 date/time picture (subset — see
     # `_format_datetime_picture`). With timezone: "+HH:MM" / "-HH:MM" offset
     # applied before formatting.
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     if len(args) > 2:
         raise ValueError("$now expects 0, 1, or 2 arguments")
     now = datetime.now(timezone.utc)
@@ -3685,11 +3775,106 @@ def _find_matching_catcher(catchers, error):
 # ===================================================================
 
 def _extract_lambda_name(resource):
+    func_ref = _extract_lambda_ref(resource)
+    if not func_ref:
+        return None
+    if isinstance(func_ref, str) and func_ref.startswith("arn:"):
+        try:
+            spec = parse_arn(func_ref)
+        except ArnParseError:
+            return None
+        parts = spec.resource.split(":", 2)
+        if len(parts) >= 2 and parts[0] == "function":
+            return parts[1]
+    if isinstance(func_ref, str) and ":" in func_ref:
+        return func_ref.split(":", 1)[0]
+    return func_ref
+
+
+def _extract_lambda_ref(resource):
     if not resource:
         return None
     if ":function:" in resource:
-        return resource.split(":function:")[-1].split(":")[0]
+        return _resolve_lambda_function_ref(resource, optimized=False)
     return None
+
+
+def _resolve_lambda_function_name(value, optimized):
+    func_ref = _resolve_lambda_function_ref(value, optimized)
+    if not isinstance(func_ref, str):
+        return func_ref
+    if func_ref.startswith("arn:"):
+        try:
+            spec = parse_arn(func_ref)
+        except ArnParseError:
+            return func_ref
+        parts = spec.resource.split(":", 2)
+        if len(parts) >= 2 and parts[0] == "function":
+            return parts[1]
+    if ":" in func_ref:
+        return func_ref.split(":", 1)[0]
+    return func_ref
+
+
+def _lambda_ref_error(value, optimized, message):
+    if optimized:
+        raise _ExecutionError(
+            "Lambda.ResourceNotFoundException",
+            f"Function not found: {value}. {message}",
+        )
+    raise _ExecutionError(
+        "States.Runtime",
+        f"Invalid Lambda resource '{value}': {message}",
+    )
+
+
+def _resolve_lambda_function_ref(value, optimized):
+    if not value:
+        return value
+    if not isinstance(value, str):
+        return value
+    if ":function:" not in value:
+        return value
+
+    if not value.startswith("arn:"):
+        return value.split(":function:")[-1]
+
+    try:
+        spec = parse_arn(value)
+    except ArnParseError as exc:
+        _lambda_ref_error(value, optimized, str(exc))
+    if spec.service != "lambda":
+        _lambda_ref_error(value, optimized, f"expected Lambda ARN, got {spec.service!r}")
+
+    parts = spec.resource.split(":", 2)
+    if len(parts) < 2 or parts[0] != "function":
+        _lambda_ref_error(value, optimized, "expected resource shape function:<name>[:qualifier]")
+
+    if spec.account_id != get_account_id():
+        if optimized:
+            raise _ExecutionError(
+                "Lambda.AWSLambdaException",
+                f"User is not authorized to access function {value}",
+            )
+        raise _ExecutionError(
+            "States.Runtime",
+            f"The resource '{value}' belongs to a different account. "
+            f"Expected '{get_account_id()}', was '{spec.account_id}'.",
+        )
+
+    if spec.region != get_region():
+        if optimized:
+            raise _ExecutionError(
+                "Lambda.ResourceNotFoundException",
+                f"Functions from '{spec.region}' are not reachable in this region ('{get_region()}')",
+            )
+        raise _ExecutionError(
+            "States.Runtime",
+            f"The resource '{value}' belongs to a different region. "
+            f"Expected '{get_region()}', was '{spec.region}'.",
+        )
+
+    return value
 
 
 def _next_or_end(state_def):
@@ -3826,7 +4011,13 @@ def _invoke_sqs_send_message(resource, input_data):
         return input_data
     try:
         url = input_data.get("QueueUrl", "")
-        result = sqs._act_send_message(input_data, url)
+        payload = dict(input_data)
+        body = payload.get("MessageBody")
+        if isinstance(body, (dict, list)):
+            # SFN serialises an object MessageBody to JSON text before calling
+            # SQS (which requires a string body).
+            payload["MessageBody"] = json.dumps(body)
+        result = sqs._act_send_message(payload, url)
         return result
     except sqs._Err as e:
         raise _ExecutionError(f"SQS.{e.code}", e.message)
@@ -3918,13 +4109,15 @@ def _poll_ecs_tasks(cluster, task_arns):
 
 
 def _pascal_to_camel(d):
-    """Convert top-level PascalCase keys to camelCase for ECS internals."""
+    """Recursively convert PascalCase keys to camelCase for ECS internals."""
+    if isinstance(d, list):
+        return [_pascal_to_camel(v) for v in d]
     if not isinstance(d, dict):
         return d
     out = {}
     for k, v in d.items():
         new_key = k[0].lower() + k[1:] if k else k
-        out[new_key] = v
+        out[new_key] = _pascal_to_camel(v)
     return out
 
 
@@ -3999,6 +4192,18 @@ _AWS_SDK_ERROR_PREFIX = {
     "lambda": "Lambda",
 }
 
+_AWS_SDK_ERROR_CODE_OVERRIDES = {
+    "rds": {
+        "GlobalClusterNotFoundFault": "GlobalClusterNotFoundException",
+        "DBClusterNotFoundFault": "DbClusterNotFoundException",
+        "GlobalClusterAlreadyExistsFault": "GlobalClusterAlreadyExistsException",
+        "InvalidGlobalClusterStateFault": "InvalidGlobalClusterStateException",
+        "InvalidDBClusterStateFault": "InvalidDbClusterStateException",
+        "InvalidParameterCombination": "RdsException",
+        "InvalidParameterValue": "RdsException",
+    },
+}
+
 
 def _prefix_sdk_error(service_name: str, error_code: str) -> str:
     """Prefix an SDK error code with the service name, matching real AWS SFN behavior.
@@ -4009,6 +4214,7 @@ def _prefix_sdk_error(service_name: str, error_code: str) -> str:
     """
     if error_code.startswith("States."):
         return error_code
+    error_code = _AWS_SDK_ERROR_CODE_OVERRIDES.get(service_name, {}).get(error_code, error_code)
     prefix = _AWS_SDK_ERROR_PREFIX.get(service_name, service_name.capitalize())
     if error_code.startswith(f"{prefix}."):
         return error_code
@@ -4177,7 +4383,7 @@ _XML_LIST_WRAPPER_TAGS = frozenset({
     "OptionGroupMemberships", "StatusInfos", "DomainMemberships",
     "AssociatedRoles", "TagList", "ProcessorFeatures",
     "EnabledCloudwatchLogsExports", "GlobalClusterMembers",
-    "DBParameterGroups", "DBInstances", "DBClusters",
+    "DBParameterGroups", "DBInstances", "DBClusters", "Readers",
     "SupportedNetworkTypes",
 })
 _XML_BOOLEAN_FIELDS = frozenset({
@@ -4186,7 +4392,7 @@ _XML_BOOLEAN_FIELDS = frozenset({
     "CopyTagsToSnapshot", "IamDatabaseAuthenticationEnabled",
     "PerformanceInsightsEnabled", "HttpEndpointEnabled",
     "CrossAccountClone", "CustomerOwnedIpEnabled",
-    "IsStorageConfigUpgradeAvailable", "IsWriter",
+    "IsStorageConfigUpgradeAvailable", "IsWriter", "IsDataLossAllowed",
 })
 
 
@@ -4279,16 +4485,30 @@ _AWS_ACRONYMS = frozenset({
 })
 
 # Most query-protocol RDS params expand SDK-style "Db" to wire-format "DB".
-# RemoveFromGlobalCluster is the AWS-shape exception: its member is
+# Some global-cluster operations are AWS-shape exceptions: their members use
 # "DbClusterIdentifier", and sending "DBClusterIdentifier" is ignored.
 _QUERY_PARAM_NAME_OVERRIDES = {
     ("rds", "RemoveFromGlobalCluster"): {
         "DbClusterIdentifier": "DbClusterIdentifier",
     },
+    ("rds", "SwitchoverGlobalCluster"): {
+        "TargetDbClusterIdentifier": "TargetDbClusterIdentifier",
+    },
+    ("rds", "FailoverGlobalCluster"): {
+        "TargetDbClusterIdentifier": "TargetDbClusterIdentifier",
+    },
     ("ec2", "CreateSecurityGroup"): {
         "Description": "GroupDescription",
         "VpcId": "VpcId",
     },
+}
+
+# Lambda's REST/JSON wire format is mixed-case, so most SFN SDK-convention keys
+# already match the wire form (VpcConfig, TracingConfig, S3Bucket, ...). The
+# divergent all-caps acronym field below would otherwise be silently ignored by
+# the Lambda handler, which reads the wire name.
+_LAMBDA_SFN_TO_WIRE_KEYS = {
+    "KmsKeyArn": "KMSKeyArn",
 }
 
 
@@ -4320,6 +4540,17 @@ def _convert_params_to_api_names(data, name_overrides=None):
     if isinstance(data, list):
         return [_convert_params_to_api_names(item, name_overrides) for item in data]
     return data
+
+
+def _normalize_lambda_rest_input(input_data):
+    """Rename top-level Lambda REST keys whose SFN and wire names differ."""
+    if not isinstance(input_data, dict):
+        return input_data
+    out = dict(input_data)
+    for sfn_key, wire_key in _LAMBDA_SFN_TO_WIRE_KEYS.items():
+        if sfn_key in out and wire_key not in out:
+            out[wire_key] = out.pop(sfn_key)
+    return out
 
 
 def _api_name_to_sfn_key(name):
@@ -4617,8 +4848,10 @@ def _dispatch_aws_sdk_lambda_rest(service_info, service_name, action, input_data
         )
 
     pascal_action = action[0].upper() + action[1:] if action else action
-    input_data = input_data or {}
+    input_data = _normalize_lambda_rest_input(input_data or {})
     query_params = {}
+    method = "GET"
+    body = b""
 
     if pascal_action == "GetAlias":
         function_name = input_data.get("FunctionName", "")
@@ -4633,11 +4866,52 @@ def _dispatch_aws_sdk_lambda_rest(service_info, service_name, action, input_data
         qualifier = input_data.get("Qualifier")
         if qualifier is not None:
             query_params["Qualifier"] = str(qualifier)
+    elif pascal_action == "CreateFunction":
+        method = "POST"
+        path = "/2015-03-31/functions"
+        body = json.dumps(input_data).encode("utf-8")
+    elif pascal_action == "UpdateFunctionConfiguration":
+        method = "PUT"
+        function_name = input_data.get("FunctionName", "")
+        path = f"/2015-03-31/functions/{quote(str(function_name), safe=':')}/configuration"
+        body = json.dumps(
+            {key: value for key, value in input_data.items() if key != "FunctionName"}
+        ).encode("utf-8")
+    elif pascal_action == "UpdateFunctionCode":
+        method = "PUT"
+        function_name = input_data.get("FunctionName", "")
+        path = f"/2015-03-31/functions/{quote(str(function_name), safe=':')}/code"
+        body = json.dumps(
+            {key: value for key, value in input_data.items() if key != "FunctionName"}
+        ).encode("utf-8")
+    elif pascal_action == "CreateAlias":
+        method = "POST"
+        function_name = input_data.get("FunctionName", "")
+        path = f"/2015-03-31/functions/{quote(str(function_name), safe=':')}/aliases"
+        body = json.dumps(
+            {key: value for key, value in input_data.items() if key != "FunctionName"}
+        ).encode("utf-8")
+    elif pascal_action == "UpdateAlias":
+        method = "PUT"
+        function_name = input_data.get("FunctionName", "")
+        alias_name = input_data.get("Name", "")
+        path = (
+            "/2015-03-31/functions/"
+            f"{quote(str(function_name), safe=':')}/aliases/{quote(str(alias_name), safe='')}"
+        )
+        body = json.dumps(
+            {
+                key: value
+                for key, value in input_data.items()
+                if key not in ("FunctionName", "Name")
+            }
+        ).encode("utf-8")
     else:
         raise _ExecutionError(
             "States.Runtime",
             f"aws-sdk:{service_name}:{action} is not yet implemented in MiniStack "
-            "(lambda REST dispatcher covers getAlias and getFunctionConfiguration)",
+            "(lambda REST dispatcher covers createFunction, updateFunctionConfiguration, "
+            "updateFunctionCode, createAlias, updateAlias, getAlias, and getFunctionConfiguration)",
         )
 
     # Embed the current SFN execution's account ID as the access-key segment
@@ -4660,10 +4934,10 @@ def _dispatch_aws_sdk_lambda_rest(service_info, service_name, action, input_data
     # Drive the async handler synchronously. SFN state execution runs inside
     # the request's event loop, so spawning a fresh loop here would raise
     # "Cannot run the event loop while another loop is running". The Lambda
-    # REST handlers we dispatch to (GetAlias, GetFunctionConfiguration) only
-    # touch in-memory dicts and never await, so a single ``coro.send(None)``
-    # completes via ``StopIteration`` with the response tuple.
-    coro = handler("GET", path, headers, b"", query_params)
+    # REST handlers we dispatch to here only touch in-memory dicts and never
+    # await, so a single ``coro.send(None)`` completes via ``StopIteration``
+    # with the response tuple.
+    coro = handler(method, path, headers, body, query_params)
     try:
         coro.send(None)
     except StopIteration as stop:

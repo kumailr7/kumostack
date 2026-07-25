@@ -7,12 +7,15 @@ Query API (Action=...) — instances exist in memory only, no real VMs launched.
 
 Supports:
   Instances:       RunInstances, TerminateInstances, DescribeInstances,
-                   DescribeInstanceStatus, StartInstances, StopInstances, RebootInstances
+                   DescribeInstanceStatus, StartInstances, StopInstances, RebootInstances,
+                   AssociateIamInstanceProfile, DescribeIamInstanceProfileAssociations,
+                   DisassociateIamInstanceProfile, ReplaceIamInstanceProfileAssociation
   Images:          DescribeImages (stub — returns common AMI IDs)
   Security Groups: CreateSecurityGroup, DeleteSecurityGroup, DescribeSecurityGroups,
                    AuthorizeSecurityGroupIngress, RevokeSecurityGroupIngress,
                    AuthorizeSecurityGroupEgress, RevokeSecurityGroupEgress
   Key Pairs:       CreateKeyPair, DeleteKeyPair, DescribeKeyPairs, ImportKeyPair
+  Placement Grps:  CreatePlacementGroup, DeletePlacementGroup, DescribePlacementGroups
   VPC / Subnets:   DescribeVpcs, DescribeSubnets, DescribeAvailabilityZones
                    CreateVpc, CreateDefaultVpc, DeleteVpc, CreateSubnet, DeleteSubnet
                    CreateInternetGateway, DeleteInternetGateway, DescribeInternetGateways,
@@ -85,6 +88,7 @@ REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 _instances = AccountScopedDict()
 _security_groups = AccountScopedDict()
 _key_pairs = AccountScopedDict()
+_placement_groups = AccountScopedDict()  # group_name -> placement group record
 _vpcs = AccountScopedDict()
 _subnets = AccountScopedDict()
 _internet_gateways = AccountScopedDict()
@@ -107,6 +111,7 @@ _customer_gateways = AccountScopedDict()  # cgw_id -> customer gateway record
 _vpn_connections = AccountScopedDict()    # vpn_id -> VPN connection record
 _launch_templates = AccountScopedDict()   # lt_id -> launch template record (includes versions list)
 _fleets = AccountScopedDict()             # fleet_id -> fleet record
+_iam_instance_profile_associations = AccountScopedDict()  # assoc_id -> association record
 
 
 
@@ -117,6 +122,7 @@ def get_state():
         "instances": copy.deepcopy(_instances),
         "security_groups": copy.deepcopy(_security_groups),
         "key_pairs": copy.deepcopy(_key_pairs),
+        "placement_groups": copy.deepcopy(_placement_groups),
         "vpcs": copy.deepcopy(_vpcs),
         "subnets": copy.deepcopy(_subnets),
         "internet_gateways": copy.deepcopy(_internet_gateways),
@@ -139,6 +145,7 @@ def get_state():
         "vpn_connections": copy.deepcopy(_vpn_connections),
         "launch_templates": copy.deepcopy(_launch_templates),
         "fleets": copy.deepcopy(_fleets),
+        "iam_instance_profile_associations": copy.deepcopy(_iam_instance_profile_associations),
     }
 
 
@@ -147,6 +154,7 @@ def restore_state(data):
         _instances.update(data.get("instances", {}))
         _security_groups.update(data.get("security_groups", {}))
         _key_pairs.update(data.get("key_pairs", {}))
+        _placement_groups.update(data.get("placement_groups", {}))
         _vpcs.update(data.get("vpcs", {}))
         _subnets.update(data.get("subnets", {}))
         _internet_gateways.update(data.get("internet_gateways", {}))
@@ -169,6 +177,9 @@ def restore_state(data):
         _vpn_connections.update(data.get("vpn_connections", {}))
         _launch_templates.update(data.get("launch_templates", {}))
         _fleets.update(data.get("fleets", {}))
+        _iam_instance_profile_associations.update(
+            data.get("iam_instance_profile_associations", {})
+        )
 
 
 try:
@@ -302,6 +313,145 @@ async def handle_request(method, path, headers, body, query_params):
 # Instances
 # ---------------------------------------------------------------------------
 
+def _synthetic_iam_instance_profile_id(seed: str) -> str:
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest().upper()[:17]
+    return "AIPA" + digest
+
+
+def _resolve_iam_instance_profile(iam_arn="", iam_name="", allow_missing=False):
+    if not iam_arn and not iam_name:
+        return None, None
+
+    profile = None
+    try:
+        from ministack.services import iam as iam_svc
+
+        profile = iam_svc._lookup_instance_profile(name=iam_name, arn=iam_arn)
+    except Exception:
+        logger.debug("IAM instance profile lookup failed", exc_info=True)
+
+    if profile:
+        return {
+            "Arn": profile["Arn"],
+            "Id": profile["InstanceProfileId"],
+        }, None
+
+    if not allow_missing:
+        if iam_name and not iam_arn:
+            msg = (
+                f"Value ({iam_name}) for parameter iamInstanceProfile.name is invalid. "
+                "Invalid IAM Instance Profile name"
+            )
+        elif iam_arn and not iam_name:
+            msg = (
+                f"Value ({iam_arn}) for parameter iamInstanceProfile.arn is invalid. "
+                "Invalid IAM Instance Profile ARN"
+            )
+        else:
+            msg = f"The IAM instance profile '{iam_name or iam_arn}' does not exist"
+        return None, _error("InvalidParameterValue", msg, 400)
+
+    if not iam_arn and iam_name:
+        iam_arn = f"arn:aws:iam::{get_account_id()}:instance-profile/{iam_name}"
+    seed = iam_arn or iam_name
+    return {
+        "Arn": iam_arn,
+        "Id": _synthetic_iam_instance_profile_id(seed),
+    }, None
+
+
+def _iam_instance_profile_association_id(instance_id, iam_profile):
+    seed = f"{instance_id}:{iam_profile.get('Arn', '')}:{iam_profile.get('Id', '')}"
+    return "iip-assoc-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:17]
+
+
+def _find_active_iam_instance_profile_association(instance_id):
+    for assoc in _iam_instance_profile_associations.values():
+        if assoc.get("InstanceId") != instance_id:
+            continue
+        if assoc.get("State") == "associated":
+            return assoc
+    return None
+
+
+def _upsert_iam_instance_profile_association(
+    instance_id, iam_profile, association_id=None, state="associated"
+):
+    inst = _instances.get(instance_id)
+    if not inst:
+        return None
+
+    assoc_id = association_id or _iam_instance_profile_association_id(
+        instance_id, iam_profile
+    )
+    assoc = {
+        "AssociationId": assoc_id,
+        "InstanceId": instance_id,
+        "IamInstanceProfile": dict(iam_profile),
+        "State": state,
+        "Timestamp": _now_ts(),
+    }
+    _iam_instance_profile_associations[assoc_id] = assoc
+    inst["IamInstanceProfile"] = dict(iam_profile)
+    inst["IamInstanceProfileAssociationId"] = assoc_id
+    return assoc
+
+
+def _mark_iam_instance_profile_association_disassociated(assoc):
+    assoc["State"] = "disassociated"
+    assoc["Timestamp"] = _now_ts()
+    inst = _instances.get(assoc["InstanceId"])
+    if not inst:
+        return
+    if inst.get("IamInstanceProfileAssociationId") == assoc["AssociationId"]:
+        inst["IamInstanceProfile"] = None
+        inst.pop("IamInstanceProfileAssociationId", None)
+
+
+def _sync_iam_instance_profile_associations():
+    active_by_instance = {}
+    for assoc in _iam_instance_profile_associations.values():
+        inst = _instances.get(assoc["InstanceId"])
+        if assoc.get("State") != "associated":
+            continue
+        if not inst or inst["State"]["Name"] == "terminated":
+            _mark_iam_instance_profile_association_disassociated(assoc)
+            continue
+        if assoc["InstanceId"] in active_by_instance:
+            _mark_iam_instance_profile_association_disassociated(assoc)
+            continue
+        active_by_instance[assoc["InstanceId"]] = assoc
+        inst["IamInstanceProfile"] = dict(assoc["IamInstanceProfile"])
+        inst["IamInstanceProfileAssociationId"] = assoc["AssociationId"]
+
+    for inst in _instances.values():
+        if inst["State"]["Name"] == "terminated":
+            continue
+        iam_profile = inst.get("IamInstanceProfile")
+        if not iam_profile:
+            continue
+        if inst["InstanceId"] in active_by_instance:
+            continue
+        assoc = _upsert_iam_instance_profile_association(
+            inst["InstanceId"], iam_profile
+        )
+        active_by_instance[inst["InstanceId"]] = assoc
+
+
+def _matches_iam_instance_profile_association_filters(assoc, filters):
+    for name, vals in filters.items():
+        if name == "association-id":
+            if assoc["AssociationId"] not in vals:
+                return False
+        elif name == "instance-id":
+            if assoc["InstanceId"] not in vals:
+                return False
+        elif name == "state":
+            if assoc["State"] not in vals:
+                return False
+    return True
+
+
 def _launch_instances_internal(image_id, instance_type, subnet_id, count, key_name="", user_data="", sg_ids=None, requested_private_ip=None, iam_profile=None):
     now = _now_ts()
     if not sg_ids:
@@ -362,6 +512,7 @@ def _launch_instances_internal(image_id, instance_type, subnet_id, count, key_na
             "PublicIpAddress": _random_ip("54."),
             "PrivateDnsName": f"ip-{private_ip.replace('.', '-')}.ec2.internal",
             "PublicDnsName": f"ec2-{private_ip.replace('.', '-')}.compute-1.amazonaws.com",
+            "SourceDestCheck": True,
             "SecurityGroups": [
                 {"GroupId": sg, "GroupName": _security_groups.get(sg, {}).get("GroupName", sg)}
                 for sg in sg_ids
@@ -380,6 +531,8 @@ def _launch_instances_internal(image_id, instance_type, subnet_id, count, key_na
             "IamInstanceProfile": iam_profile,
         }
         _instances[instance_id] = inst
+        if iam_profile:
+            _upsert_iam_instance_profile_association(instance_id, iam_profile)
         created.append(inst)
     return created
 
@@ -407,12 +560,13 @@ def _run_instances(p):
     iam_name = _p(p, "IamInstanceProfile.Name")
     iam_profile = None
     if iam_arn or iam_name:
-        # Real AWS returns both Arn and Id. We synthesize a stable Id from the
-        # name/arn so DescribeInstances reads back as it does on AWS.
-        if not iam_arn and iam_name:
-            iam_arn = f"arn:aws:iam::{get_account_id()}:instance-profile/{iam_name}"
-        iam_id = "AIPA" + new_uuid().replace("-", "").upper()[:17]
-        iam_profile = {"Arn": iam_arn, "Id": iam_id}
+        iam_profile, err = _resolve_iam_instance_profile(
+            iam_arn=iam_arn,
+            iam_name=iam_name,
+            allow_missing=True,
+        )
+        if err:
+            return err
 
     created = _launch_instances_internal(
         image_id=image_id,
@@ -535,8 +689,143 @@ def _describe_instance_status(p):
                 f"<instanceStatusSet>{items}</instanceStatusSet>")
 
 
+def _associate_iam_instance_profile(p):
+    instance_id = _p(p, "InstanceId")
+    if instance_id not in _instances:
+        return _error(
+            "InvalidInstanceID.NotFound",
+            f"The instance ID '{instance_id}' does not exist",
+            400,
+        )
+
+    iam_profile, err = _resolve_iam_instance_profile(
+        iam_arn=_p(p, "IamInstanceProfile.Arn"),
+        iam_name=_p(p, "IamInstanceProfile.Name"),
+        allow_missing=False,
+    )
+    if err:
+        return err
+    if not iam_profile:
+        return _error("MissingParameter", "IamInstanceProfile is required", 400)
+
+    _sync_iam_instance_profile_associations()
+    assoc = _find_active_iam_instance_profile_association(instance_id)
+    if assoc:
+        if assoc.get("IamInstanceProfile") == iam_profile:
+            return _xml(
+                200,
+                "AssociateIamInstanceProfileResponse",
+                _iam_instance_profile_association_xml(
+                    assoc, tag="iamInstanceProfileAssociation"
+                ),
+            )
+        return _error(
+            "IncorrectState",
+            f"Instance '{instance_id}' already has an IAM instance profile association",
+            400,
+        )
+
+    assoc = _upsert_iam_instance_profile_association(instance_id, iam_profile)
+    return _xml(
+        200,
+        "AssociateIamInstanceProfileResponse",
+        _iam_instance_profile_association_xml(
+            assoc, tag="iamInstanceProfileAssociation"
+        ),
+    )
+
+
+def _describe_iam_instance_profile_associations(p):
+    _cleanup_terminated()
+    _sync_iam_instance_profile_associations()
+
+    association_ids = _parse_member_list(p, "AssociationId")
+    filters = _parse_filters(p)
+
+    items = []
+    for assoc in _iam_instance_profile_associations.values():
+        if association_ids and assoc["AssociationId"] not in association_ids:
+            continue
+        if not _matches_iam_instance_profile_association_filters(assoc, filters):
+            continue
+        items.append(_iam_instance_profile_association_xml(assoc))
+
+    return _xml(
+        200,
+        "DescribeIamInstanceProfileAssociationsResponse",
+        f"<iamInstanceProfileAssociationSet>{''.join(items)}</iamInstanceProfileAssociationSet>",
+    )
+
+
+def _disassociate_iam_instance_profile(p):
+    assoc_id = _p(p, "AssociationId")
+    _sync_iam_instance_profile_associations()
+    assoc = _iam_instance_profile_associations.get(assoc_id)
+    if not assoc:
+        return _error(
+            "InvalidAssociationID.NotFound",
+            f"Association '{assoc_id}' not found",
+            400,
+        )
+
+    _mark_iam_instance_profile_association_disassociated(assoc)
+    return _xml(
+        200,
+        "DisassociateIamInstanceProfileResponse",
+        _iam_instance_profile_association_xml(
+            assoc, tag="iamInstanceProfileAssociation"
+        ),
+    )
+
+
+def _replace_iam_instance_profile_association(p):
+    assoc_id = _p(p, "AssociationId")
+    _sync_iam_instance_profile_associations()
+    assoc = _iam_instance_profile_associations.get(assoc_id)
+    if not assoc:
+        return _error(
+            "InvalidAssociationID.NotFound",
+            f"Association '{assoc_id}' not found",
+            400,
+        )
+
+    instance_id = assoc["InstanceId"]
+    inst = _instances.get(instance_id)
+    if not inst or inst["State"]["Name"] == "terminated":
+        return _error(
+            "InvalidInstanceID.NotFound",
+            f"The instance ID '{instance_id}' does not exist",
+            400,
+        )
+
+    iam_profile, err = _resolve_iam_instance_profile(
+        iam_arn=_p(p, "IamInstanceProfile.Arn"),
+        iam_name=_p(p, "IamInstanceProfile.Name"),
+        allow_missing=False,
+    )
+    if err:
+        return err
+    if not iam_profile:
+        return _error("MissingParameter", "IamInstanceProfile is required", 400)
+
+    assoc = _upsert_iam_instance_profile_association(
+        instance_id,
+        iam_profile,
+        association_id=assoc_id,
+        state="associated",
+    )
+    return _xml(
+        200,
+        "ReplaceIamInstanceProfileAssociationResponse",
+        _iam_instance_profile_association_xml(
+            assoc, tag="iamInstanceProfileAssociation"
+        ),
+    )
+
+
 def _terminate_instances(p):
     ids = _parse_member_list(p, "InstanceId")
+    _sync_iam_instance_profile_associations()
     for iid in ids:
         if iid not in _instances:
             return _error("InvalidInstanceID.NotFound", f"The instance ID '{iid}' does not exist", 400)
@@ -547,6 +836,9 @@ def _terminate_instances(p):
             prev = inst["State"].copy()
             inst["State"] = {"Code": 48, "Name": "terminated"}
             inst["_terminated_at"] = time.time()
+            assoc = _find_active_iam_instance_profile_association(iid)
+            if assoc:
+                _mark_iam_instance_profile_association_disassociated(assoc)
             items += f"""<item>
                 <instanceId>{iid}</instanceId>
                 <previousState><code>{prev['Code']}</code><name>{prev['Name']}</name></previousState>
@@ -731,10 +1023,59 @@ def _describe_security_groups(p):
                 f"<securityGroupInfo>{items}</securityGroupInfo>")
 
 
-def _sg_rule_xml(sg_id, rule, idx, is_egress=False):
-    """Build <securityGroupRuleSet> items for Authorize responses (provider v6)."""
+def _sg_rule_id(sg_id, is_egress, rule):
+    """Stable, content-derived SecurityGroupRuleId.
+
+    Real AWS assigns a durable ``sgr-*`` id at authorize time, and Terraform's
+    ``aws_vpc_security_group_ingress_rule`` tracks that id across refreshes. An
+    index-based id shifts when any earlier rule is revoked, so a later
+    DescribeSecurityGroupRules by id returns nothing -- issue #1121. Deriving the
+    id from the rule's content keeps it stable regardless of list position or
+    process restarts, and identical between Authorize and Describe.
+    """
     direction = "egress" if is_egress else "ingress"
-    rule_id = f"sgr-{sg_id[3:]}-{direction}-{idx}"
+    parts = [
+        sg_id,
+        direction,
+        str(rule.get("IpProtocol", "-1")),
+        str(rule.get("FromPort", -1)),
+        str(rule.get("ToPort", -1)),
+    ]
+    for cidr in rule.get("IpRanges", []):
+        parts.append("v4:" + (cidr.get("CidrIp", "") if isinstance(cidr, dict) else str(cidr)))
+    for cidr6 in rule.get("Ipv6Ranges", []):
+        parts.append("v6:" + (cidr6.get("CidrIpv6", "") if isinstance(cidr6, dict) else str(cidr6)))
+    for pair in rule.get("UserIdGroupPairs", []):
+        parts.append("g:" + (pair.get("GroupId", "") if isinstance(pair, dict) else str(pair)))
+    for prefix in rule.get("PrefixListIds", []):
+        parts.append("p:" + (prefix.get("PrefixListId", "") if isinstance(prefix, dict) else str(prefix)))
+    digest = hashlib.sha1("|".join(parts).encode()).hexdigest()[:17]
+    return f"sgr-{digest}"
+
+
+def _sg_rule_arn(rule_id):
+    return f"arn:aws:ec2:{get_region()}:{get_account_id()}:security-group-rule/{rule_id}"
+
+
+def _sg_rule_tag_suffix(rule_id):
+    """AWS returns securityGroupRuleArn and a tagSet on every rule. Tags are
+    keyed by the content-derived rule id in the shared ``_tags`` store (set at
+    authorize time or via CreateTags on the sgr- id)."""
+    suffix = f"<securityGroupRuleArn>{_sg_rule_arn(rule_id)}</securityGroupRuleArn>"
+    tags = _tags.get(rule_id) or []
+    if tags:
+        tag_items = "".join(
+            f"<item><key>{_esc(t['Key'])}</key><value>{_esc(t.get('Value', ''))}</value></item>"
+            for t in tags
+        )
+        suffix += f"<tagSet>{tag_items}</tagSet>"
+    return suffix
+
+
+def _sg_rule_xml(sg_id, rule, is_egress=False):
+    """Build <securityGroupRuleSet> items for Authorize responses (provider v6)."""
+    rule_id = _sg_rule_id(sg_id, is_egress, rule)
+    suffix = _sg_rule_tag_suffix(rule_id)
     items = ""
     for cidr in rule.get("IpRanges", []):
         items += (f"<item>"
@@ -746,6 +1087,7 @@ def _sg_rule_xml(sg_id, rule, idx, is_egress=False):
                   f"<fromPort>{rule.get('FromPort', -1)}</fromPort>"
                   f"<toPort>{rule.get('ToPort', -1)}</toPort>"
                   f"<cidrIpv4>{cidr.get('CidrIp', '')}</cidrIpv4>"
+                  f"{suffix}"
                   f"</item>")
     for cidr6 in rule.get("Ipv6Ranges", []):
         items += (f"<item>"
@@ -757,6 +1099,23 @@ def _sg_rule_xml(sg_id, rule, idx, is_egress=False):
                   f"<fromPort>{rule.get('FromPort', -1)}</fromPort>"
                   f"<toPort>{rule.get('ToPort', -1)}</toPort>"
                   f"<cidrIpv6>{cidr6.get('CidrIpv6', '')}</cidrIpv6>"
+                  f"{suffix}"
+                  f"</item>")
+    for pair in rule.get("UserIdGroupPairs", []):
+        ref_gid = pair.get("GroupId", "") if isinstance(pair, dict) else str(pair)
+        items += (f"<item>"
+                  f"<securityGroupRuleId>{rule_id}</securityGroupRuleId>"
+                  f"<groupId>{sg_id}</groupId>"
+                  f"<groupOwnerId>{get_account_id()}</groupOwnerId>"
+                  f"<isEgress>{'true' if is_egress else 'false'}</isEgress>"
+                  f"<ipProtocol>{rule.get('IpProtocol', '-1')}</ipProtocol>"
+                  f"<fromPort>{rule.get('FromPort', -1)}</fromPort>"
+                  f"<toPort>{rule.get('ToPort', -1)}</toPort>"
+                  f"<referencedGroupInfo>"
+                  f"<groupId>{ref_gid}</groupId>"
+                  f"<userId>{get_account_id()}</userId>"
+                  f"</referencedGroupInfo>"
+                  f"{suffix}"
                   f"</item>")
     if not items:
         # No CIDR ranges — still return the rule (e.g. referenced group)
@@ -768,13 +1127,13 @@ def _sg_rule_xml(sg_id, rule, idx, is_egress=False):
                  f"<ipProtocol>{rule.get('IpProtocol', '-1')}</ipProtocol>"
                  f"<fromPort>{rule.get('FromPort', -1)}</fromPort>"
                  f"<toPort>{rule.get('ToPort', -1)}</toPort>"
+                 f"{suffix}"
                  f"</item>")
     return items
 
 
-def _revoked_sg_rule_xml(sg_id, rule, idx, is_egress=False):
-    direction = "egress" if is_egress else "ingress"
-    rule_id = f"sgr-{sg_id[3:]}-{direction}-{idx}"
+def _revoked_sg_rule_xml(sg_id, rule, is_egress=False):
+    rule_id = _sg_rule_id(sg_id, is_egress, rule)
 
     def _item(extra_xml=""):
         from_port = f"<fromPort>{rule['FromPort']}</fromPort>" if "FromPort" in rule else ""
@@ -831,20 +1190,42 @@ def _is_malformed_security_group_id(group_id):
     return group_id in _KNOWN_MALFORMED_SECURITY_GROUP_IDS or not _SECURITY_GROUP_ID_RE.fullmatch(group_id or "")
 
 
+def _sg_rule_tag_specifications(p):
+    """Tags from a ``TagSpecification`` whose ResourceType is
+    ``security-group-rule`` — how the AWS provider tags a rule at authorize
+    time (aws_vpc_security_group_ingress_rule). They apply to every rule
+    created by the call."""
+    tags = []
+    i = 1
+    while _p(p, f"TagSpecification.{i}.ResourceType"):
+        if _p(p, f"TagSpecification.{i}.ResourceType") == "security-group-rule":
+            j = 1
+            while _p(p, f"TagSpecification.{i}.Tag.{j}.Key"):
+                tags.append({
+                    "Key": _p(p, f"TagSpecification.{i}.Tag.{j}.Key"),
+                    "Value": _p(p, f"TagSpecification.{i}.Tag.{j}.Value", ""),
+                })
+                j += 1
+        i += 1
+    return tags
+
+
 def _authorize_sg_ingress(p):
     sg_id = _p(p, "GroupId")
     sg = _security_groups.get(sg_id)
     if not sg:
         return _error("InvalidGroup.NotFound", f"Security group {sg_id} not found", 400)
     rules = _parse_ip_permissions(p, "IpPermissions")
+    rule_tags = _sg_rule_tag_specifications(p)
     rule_items = ""
     for r in rules:
         # Idempotent: skip rules that already exist (matches egress behavior and avoids
         # Terraform InvalidPermission.Duplicate when the provider re-authorizes unchanged rules).
         if not any(_rules_match(r, existing) for existing in sg["IpPermissions"]):
             sg["IpPermissions"].append(r)
-            idx = len(sg["IpPermissions"]) - 1
-            rule_items += _sg_rule_xml(sg_id, r, idx, is_egress=False)
+            if rule_tags:
+                _tags[_sg_rule_id(sg_id, False, r)] = list(rule_tags)
+            rule_items += _sg_rule_xml(sg_id, r, is_egress=False)
     return _xml(200, "AuthorizeSecurityGroupIngressResponse",
                 f"<return>true</return><securityGroupRuleSet>{rule_items}</securityGroupRuleSet>")
 
@@ -856,6 +1237,9 @@ def _revoke_sg_ingress(p):
         return _error("InvalidGroup.NotFound", f"Security group {sg_id} not found", 400)
     rules = _parse_ip_permissions(p, "IpPermissions")
     for r in rules:
+        for existing in sg["IpPermissions"]:
+            if _rules_match(r, existing):
+                _tags.pop(_sg_rule_id(sg_id, False, existing), None)
         sg["IpPermissions"] = [e for e in sg["IpPermissions"] if not _rules_match(r, e)]
     return _xml(200, "RevokeSecurityGroupIngressResponse", "<return>true</return>")
 
@@ -866,12 +1250,14 @@ def _authorize_sg_egress(p):
     if not sg:
         return _error("InvalidGroup.NotFound", f"Security group {sg_id} not found", 400)
     rules = _parse_ip_permissions(p, "IpPermissions")
+    rule_tags = _sg_rule_tag_specifications(p)
     rule_items = ""
     for r in rules:
         if not any(_rules_match(r, existing) for existing in sg["IpPermissionsEgress"]):
             sg["IpPermissionsEgress"].append(r)
-            idx = len(sg["IpPermissionsEgress"]) - 1
-            rule_items += _sg_rule_xml(sg_id, r, idx, is_egress=True)
+            if rule_tags:
+                _tags[_sg_rule_id(sg_id, True, r)] = list(rule_tags)
+            rule_items += _sg_rule_xml(sg_id, r, is_egress=True)
     return _xml(200, "AuthorizeSecurityGroupEgressResponse",
                 f"<return>true</return><securityGroupRuleSet>{rule_items}</securityGroupRuleSet>")
 
@@ -884,9 +1270,10 @@ def _revoke_sg_egress(p):
     rules = _parse_ip_permissions(p, "IpPermissions")
     revoked_items = ""
     remaining = []
-    for idx, existing in enumerate(sg["IpPermissionsEgress"]):
+    for existing in sg["IpPermissionsEgress"]:
         if any(_rules_match(r, existing) for r in rules):
-            revoked_items += _revoked_sg_rule_xml(sg_id, existing, idx, is_egress=True)
+            revoked_items += _revoked_sg_rule_xml(sg_id, existing, is_egress=True)
+            _tags.pop(_sg_rule_id(sg_id, True, existing), None)
         else:
             remaining.append(existing)
     sg["IpPermissionsEgress"] = remaining
@@ -958,6 +1345,98 @@ def _import_key_pair(p):
         <keyName>{name}</keyName>
         <keyFingerprint>{fingerprint}</keyFingerprint>
         <keyPairId>{_key_pairs[name]['KeyPairId']}</keyPairId>""")
+
+
+# ---------------------------------------------------------------------------
+# Placement Groups
+# ---------------------------------------------------------------------------
+
+def _new_placement_group_id():
+    return "pg-" + "".join(random.choices(string.hexdigits[:16], k=17))
+
+
+def _placement_group_arn(name):
+    return f"arn:aws:ec2:{get_region()}:{get_account_id()}:placement-group/{name}"
+
+
+def _placement_group_inner_xml(pg, tag="placementGroup"):
+    # partitionCount is only meaningful for the "partition" strategy — real EC2
+    # omits it otherwise, so mirror that shape.
+    partition_xml = ""
+    if pg["Strategy"] == "partition" and pg.get("PartitionCount"):
+        partition_xml = f"<partitionCount>{pg['PartitionCount']}</partitionCount>"
+    return f"""<{tag}>
+        <groupName>{_esc(pg['GroupName'])}</groupName>
+        <state>{pg['State']}</state>
+        <strategy>{pg['Strategy']}</strategy>
+        <groupId>{pg['GroupId']}</groupId>
+        <groupArn>{pg['GroupArn']}</groupArn>
+        {partition_xml}
+        {_tag_set_xml(pg['GroupId'])}
+    </{tag}>"""
+
+
+def _create_placement_group(p):
+    name = _p(p, "GroupName")
+    if not name:
+        return _error("MissingParameter", "GroupName is required", 400)
+    if name in _placement_groups:
+        return _error("InvalidPlacementGroup.Duplicate",
+                      f"The placement group '{name}' already exists.", 400)
+    strategy = _p(p, "Strategy") or "cluster"
+    partition_count = _p(p, "PartitionCount")
+    pg_id = _new_placement_group_id()
+    record = {
+        "GroupName": name,
+        "GroupId": pg_id,
+        "State": "available",
+        "Strategy": strategy,
+        "GroupArn": _placement_group_arn(name),
+        "PartitionCount": int(partition_count) if partition_count else 0,
+    }
+    _placement_groups[name] = record
+    # Tags key off the group id so DescribeTags / tag: filters treat placement
+    # groups like every other tagged EC2 resource.
+    _parse_tag_specs(p, "placement-group", pg_id)
+    return _xml(200, "CreatePlacementGroupResponse",
+                _placement_group_inner_xml(record))
+
+
+def _delete_placement_group(p):
+    name = _p(p, "GroupName")
+    if name not in _placement_groups:
+        return _error("InvalidPlacementGroup.Unknown",
+                      f"The placement group '{name}' is unknown.", 400)
+    pg = _placement_groups.pop(name)
+    _tags.pop(pg["GroupId"], None)
+    return _xml(200, "DeletePlacementGroupResponse", "<return>true</return>")
+
+
+def _describe_placement_groups(p):
+    names = _parse_member_list(p, "GroupName")
+    for gn in names:
+        if gn not in _placement_groups:
+            return _error("InvalidPlacementGroup.Unknown",
+                          f"The placement group '{gn}' is unknown.", 400)
+    group_ids = _parse_member_list(p, "GroupId")
+    filters = _parse_filters(p)
+    items = ""
+    for pg in _placement_groups.values():
+        if names and pg["GroupName"] not in names:
+            continue
+        if group_ids and pg["GroupId"] not in group_ids:
+            continue
+        if not _resource_matches_tag_filters(pg["GroupId"], filters):
+            continue
+        if filters.get("group-name") and pg["GroupName"] not in filters["group-name"]:
+            continue
+        if filters.get("state") and pg["State"] not in filters["state"]:
+            continue
+        if filters.get("strategy") and pg["Strategy"] not in filters["strategy"]:
+            continue
+        items += _placement_group_inner_xml(pg, tag="item")
+    return _xml(200, "DescribePlacementGroupsResponse",
+                f"<placementGroupSet>{items}</placementGroupSet>")
 
 
 # ---------------------------------------------------------------------------
@@ -2289,6 +2768,7 @@ def _instance_xml(inst):
         <privateIpAddress>{inst['PrivateIpAddress']}</privateIpAddress>
         <publicDnsName>{inst['PublicDnsName']}</publicDnsName>
         <publicIpAddress>{inst['PublicIpAddress']}</publicIpAddress>
+        <sourceDestCheck>{'true' if inst.get('SourceDestCheck', True) else 'false'}</sourceDestCheck>
         <subnetId>{inst['SubnetId']}</subnetId>
         <vpcId>{inst['VpcId']}</vpcId>
         <architecture>{inst['Architecture']}</architecture>
@@ -2304,17 +2784,33 @@ def _instance_xml(inst):
     </item>"""
 
 
-def _inst_iam_xml(inst):
-    """Emit <iamInstanceProfile> block when an IAM profile is attached."""
-    iip = inst.get("IamInstanceProfile")
+def _iam_instance_profile_xml(iip, tag="iamInstanceProfile"):
     if not iip or not (iip.get("Arn") or iip.get("Id")):
         return ""
+    out = [f"<{tag}>"]
+    if iip.get("Arn"):
+        out.append(f"<arn>{_esc(iip['Arn'])}</arn>")
+    if iip.get("Id"):
+        out.append(f"<id>{_esc(iip['Id'])}</id>")
+    out.append(f"</{tag}>")
+    return "".join(out)
+
+
+def _iam_instance_profile_association_xml(assoc, tag="item"):
     return (
-        "<iamInstanceProfile>"
-        f"<arn>{_esc(iip.get('Arn', ''))}</arn>"
-        f"<id>{_esc(iip.get('Id', ''))}</id>"
-        "</iamInstanceProfile>"
+        f"<{tag}>"
+        f"<associationId>{_esc(assoc['AssociationId'])}</associationId>"
+        f"<instanceId>{_esc(assoc['InstanceId'])}</instanceId>"
+        f"{_iam_instance_profile_xml(assoc.get('IamInstanceProfile'), tag='iamInstanceProfile')}"
+        f"<state>{_esc(assoc['State'])}</state>"
+        f"<timestamp>{_esc(assoc['Timestamp'])}</timestamp>"
+        f"</{tag}>"
     )
+
+
+def _inst_iam_xml(inst):
+    """Emit <iamInstanceProfile> block when an IAM profile is attached."""
+    return _iam_instance_profile_xml(inst.get("IamInstanceProfile"))
 
 
 def _inst_bdm_xml(inst):
@@ -2358,13 +2854,25 @@ def _perm_xml(r):
         f"<item><cidrIp>{ip['CidrIp']}</cidrIp></item>"
         for ip in r.get("IpRanges", [])
     )
+    groups = ""
+    for pair in r.get("UserIdGroupPairs", []):
+        if isinstance(pair, dict):
+            gid = pair.get("GroupId", "")
+            uid = pair.get("UserId") or get_account_id()
+            gname = f"<groupName>{_esc(pair['GroupName'])}</groupName>" if pair.get("GroupName") else ""
+            vpc = f"<vpcId>{_esc(pair['VpcId'])}</vpcId>" if pair.get("VpcId") else ""
+            desc = f"<description>{_esc(pair['Description'])}</description>" if pair.get("Description") else ""
+        else:
+            gid, uid, gname, vpc, desc = str(pair), get_account_id(), "", "", ""
+        groups += (f"<item><userId>{uid}</userId><groupId>{gid}</groupId>"
+                   f"{gname}{vpc}{desc}</item>")
     from_port = f"<fromPort>{r['FromPort']}</fromPort>" if "FromPort" in r else ""
     to_port = f"<toPort>{r['ToPort']}</toPort>" if "ToPort" in r else ""
     return f"""<item>
         <ipProtocol>{r.get('IpProtocol','-1')}</ipProtocol>
         {from_port}{to_port}
         <ipRanges>{ranges}</ipRanges>
-        <ipv6Ranges/><prefixListIds/><groups/>
+        <ipv6Ranges/><prefixListIds/><groups>{groups}</groups>
     </item>"""
 
 
@@ -2660,6 +3168,48 @@ def _matches_filters(inst, filters):
     return True
 
 
+def _parse_legacy_ip_permission(params):
+    """Parse the legacy single-rule top-level parameter form of
+    Authorize/RevokeSecurityGroupIngress/Egress.
+
+    The AWS CLI (`--protocol/--port/--cidr/--source-group`), older SDKs, and
+    direct API callers send a single permission as flat top-level params
+    (IpProtocol, FromPort, ToPort, CidrIp, SourceSecurityGroupId/Name/OwnerId)
+    rather than the nested IpPermissions.N.* structure. Real EC2 accepts both;
+    MiniStack previously dropped the legacy form (issue #916).
+    """
+    proto = _p(params, "IpProtocol")
+    if not proto:
+        return []
+    rule = {"IpProtocol": proto, "IpRanges": [], "Ipv6Ranges": [],
+            "PrefixListIds": [], "UserIdGroupPairs": []}
+    from_port = _p(params, "FromPort")
+    to_port = _p(params, "ToPort")
+    if from_port:
+        rule["FromPort"] = int(from_port)
+    if to_port:
+        rule["ToPort"] = int(to_port)
+    cidr = _p(params, "CidrIp")
+    if cidr:
+        rule["IpRanges"].append({"CidrIp": cidr})
+    cidr6 = _p(params, "CidrIpv6")
+    if cidr6:
+        rule["Ipv6Ranges"].append({"CidrIpv6": cidr6})
+    src_gid = _p(params, "SourceSecurityGroupId")
+    src_gname = _p(params, "SourceSecurityGroupName")
+    if src_gid or src_gname:
+        pair = {}
+        if src_gid:
+            pair["GroupId"] = src_gid
+        if src_gname:
+            pair["GroupName"] = src_gname
+        owner = _p(params, "SourceSecurityGroupOwnerId")
+        if owner:
+            pair["UserId"] = owner
+        rule["UserIdGroupPairs"].append(pair)
+    return [rule]
+
+
 def _parse_ip_permissions(params, prefix):
     rules = []
     i = 1
@@ -2697,8 +3247,33 @@ def _parse_ip_permissions(params, prefix):
                 entry["Description"] = desc
             rule["Ipv6Ranges"].append(entry)
             j += 1
+        j = 1
+        while True:
+            gid = _p(params, f"{prefix}.{i}.Groups.{j}.GroupId")
+            gname = _p(params, f"{prefix}.{i}.Groups.{j}.GroupName")
+            if not gid and not gname:
+                break
+            pair = {}
+            if gid:
+                pair["GroupId"] = gid
+            if gname:
+                pair["GroupName"] = gname
+            uid = _p(params, f"{prefix}.{i}.Groups.{j}.UserId")
+            if uid:
+                pair["UserId"] = uid
+            vpc = _p(params, f"{prefix}.{i}.Groups.{j}.VpcId")
+            if vpc:
+                pair["VpcId"] = vpc
+            desc = _p(params, f"{prefix}.{i}.Groups.{j}.Description")
+            if desc:
+                pair["Description"] = desc
+            rule["UserIdGroupPairs"].append(pair)
+            j += 1
         rules.append(rule)
         i += 1
+    if not rules:
+        # Fall back to the legacy flat single-rule form (CLI --source-group/--cidr).
+        return _parse_legacy_ip_permission(params)
     return rules
 
 
@@ -2738,6 +3313,7 @@ def _now_ts():
 def _guess_resource_type(resource_id):
     _PREFIX_MAP = {
         "i-": "instance",
+        "sgr-": "security-group-rule",
         "sg-": "security-group",
         "vpc-": "vpc",
         "subnet-": "subnet",
@@ -2757,6 +3333,7 @@ def _guess_resource_type(resource_id):
         "pl-": "managed-prefix-list",
         "vgw-": "vpn-gateway",
         "cgw-": "customer-gateway",
+        "pg-": "placement-group",
         "ami-": "image",
         "tgw-": "transit-gateway",
     }
@@ -3934,6 +4511,7 @@ def reset():
     _instances.clear()
     _security_groups.clear()
     _key_pairs.clear()
+    _placement_groups.clear()
     _vpcs.clear()
     _subnets.clear()
     _internet_gateways.clear()
@@ -3956,6 +4534,7 @@ def reset():
     _vpn_connections.clear()
     _launch_templates.clear()
     _fleets.clear()
+    _iam_instance_profile_associations.clear()
     _init_defaults()
 
 
@@ -4142,43 +4721,40 @@ def _describe_addresses_attribute(p):
 
 
 def _describe_security_group_rules(p):
-    sg_ids = _parse_member_list(p, "SecurityGroupId") or []
+    # Terraform's aws_vpc_security_group_ingress_rule refreshes by calling
+    # DescribeSecurityGroupRules with SecurityGroupRuleIds and no group filter,
+    # so honoring the rule-id filter is what stops the "Resource Not Found During
+    # Refresh" in issue #1121. group-id / SecurityGroupId still scope the scan;
+    # with neither filter, AWS returns every rule in the region.
     filters = _parse_filters(p)
-    sg_id_filter = filters.get("group-id", [])
-    if sg_id_filter:
-        sg_ids = sg_id_filter
+    rule_id_filter = set(_parse_member_list(p, "SecurityGroupRuleId") or [])
+    rule_id_filter.update(filters.get("security-group-rule-id", []))
+
+    sg_ids = filters.get("group-id") or _parse_member_list(p, "SecurityGroupId") or []
+    if sg_ids:
+        groups = [(gid, _security_groups.get(gid)) for gid in sg_ids]
+    else:
+        groups = [(sg.get("GroupId"), sg) for sg in _security_groups.values()]
+
+    tag_filters = {k[len("tag:"):]: set(v) for k, v in filters.items() if k.startswith("tag:")}
+    tag_key_filter = set(filters.get("tag-key", []))
 
     items = ""
-    for sg_id in sg_ids:
-        sg = _security_groups.get(sg_id)
+    for sg_id, sg in groups:
         if not sg:
             continue
-        for i, rule in enumerate(sg.get("IpPermissions", [])):
-            rule_id = f"sgr-{sg_id[3:]}-ingress-{i}"
-            for cidr in rule.get("IpRanges", []):
-                items += f"""<item>
-                    <securityGroupRuleId>{rule_id}</securityGroupRuleId>
-                    <groupId>{sg_id}</groupId>
-                    <groupOwnerId>{get_account_id()}</groupOwnerId>
-                    <isEgress>false</isEgress>
-                    <ipProtocol>{rule.get('IpProtocol', '-1')}</ipProtocol>
-                    <fromPort>{rule.get('FromPort', -1)}</fromPort>
-                    <toPort>{rule.get('ToPort', -1)}</toPort>
-                    <cidrIpv4>{cidr.get('CidrIp', '')}</cidrIpv4>
-                </item>"""
-        for i, rule in enumerate(sg.get("IpPermissionsEgress", [])):
-            rule_id = f"sgr-{sg_id[3:]}-egress-{i}"
-            for cidr in rule.get("IpRanges", []):
-                items += f"""<item>
-                    <securityGroupRuleId>{rule_id}</securityGroupRuleId>
-                    <groupId>{sg_id}</groupId>
-                    <groupOwnerId>{get_account_id()}</groupOwnerId>
-                    <isEgress>true</isEgress>
-                    <ipProtocol>{rule.get('IpProtocol', '-1')}</ipProtocol>
-                    <fromPort>{rule.get('FromPort', -1)}</fromPort>
-                    <toPort>{rule.get('ToPort', -1)}</toPort>
-                    <cidrIpv4>{cidr.get('CidrIp', '')}</cidrIpv4>
-                </item>"""
+        for is_egress, key in ((False, "IpPermissions"), (True, "IpPermissionsEgress")):
+            for rule in sg.get(key, []):
+                rule_id = _sg_rule_id(sg_id, is_egress, rule)
+                if rule_id_filter and rule_id not in rule_id_filter:
+                    continue
+                if tag_filters or tag_key_filter:
+                    tmap = {t["Key"]: t.get("Value", "") for t in (_tags.get(rule_id) or [])}
+                    if any(tmap.get(k) not in vals for k, vals in tag_filters.items()):
+                        continue
+                    if tag_key_filter and not (tag_key_filter & set(tmap)):
+                        continue
+                items += _sg_rule_xml(sg_id, rule, is_egress=is_egress)
     return _xml(200, "DescribeSecurityGroupRulesResponse", f"<securityGroupRuleSet>{items}</securityGroupRuleSet>")
 
 
@@ -4937,10 +5513,11 @@ def _slot_from_lt_data(spec, lt_data):
     iam_arn = lt_iam.get("Arn")
     iam_name = lt_iam.get("Name")
     if iam_arn or iam_name:
-        if not iam_arn and iam_name:
-            iam_arn = f"arn:aws:iam::{get_account_id()}:instance-profile/{iam_name}"
-        iam_id = "AIPA" + new_uuid().replace("-", "").upper()[:17]
-        iam_profile = {"Arn": iam_arn, "Id": iam_id}
+        iam_profile, _ = _resolve_iam_instance_profile(
+            iam_arn=iam_arn,
+            iam_name=iam_name,
+            allow_missing=True,
+        )
     return {
         "spec": spec or {},
         "image_id": (lt_data or {}).get("ImageId") or "ami-00000000",
@@ -5013,6 +5590,10 @@ _ACTION_MAP = {
     "StopInstances": _stop_instances,
     "StartInstances": _start_instances,
     "RebootInstances": _reboot_instances,
+    "AssociateIamInstanceProfile": _associate_iam_instance_profile,
+    "DescribeIamInstanceProfileAssociations": _describe_iam_instance_profile_associations,
+    "DisassociateIamInstanceProfile": _disassociate_iam_instance_profile,
+    "ReplaceIamInstanceProfileAssociation": _replace_iam_instance_profile_association,
     "DescribeImages": _describe_images,
     "CreateSecurityGroup": _create_security_group,
     "DeleteSecurityGroup": _delete_security_group,
@@ -5025,6 +5606,9 @@ _ACTION_MAP = {
     "DeleteKeyPair": _delete_key_pair,
     "DescribeKeyPairs": _describe_key_pairs,
     "ImportKeyPair": _import_key_pair,
+    "CreatePlacementGroup": _create_placement_group,
+    "DeletePlacementGroup": _delete_placement_group,
+    "DescribePlacementGroups": _describe_placement_groups,
     "DescribeVpcs": _describe_vpcs,
     "CreateVpc": _create_vpc,
     "CreateDefaultVpc": _create_default_vpc,

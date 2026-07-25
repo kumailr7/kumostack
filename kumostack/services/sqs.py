@@ -31,21 +31,29 @@ import hashlib
 import json
 import logging
 import os
+import re
 import struct
 import threading
 import time
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from xml.sax.saxutils import escape as _esc
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import PERSIST_STATE, load_state
-from kumostack.core.responses import AccountScopedDict, get_account_id, get_region, md5_hash, new_uuid, now_iso
+from kumostack.core.responses import AccountRegionScopedDict, get_account_id, get_region, md5_hash, new_uuid, now_iso
 
 logger = logging.getLogger("sqs")
 
+# XML 1.0 forbidden characters (the complement of the allowed set AWS SQS documents:
+# #x9 | #xA | #xD | #x20-#xD7FF | #xE000-#xFFFD | #x10000-#x10FFFF):
+# everything below #x20 except #x9/#xA/#xD, the surrogate block #xD800-#xDFFF, and #xFFFE/#xFFFF.
+_INVALID_SQS_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+_ACCOUNT_ID_RE = re.compile(r"^\d{12}$")
+
 # ── Module-level state ──────────────────────────────────────
 
-_queues = AccountScopedDict()
-_queue_name_to_url = AccountScopedDict()
+_queues = AccountRegionScopedDict()
+_queue_name_to_url = AccountRegionScopedDict()
 _queues_lock = threading.Lock()
 
 
@@ -53,8 +61,8 @@ _queues_lock = threading.Lock()
 
 def get_state():
     # Both must be deepcopy(asd): dict(asd) iterates only the current
-    # request's tenant via AccountScopedDict.__iter__, so other tenants'
-    # name→url mappings would silently disappear at shutdown
+    # request's account/region via AccountRegionScopedDict.__iter__, so other
+    # tenants' name→url mappings would silently disappear at shutdown
     # serialisation. Same bug family as #492.
     return {
         "queues": copy.deepcopy(_queues),
@@ -65,18 +73,8 @@ def get_state():
 def restore_state(data):
     if data:
         _queues.update(data.get("queues", {}))
-        _queue_name_to_url.update(data.get("queue_name_to_url", {}))
-
-
-try:
-    _restored = load_state("sqs")
-    if _restored:
-        restore_state(_restored)
-except Exception:
-    import logging
-    logging.getLogger(__name__).exception(
-        "Failed to restore persisted state; continuing with fresh store"
-    )
+        _queue_name_to_url.clear()
+        _rebuild_queue_name_index()
 
 REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 DEFAULT_HOST = os.environ.get("MINISTACK_HOST", "localhost")
@@ -97,7 +95,106 @@ class _Err(Exception):
 # ── Queue URL ───────────────────────────────────────────────
 
 def _queue_url(name: str) -> str:
-    return f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/{get_account_id()}/{name}"
+    return _queue_url_for_account(get_account_id(), name)
+
+
+def _queue_url_for_account(account_id: str, name: str) -> str:
+    return f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/{account_id}/{name}"
+
+
+def _queue_name_from_arn_spec(spec) -> str | None:
+    if (
+        spec.partition != "aws"
+        or spec.service != "sqs"
+        or not spec.region
+        or not spec.account_id
+        or not spec.resource
+        or ":" in spec.resource
+        or "/" in spec.resource
+    ):
+        return None
+    return spec.resource
+
+
+def _queue_by_arn(arn: str) -> dict | None:
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return None
+    name = _queue_name_from_arn_spec(spec)
+    if not name:
+        return None
+    canonical_url = _queue_name_to_url.get_scoped(spec.account_id, spec.region, name)
+    if not canonical_url:
+        canonical_url = _queue_url_for_account(spec.account_id, name)
+    q = _queues.get_scoped(spec.account_id, spec.region, canonical_url)
+    if q and q.get("attributes", {}).get("QueueArn") == arn:
+        return q
+    return None
+
+
+def _queue_ref_from_urlish(url: str) -> tuple[str | None, str]:
+    if not url:
+        return None, ""
+    if "://" in url:
+        parts = urlparse(url).path.strip("/").split("/")
+    else:
+        parts = url.strip("/").split("/")
+    if len(parts) >= 2:
+        return parts[-2], parts[-1]
+    return None, parts[-1] if parts else url
+
+
+def _queue_scope_from_record(scoped_key, queue: dict) -> tuple[str, str, str, str] | None:
+    if len(scoped_key) == 3:
+        account_id, region, url = scoped_key
+    elif len(scoped_key) == 2:
+        account_id, url = scoped_key
+        region = get_region()
+    else:
+        return None
+
+    name = queue.get("name") if isinstance(queue, dict) else None
+    arn = queue.get("attributes", {}).get("QueueArn", "") if isinstance(queue, dict) else ""
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        spec = None
+    if spec:
+        parsed_name = _queue_name_from_arn_spec(spec)
+        if parsed_name:
+            account_id = spec.account_id
+            region = spec.region
+            name = parsed_name
+    if not name:
+        _account_from_url, name = _queue_ref_from_urlish(url)
+    if not name:
+        return None
+    return account_id, region, name, url
+
+
+def _rebuild_queue_name_index() -> None:
+    for scoped_key, queue in _queues.all_items():
+        scope = _queue_scope_from_record(scoped_key, queue)
+        if not scope:
+            continue
+        account_id, region, name, url = scope
+        _queue_name_to_url.set_scoped(account_id, region, name, url)
+
+
+# Import-time state restore. MUST run after restore_state AND every symbol it
+# references (here _rebuild_queue_name_index, defined just above) are bound —
+# otherwise the import-time call NameErrors, the bare except swallows it, and all
+# persisted SQS state is silently dropped on restart (the #492/#494 pattern).
+try:
+    _restored = load_state("sqs")
+    if _restored:
+        restore_state(_restored)
+except Exception:
+    import logging
+    logging.getLogger(__name__).exception(
+        "Failed to restore persisted state; continuing with fresh store"
+    )
 
 
 # ────────────────────────────────────────────────────────────
@@ -201,6 +298,47 @@ def _validate_redrive_policy(rp_str: str) -> None:
         raise _Err("InvalidAttributeValue", err_msg, 400)
     if mrc_int < 1 or mrc_int > 1000:
         raise _Err("InvalidAttributeValue", err_msg, 400)
+    try:
+        dlq_spec = parse_arn(dlta)
+    except ArnParseError:
+        raise _Err("InvalidAttributeValue", err_msg, 400)
+    if (
+        _queue_name_from_arn_spec(dlq_spec) is None
+        or dlq_spec.account_id != get_account_id()
+        or dlq_spec.region != get_region()
+    ):
+        raise _Err("InvalidAttributeValue", err_msg, 400)
+    if _queue_by_arn(dlta) is None:
+        raise _Err("InvalidAttributeValue", err_msg, 400)
+
+
+# Numeric attribute ranges per the SQS botocore service-2.json
+# (sqs-2012-11-05). Real AWS rejects out-of-range values at
+# CreateQueue/SetQueueAttributes time with InvalidAttributeValue (400).
+_NUMERIC_ATTR_RANGES = {
+    "VisibilityTimeout":            (0, 43200),       # 0 .. 12 h
+    "MaximumMessageSize":           (1024, 262144),   # 1 KB .. 256 KB
+    "MessageRetentionPeriod":       (60, 1209600),    # 1 min .. 14 days
+    "DelaySeconds":                 (0, 900),         # 0 .. 15 min
+    "ReceiveMessageWaitTimeSeconds":(0, 20),          # 0 .. 20 s
+    "KmsDataKeyReusePeriodSeconds": (60, 86400),      # 1 min .. 24 h
+}
+
+
+def _validate_numeric_attrs(attrs: dict) -> None:
+    for key, (lo, hi) in _NUMERIC_ATTR_RANGES.items():
+        if key not in attrs:
+            continue
+        raw = attrs[key]
+        try:
+            n = int(str(raw))
+        except (TypeError, ValueError):
+            raise _Err("InvalidAttributeValue",
+                       f"Invalid value for the parameter {key}.", 400)
+        if n < lo or n > hi:
+            raise _Err("InvalidAttributeValue",
+                       f"Invalid value for the parameter {key}. "
+                       f"Value must be between {lo} and {hi}.", 400)
 
 
 def _act_create_queue(data: dict, _u: str) -> dict:
@@ -212,6 +350,7 @@ def _act_create_queue(data: dict, _u: str) -> dict:
     attrs = data.get("Attributes") or {}
     if "RedrivePolicy" in attrs:
         _validate_redrive_policy(str(attrs["RedrivePolicy"]))
+    _validate_numeric_attrs(attrs)
     is_fifo = name.endswith(".fifo") or attrs.get("FifoQueue") == "true"
 
     if is_fifo and not name.endswith(".fifo"):
@@ -279,10 +418,20 @@ def _act_delete_queue(data: dict, qurl: str) -> dict:
 
 def _act_list_queues(data: dict, _u: str) -> dict:
     pfx = data.get("QueueNamePrefix", "")
-    mx = int(data.get("MaxResults", 1000))
     urls = [u for u, q in _queues.items()
             if not pfx or q["name"].startswith(pfx)]
-    return {"QueueUrls": urls[:mx]}
+    # AWS parity: without MaxResults the response holds up to 1000 results
+    # and never a NextToken; with MaxResults, NextToken is returned whenever
+    # more results remain.
+    max_results = data.get("MaxResults")
+    if max_results is None:
+        return {"QueueUrls": urls[:1000]}
+    mx = int(max_results)
+    start = int(data.get("NextToken") or 0)
+    resp: dict = {"QueueUrls": urls[start:start + mx]}
+    if start + mx < len(urls):
+        resp["NextToken"] = str(start + mx)
+    return resp
 
 
 def _act_get_queue_url(data: dict, _u: str) -> dict:
@@ -304,6 +453,11 @@ def _act_send_message(data: dict, qurl: str) -> dict:
     if not body_text:
         raise _Err("MissingParameter",
                     "The request must contain the parameter MessageBody.")
+    if _INVALID_SQS_CHARS_RE.search(body_text):
+        raise _Err(
+            "InvalidMessageContents",
+            "The message contains characters outside the allowed set.",
+        )
 
     # AWS SQS rejects messages exceeding the queue's MaximumMessageSize attribute
     # (default 262144 bytes; configurable up to 1 MiB / 1048576). Real AWS error
@@ -550,6 +704,7 @@ def _act_set_queue_attributes(data: dict, qurl: str) -> dict:
     incoming = data.get("Attributes") or {}
     if "RedrivePolicy" in incoming:
         _validate_redrive_policy(str(incoming["RedrivePolicy"]))
+    _validate_numeric_attrs(incoming)
     for k, v in incoming.items():
         q["attributes"][k] = str(v)
     q["attributes"]["LastModifiedTimestamp"] = str(int(time.time()))
@@ -815,8 +970,10 @@ def _get_q(url: str) -> dict:
         # This handles cases where the hostname differs (e.g. docker-compose
         # service name "kumostack" vs "localhost"), or when a bare queue name
         # is passed instead of a full URL (supported by AWS and some SDKs).
-        parts = url.rstrip("/").split("/")
-        name = parts[-1] if len(parts) >= 2 else url
+        account_id, name = _queue_ref_from_urlish(url)
+        if account_id and _ACCOUNT_ID_RE.match(account_id) and account_id != get_account_id():
+            raise _Err("QueueDoesNotExist",
+                        "The specified queue does not exist for this wsdl version.")
         canonical_url = _queue_name_to_url.get(name)
         if canonical_url:
             q = _queues.get(canonical_url)
@@ -947,8 +1104,7 @@ def _dlq_sweep(q: dict) -> None:
     if not max_rc or not arn:
         return
 
-    dlq = next((qq for qq in _queues.values()
-                if qq["attributes"].get("QueueArn") == arn), None)
+    dlq = _queue_by_arn(arn)
     if dlq is None:
         return
 
@@ -1151,10 +1307,11 @@ def _xml_resp(status: int, root: str, inner: str) -> tuple:
 
 def _xml_err_resp(code: str, msg: str, status: int = 400) -> tuple:
     sender_type = "Sender" if status < 500 else "Receiver"
+    legacy = _QUERY_COMPAT_CODES.get(code, code)
     body = (
         f'<?xml version="1.0" encoding="UTF-8"?>'
         f'<ErrorResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">'
-        f'<Error><Type>{sender_type}</Type><Code>{_esc(code)}</Code><Message>{_esc(msg)}</Message></Error>'
+        f'<Error><Type>{sender_type}</Type><Code>{_esc(legacy)}</Code><Message>{_esc(msg)}</Message></Error>'
         f'<RequestId>{new_uuid()}</RequestId>'
         f'</ErrorResponse>'
     ).encode("utf-8")
@@ -1183,6 +1340,8 @@ def _to_xml(action: str, result: dict) -> tuple:
         members = "".join(
             f"<QueueUrl>{_esc(u)}</QueueUrl>"
             for u in result.get("QueueUrls", []))
+        if "NextToken" in result:
+            members += f"<NextToken>{_esc(result['NextToken'])}</NextToken>"
         return _xml_resp(200, "ListQueuesResponse",
                          f"<ListQueuesResult>{members}</ListQueuesResult>")
 
@@ -1359,7 +1518,7 @@ def _normalise(action: str, params: dict) -> dict:
     for key in ("QueueName", "QueueUrl", "MessageBody", "ReceiptHandle",
                 "VisibilityTimeout", "DelaySeconds", "WaitTimeSeconds",
                 "MaxNumberOfMessages", "MaxResults", "QueueNamePrefix",
-                "MessageGroupId", "MessageDeduplicationId",
+                "NextToken", "MessageGroupId", "MessageDeduplicationId",
                 "ReceiveRequestAttemptId"):
         v = _p(params, key)
         if v:

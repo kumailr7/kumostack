@@ -26,6 +26,7 @@ Storage: In-memory (optionally backed by S3_DATA_DIR).
 """
 
 import base64
+import contextvars
 import copy
 import datetime as _dt
 import hashlib
@@ -33,8 +34,8 @@ import json
 import logging
 import os
 import re
-import struct
 import shutil
+import struct
 import threading
 import time
 import zlib
@@ -47,14 +48,17 @@ from xml.sax.saxutils import escape as _esc
 
 from defusedxml.ElementTree import fromstring
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import PERSIST_STATE, load_state
 from kumostack.core.responses import (
     AccountScopedDict,
     get_account_id,
+    get_region,
     iso_to_rfc7231,
     md5_hash,
     new_uuid,
     now_iso,
+    set_request_region,
     sha256_hash,
 )
 
@@ -170,6 +174,7 @@ _PRESERVED_HEADERS = (
     "content-disposition",
     "content-language",
     "expires",
+    "x-amz-website-redirect-location",
 )
 
 # Per botocore/data/s3/2006-03-01/service-2.json (StorageClass enum).
@@ -232,7 +237,11 @@ def _get_object_data(bucket_name: str, key: str, version_id: str | None = None) 
     if version_id:
         for v in _object_versions.get((bucket_name, key), []):
             if v["version_id"] == version_id:
-                return v.get("data")
+                data = v.get("data")
+                if data is not None:
+                    return data
+                obj = bucket["objects"].get(key)
+                return _read_body(bucket_name, key, obj) if obj else None
         return None
     obj = bucket["objects"].get(key)
     if obj is None:
@@ -496,9 +505,8 @@ def _find_xml_tag(parent, tag_name, ns=S3_NS):
     return el
 
 
-def _parse_tags_xml(body: bytes) -> dict:
-    xml_root = fromstring(body)
-    tags = {}
+def _iter_tag_pairs(xml_root):
+    """Yield (key, value) for each <Tag> element, preserving duplicate keys."""
     for tag_el in xml_root.iter():
         local = tag_el.tag.split("}")[-1] if "}" in tag_el.tag else tag_el.tag
         if local == "Tag":
@@ -512,8 +520,61 @@ def _parse_tags_xml(body: bytes) -> dict:
                 elif child_local == "Value":
                     val_text = child.text
             if key_text is not None:
-                tags[key_text] = val_text or ""
-    return tags
+                yield key_text, val_text or ""
+
+def _parse_tags_xml(body: bytes) -> dict:
+    """Parse a <Tag> set into {key: value}. Duplicate keys collapse last-writer-wins."""
+    return {key: value for key, value in _iter_tag_pairs(fromstring(body))}
+
+def _duplicate_tag_error(xml_root, resource: str = ""):
+    """Return the 500 InternalError that real S3 raises when a CreateBucket
+    <Tags> body repeats a tag key, or None when every key is unique."""
+    seen = set()
+    for key, _value in _iter_tag_pairs(xml_root):
+        if key in seen:
+            return _error(
+                "InternalError",
+                "We encountered an internal error. Please try again.",
+                500, resource,
+            )
+        seen.add(key)
+    return None
+
+
+def _validate_bucket_tags(tags: dict, resource: str = ""):
+    """Validate an already-parsed {key: value} bucket tag set against the S3
+    tag constraints. Returns an S3 error-response tuple on the first violation,
+    or None when the tag set is valid:
+      key   : 1-128 Unicode chars, cannot use the reserved "aws:" prefix
+      value : 0-256 Unicode chars (an empty value is allowed)
+      at most 50 tags per bucket.
+    """
+    for key, value in tags.items():
+        if not (1 <= len(key) <= 128):
+            return _error(
+                "InvalidTag",
+                "The TagKey you have provided is invalid",
+                400, resource,
+            )
+        if len(value) > 256:
+            return _error(
+                "InvalidTag",
+                "The TagValue you have provided is invalid",
+                400, resource,
+            )
+        if key.startswith("aws:"):
+            return _error(
+                "InvalidTag",
+                'User-defined tag keys can\'t start with "aws:". This prefix is '
+                'reserved for system tags. Remove "aws:" from your tag keys and '
+                "try again.",
+                400, resource,
+            )
+    if len(tags) > 50:
+        return _error(
+            "BadRequest", "Bucket tag count cannot be greater than 50", 400, resource,
+        )
+    return None
 
 
 def _extract_user_metadata(headers: dict) -> dict:
@@ -765,7 +826,7 @@ def _dispatch(
                 return _abort_multipart_upload(bucket, key, query_params)
             if "tagging" in query_params:
                 return _delete_object_tagging(bucket, key, query_params)
-            return _delete_object(bucket, key, headers)
+            return _delete_object(bucket, key, headers, query_params)
 
         return _error(
             "MethodNotAllowed",
@@ -981,16 +1042,29 @@ def _create_bucket(name: str, body: bytes, headers: dict = None):
         return 200, {"Location": f"/{name}"}, b""
 
     region = None
+    tags = {}
     if body:
         try:
             xml_root = fromstring(body)
             loc_el = _find_xml_tag(xml_root, "LocationConstraint")
             if loc_el is not None and loc_el.text:
                 region = loc_el.text
+
+            err = _duplicate_tag_error(xml_root, resource=f"/{name}")
+            if err is not None:
+                return err
+
+            tags = _parse_tags_xml(body)
         except Exception:
             pass
 
+    err = _validate_bucket_tags(tags, resource=f"/{name}")
+    if err is not None:
+        return err
+
     _buckets[name] = {"created": now_iso(), "objects": {}, "region": region}
+    if tags:
+        _bucket_tags[name] = tags
 
     if headers.get("x-amz-bucket-object-lock-enabled", "").lower() == "true":
         _bucket_object_lock[name] = {"enabled": True, "default_retention": None}
@@ -1435,6 +1509,7 @@ def _put_bucket_ownership_controls(name: str, body: bytes):
     if name not in _buckets:
         return _no_such_bucket(name)
     _buckets[name]["_ownership_controls"] = body.decode("utf-8", errors="replace")
+    _buckets[name].pop("_ownership_controls_deleted", None)
     return 200, {}, b""
 
 
@@ -1444,6 +1519,16 @@ def _get_bucket_ownership_controls(name: str):
     stored = _buckets[name].get("_ownership_controls")
     if stored:
         return 200, {"Content-Type": "application/xml"}, stored
+    if _buckets[name].get("_ownership_controls_deleted"):
+        # Explicitly deleted: real S3 returns 404 (not a default block) so the
+        # Terraform delete waiter can complete.
+        return _error(
+            "OwnershipControlsNotFoundError",
+            "The bucket ownership controls were not found",
+            404,
+            f"/{name}",
+        )
+    # Never configured: real S3 reports the default Object Ownership.
     root = Element("OwnershipControls", xmlns=S3_NS)
     rule = SubElement(root, "Rule")
     SubElement(rule, "ObjectOwnership").text = "BucketOwnerEnforced"
@@ -1454,6 +1539,7 @@ def _delete_bucket_ownership_controls(name: str):
     if name not in _buckets:
         return _no_such_bucket(name)
     _buckets[name].pop("_ownership_controls", None)
+    _buckets[name]["_ownership_controls_deleted"] = True
     return 204, {}, b""
 
 
@@ -1470,13 +1556,15 @@ def _get_public_access_block(name: str):
     stored = _buckets[name].get("_public_access_block")
     if stored:
         return 200, {"Content-Type": "application/xml"}, stored
-    # Default: all public access blocked
-    root = Element("PublicAccessBlockConfiguration", xmlns=S3_NS)
-    SubElement(root, "BlockPublicAcls").text = "true"
-    SubElement(root, "IgnorePublicAcls").text = "true"
-    SubElement(root, "BlockPublicPolicy").text = "true"
-    SubElement(root, "RestrictPublicBuckets").text = "true"
-    return 200, {"Content-Type": "application/xml"}, _xml_body(root)
+    # No configuration set (never put, or deleted): real S3 returns 404 rather
+    # than a default block, so DeletePublicAccessBlock is observable and the
+    # Terraform delete waiter can complete.
+    return _error(
+        "NoSuchPublicAccessBlockConfiguration",
+        "The public access block configuration was not found",
+        404,
+        f"/{name}",
+    )
 
 
 def _delete_public_access_block(name: str):
@@ -1499,7 +1587,13 @@ def _get_bucket_notification(name: str):
 def _put_bucket_notification(name: str, body: bytes):
     if name not in _buckets:
         return _no_such_bucket(name)
-    _bucket_notifications[name] = body.decode("utf-8", errors="replace")
+    raw = body.decode("utf-8", errors="replace")
+    configs = _parse_notification_config_raw(raw)
+    bucket_region = _notification_bucket_region(name)
+    validation_error = _validate_notification_configs(configs, bucket_region)
+    if validation_error:
+        return validation_error
+    _bucket_notifications[name] = raw
     # Fire the s3:TestEvent synchronously so it's delivered before PutBucketNotification
     # returns — matches AWS's effective behaviour and avoids a race where the
     # client polls the destination queue/topic before the background thread has
@@ -1685,8 +1779,12 @@ def _list_object_versions(bucket_name: str, query_params: dict):
 
 
 def _parse_notification_config(bucket_name: str) -> list[dict]:
-    """Parse the raw notification XML into structured config dicts."""
-    raw = _bucket_notifications.get(bucket_name)
+    """Parse the stored notification XML into structured config dicts."""
+    return _parse_notification_config_raw(_bucket_notifications.get(bucket_name))
+
+
+def _parse_notification_config_raw(raw: str | None) -> list[dict]:
+    """Parse raw notification XML into structured config dicts."""
     if not raw:
         return []
 
@@ -1769,6 +1867,93 @@ def _parse_notification_config(bucket_name: str) -> list[dict]:
     return configs
 
 
+def _invalid_notification_config(message: str) -> tuple:
+    return _error("InvalidArgument", message, 400)
+
+
+def _notification_bucket_region(bucket_name: str) -> str:
+    bucket = _buckets.get(bucket_name, {})
+    return bucket.get("region") or os.environ.get("MINISTACK_REGION", "us-east-1")
+
+
+_NOTIFICATION_TARGET_SERVICES = {
+    "sqs": "sqs",
+    "sns": "sns",
+    "lambda": "lambda",
+}
+
+
+def _queue_name_from_sqs_arn_spec(spec) -> str | None:
+    if spec.service != "sqs" or not spec.resource or ":" in spec.resource or "/" in spec.resource:
+        return None
+    return spec.resource
+
+
+def _topic_name_from_sns_arn_spec(spec) -> str | None:
+    if spec.service != "sns" or not spec.resource or ":" in spec.resource or "/" in spec.resource:
+        return None
+    return spec.resource
+
+
+def _lambda_name_from_arn_spec(spec) -> str | None:
+    if spec.service != "lambda":
+        return None
+    parts = spec.resource.split(":", 2)
+    if len(parts) < 2 or parts[0] != "function" or not parts[1]:
+        return None
+    return parts[1]
+
+
+def _parse_notification_target_arn(target_type: str, arn: str, bucket_region: str):
+    expected_service = _NOTIFICATION_TARGET_SERVICES.get(target_type)
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return None, "destination ARN is not in the correct format"
+
+    if spec.service != expected_service:
+        return spec, f"expected {expected_service} ARN, got {spec.service}"
+    if not spec.account_id:
+        return spec, "destination ARN must include an account ID"
+    if spec.account_id != get_account_id():
+        return spec, "destination account must match bucket owner account"
+    if not spec.region:
+        return spec, "destination ARN must include a region"
+    if spec.region != bucket_region:
+        return spec, "destination region must match bucket region"
+    return spec, None
+
+
+def _validate_notification_target_arn(target_type: str, arn: str, bucket_region: str) -> tuple | None:
+    spec, error = _parse_notification_target_arn(target_type, arn, bucket_region)
+    if error:
+        return _invalid_notification_config(
+            f"Unable to validate destination configuration: {error}"
+        )
+
+    if target_type == "sqs" and not _queue_name_from_sqs_arn_spec(spec):
+        return _invalid_notification_config(
+            "Unable to validate destination configuration: invalid SQS queue ARN"
+        )
+    if target_type == "sns" and not _topic_name_from_sns_arn_spec(spec):
+        return _invalid_notification_config(
+            "Unable to validate destination configuration: invalid SNS topic ARN"
+        )
+    if target_type == "lambda" and not _lambda_name_from_arn_spec(spec):
+        return _invalid_notification_config(
+            "Unable to validate destination configuration: invalid Lambda function ARN"
+        )
+    return None
+
+
+def _validate_notification_configs(configs: list[dict], bucket_region: str) -> tuple | None:
+    for cfg in configs:
+        error = _validate_notification_target_arn(cfg["type"], cfg["arn"], bucket_region)
+        if error:
+            return error
+    return None
+
+
 def _event_matches(event_name: str, patterns: list[str]) -> bool:
     """Check if event_name matches any of the configured event patterns.
 
@@ -1794,8 +1979,43 @@ def _key_matches_filter(key: str, prefix: str | None, suffix: str | None) -> boo
     return True
 
 
+# Amazon S3 → EventBridge uses a fixed set of detail-types (per event family) and a per-API `reason`. 
+# See https://docs.aws.amazon.com/AmazonS3/latest/userguide/EventBridge.html
+_S3_EVENTBRIDGE_DETAIL_TYPE = {
+    "ObjectCreated": "Object Created",
+    "ObjectRemoved": "Object Deleted",
+}
+# `reason` reflects the S3 API that produced the event.
+_S3_EVENTBRIDGE_REASON = {
+    "Put": "PutObject",
+    "Post": "POST Object",
+    "Copy": "CopyObject",
+    "CompleteMultipartUpload": "CompleteMultipartUpload",
+    "Delete": "DeleteObject",
+}
+
+
+def _s3_event_to_eventbridge(event_name: str) -> tuple[str, str]:
+    """Map an S3 notification event name (e.g. ``s3:ObjectCreated:Put``) to the EventBridge
+    ``detail-type`` and ``reason`` Amazon S3 emits. The detail-type is per-family, so any
+    sub-action of a family collapses to the same type, exactly as real S3 does."""
+    parts = event_name.split(":")
+    family = parts[1] if len(parts) > 1 else ""
+    action = parts[2] if len(parts) > 2 else ""
+    detail_type = _S3_EVENTBRIDGE_DETAIL_TYPE.get(family, "Object Created")
+    reason = _S3_EVENTBRIDGE_REASON.get(
+        action, "DeleteObject" if family == "ObjectRemoved" else "PutObject"
+    )
+    return detail_type, reason
+
+
 def _fire_s3_event(
-    bucket_name: str, key: str, event_name: str, size: int = 0, etag: str = ""
+    bucket_name: str,
+    key: str,
+    event_name: str,
+    size: int = 0,
+    etag: str = "",
+    deletion_type: str | None = None,
 ) -> None:
     """Build and deliver an S3 event notification. Best-effort — errors are logged."""
     try:
@@ -1804,6 +2024,7 @@ def _fire_s3_event(
         has_eventbridge = "EventBridgeConfiguration" in raw_xml
         if not configs and not has_eventbridge:
             return
+        bucket_region = _notification_bucket_region(bucket_name)
 
         short_event = event_name.replace("s3:", "", 1)
         event_time = now_iso()
@@ -1815,7 +2036,7 @@ def _fire_s3_event(
                 {
                     "eventVersion": "2.1",
                     "eventSource": "aws:s3",
-                    "awsRegion": os.environ.get("MINISTACK_REGION", "us-east-1"),
+                    "awsRegion": bucket_region,
                     "eventTime": event_time,
                     "eventName": short_event,
                     "userIdentity": {"principalId": "EXAMPLE"},
@@ -1858,11 +2079,11 @@ def _fire_s3_event(
                 payload["Records"][0]["s3"]["configurationId"] = cfg["id"]
 
                 if cfg["type"] == "sqs":
-                    _deliver_event_to_sqs(cfg["arn"], payload)
+                    _deliver_event_to_sqs(cfg["arn"], payload, bucket_region)
                 elif cfg["type"] == "sns":
-                    _deliver_event_to_sns(cfg["arn"], payload)
+                    _deliver_event_to_sns(cfg["arn"], payload, bucket_region)
                 elif cfg["type"] == "lambda":
-                    _deliver_event_to_lambda(cfg["arn"], payload)
+                    _deliver_event_to_lambda(cfg["arn"], payload, bucket_region)
             except Exception:
                 logger.exception(
                     "S3 notification delivery failed for config %s", cfg.get("id")
@@ -1872,27 +2093,39 @@ def _fire_s3_event(
         try:
             if has_eventbridge:
                 from kumostack.services import eventbridge as _eb
+                detail_type, reason = _s3_event_to_eventbridge(event_name)
+                detail = {
+                    "version": "0",
+                    "event-version": "1.0",
+                    "bucket": {"name": bucket_name},
+                    "object": {"key": key, "size": size, "etag": clean_etag, "sequencer": "0"},
+                    "request-id": request_id,
+                    "requester": get_account_id(),
+                    "source-ip-address": "127.0.0.1",
+                    "reason": reason,
+                }
+                if detail_type == "Object Deleted":
+                    # AWS always carries a deletion-type on Object Deleted; default to the
+                    # unversioned/permanent case unless the caller created a delete marker.
+                    detail["deletion-type"] = deletion_type or "Permanently Deleted"
                 eb_event = {
                     "EventId": request_id,
                     "Source": "aws.s3",
-                    "DetailType": event_name.replace("s3:", "Object ").replace(":", " ").replace("*", ""),
-                    "Detail": json.dumps({
-                        "version": "0",
-                        "bucket": {"name": bucket_name},
-                        "object": {"key": key, "size": size, "etag": clean_etag, "sequencer": "0"},
-                        "request-id": request_id,
-                        "requester": get_account_id(),
-                        "source-ip-address": "127.0.0.1",
-                        "reason": "PutObject",
-                    }),
+                    "DetailType": detail_type,
+                    "Detail": json.dumps(detail),
                     "EventBusName": "default",
                     "Time": event_time,
                     "Resources": [f"arn:aws:s3:::{bucket_name}"],
                     "Account": get_account_id(),
-                    "Region": os.environ.get("MINISTACK_REGION", "us-east-1"),
+                    "Region": bucket_region,
                 }
-                _eb._dispatch_event(eb_event)
-                logger.debug("S3→EventBridge: %s for %s/%s", event_name, bucket_name, key)
+                previous_region = get_region()
+                set_request_region(bucket_region)
+                try:
+                    _eb._dispatch_event(eb_event)
+                finally:
+                    set_request_region(previous_region)
+                logger.debug("S3→EventBridge: %s (%s) for %s/%s", detail_type, event_name, bucket_name, key)
         except Exception:
             logger.exception("S3→EventBridge delivery failed for %s/%s", bucket_name, key)
 
@@ -1902,12 +2135,30 @@ def _fire_s3_event(
         )
 
 
-def _deliver_event_to_sqs(arn: str, event_payload: dict) -> None:
+def _parse_delivery_notification_target(target_type: str, arn: str, bucket_region: str):
+    spec, error = _parse_notification_target_arn(target_type, arn, bucket_region)
+    if error:
+        logger.warning(
+            "S3 notification: invalid %s target ARN %s: %s",
+            target_type.upper(),
+            arn,
+            error,
+        )
+        return None
+    return spec
+
+
+def _deliver_event_to_sqs(arn: str, event_payload: dict, bucket_region: str) -> None:
     from kumostack.services import sqs as _sqs
 
-    queue_name = arn.rsplit(":", 1)[-1]
-    queue_url = _sqs._queue_url(queue_name)
-    queue = _sqs._queues.get(queue_url)
+    spec = _parse_delivery_notification_target("sqs", arn, bucket_region)
+    if not spec:
+        return
+    queue_name = _queue_name_from_sqs_arn_spec(spec)
+    if not queue_name:
+        logger.warning("S3 notification: invalid SQS queue ARN %s", arn)
+        return
+    queue = _sqs._queue_by_arn(str(spec))
     if not queue:
         logger.warning("S3 notification: SQS queue %s not found", queue_name)
         return
@@ -1928,9 +2179,15 @@ def _deliver_event_to_sqs(arn: str, event_payload: dict) -> None:
     logger.info("S3 notification → SQS %s", queue_name)
 
 
-def _deliver_event_to_sns(arn: str, event_payload: dict) -> None:
+def _deliver_event_to_sns(arn: str, event_payload: dict, bucket_region: str) -> None:
     from kumostack.services import sns as _sns
 
+    spec = _parse_delivery_notification_target("sns", arn, bucket_region)
+    if not spec:
+        return
+    if not _topic_name_from_sns_arn_spec(spec):
+        logger.warning("S3 notification: invalid SNS topic ARN %s", arn)
+        return
     topic = _sns._topics.get(arn)
     if not topic:
         logger.warning("S3 notification: SNS topic %s not found", arn)
@@ -1942,12 +2199,17 @@ def _deliver_event_to_sns(arn: str, event_payload: dict) -> None:
     logger.info("S3 notification → SNS %s", arn)
 
 
-def _deliver_event_to_lambda(arn: str, event_payload: dict) -> None:
+def _deliver_event_to_lambda(arn: str, event_payload: dict, bucket_region: str) -> None:
     from kumostack.services import lambda_svc as _lambda
 
-    func_name = arn.rsplit(":", 1)[-1]
-    func = _lambda._functions.get(func_name)
-    if not func:
+    spec = _parse_delivery_notification_target("lambda", arn, bucket_region)
+    if not spec:
+        return
+    if not _lambda_name_from_arn_spec(spec):
+        logger.warning("S3 notification: invalid Lambda function ARN %s", arn)
+        return
+    func, config, func_name = _lambda._get_func_record_for_ref(arn)
+    if not func or not config:
         logger.warning("S3 notification: Lambda function %s not found", func_name)
         return
 
@@ -1955,19 +2217,31 @@ def _deliver_event_to_lambda(arn: str, event_payload: dict) -> None:
     # (MaximumRetryAttempts, default 2) and routing to the function's DLQ /
     # DestinationConfig.OnFailure on final failure. Shared helper keeps the
     # semantics identical to direct Invoke(InvocationType=Event).
-    _lambda.invoke_async_with_retry(func, event_payload)
+    _lambda.invoke_async_with_retry(_lambda._execution_record_for_config(func, config), event_payload)
     logger.info("S3 notification → Lambda %s (async with retry+DLQ)", func_name)
 
 
 def _fire_s3_event_async(
-    bucket_name: str, key: str, event_name: str, size: int = 0, etag: str = ""
+    bucket_name: str,
+    key: str,
+    event_name: str,
+    size: int = 0,
+    etag: str = "",
+    deletion_type: str | None = None,
 ) -> None:
     """Fire S3 event notification in a background thread (non-blocking)."""
     if bucket_name not in _bucket_notifications:
         return
+    # threading.Thread does not copy contextvars, so without this snapshot the
+    # worker runs under the default account (000000000000): the account-scoped
+    # _bucket_notifications lookup comes back empty and the event is silently
+    # dropped for any non-default account, and SQS/SNS/Lambda/EventBridge
+    # targets resolve under the wrong account. Carry the request context in.
+    # See issue #876.
+    ctx = contextvars.copy_context()
     t = threading.Thread(
-        target=_fire_s3_event,
-        args=(bucket_name, key, event_name, size, etag),
+        target=ctx.run,
+        args=(_fire_s3_event, bucket_name, key, event_name, size, etag, deletion_type),
         daemon=True,
     )
     t.start()
@@ -1979,6 +2253,7 @@ def _fire_s3_test_event(bucket_name: str) -> None:
         configs = _parse_notification_config(bucket_name)
         if not configs:
             return
+        bucket_region = _notification_bucket_region(bucket_name)
         payload = {
             "Service": "Amazon S3",
             "Event": "s3:TestEvent",
@@ -1990,11 +2265,11 @@ def _fire_s3_test_event(bucket_name: str) -> None:
         for cfg in configs:
             try:
                 if cfg["type"] == "sqs":
-                    _deliver_event_to_sqs(cfg["arn"], payload)
+                    _deliver_event_to_sqs(cfg["arn"], payload, bucket_region)
                 elif cfg["type"] == "sns":
-                    _deliver_event_to_sns(cfg["arn"], payload)
+                    _deliver_event_to_sns(cfg["arn"], payload, bucket_region)
                 elif cfg["type"] == "lambda":
-                    _deliver_event_to_lambda(cfg["arn"], payload)
+                    _deliver_event_to_lambda(cfg["arn"], payload, bucket_region)
             except Exception:
                 logger.exception(
                     "S3 test-event delivery failed for config %s", cfg.get("id")
@@ -2005,7 +2280,9 @@ def _fire_s3_test_event(bucket_name: str) -> None:
 
 def _fire_s3_test_event_async(bucket_name: str) -> None:
     """Fire s3:TestEvent in a background thread (non-blocking)."""
-    t = threading.Thread(target=_fire_s3_test_event, args=(bucket_name,), daemon=True)
+    # Carry the request's account/region context into the thread (issue #876).
+    ctx = contextvars.copy_context()
+    t = threading.Thread(target=ctx.run, args=(_fire_s3_test_event, bucket_name), daemon=True)
     t.start()
 
 
@@ -2048,12 +2325,9 @@ def _put_object(bucket_name: str, key: str, body: bytes, headers: dict):
     pending_tags = None
     tagging_header = headers.get("x-amz-tagging", "")
     if tagging_header:
-        pending_tags = {k: v[0] for k, v in _parse_qs(tagging_header).items()}
+        pending_tags = {k: v[0] for k, v in _parse_qs(tagging_header, keep_blank_values=True).items()}
         if len(pending_tags) > 10:
             return _error("BadRequest", "Object tags cannot be greater than 10", 400)
-
-    if S3_PERSIST:
-        _persist_object(bucket_name, key, obj)
 
     _fire_s3_event_async(
         bucket_name, key, "s3:ObjectCreated:Put", size=obj["size"], etag=obj["etag"]
@@ -2074,12 +2348,18 @@ def _put_object(bucket_name: str, key: str, body: bytes, headers: dict):
             "size": obj["size"],
             "is_latest": True,
             "data": body,
+            "content_type": obj.get("content_type") or "application/octet-stream",
             "storage_class": obj.get("storage_class") or "STANDARD",
             "checksums": obj.get("checksums") or {},
         })
         # Mark all previous versions as not latest
         for v in _object_versions[vkey][:-1]:
             v["is_latest"] = False
+
+    # Persist only after the versioning block: the .meta.json sidecar must
+    # carry the version_id assigned above (#1058).
+    if S3_PERSIST:
+        _persist_object(bucket_name, key, obj)
 
     if pending_tags is not None:
         _object_tags[(bucket_name, key, obj.get("version_id"))] = pending_tags
@@ -2244,12 +2524,9 @@ def _post_object(bucket_name: str, body: bytes, headers: dict):
     pending_tags = None
     tagging_header = synth.get("x-amz-tagging", "")
     if tagging_header:
-        parsed = {k: v[0] for k, v in _parse_qs(tagging_header).items()}
+        parsed = {k: v[0] for k, v in _parse_qs(tagging_header, keep_blank_values=True).items()}
         if len(parsed) <= 10:
             pending_tags = parsed
-
-    if S3_PERSIST:
-        _persist_object(bucket_name, key, obj)
 
     _fire_s3_event_async(
         bucket_name, key, "s3:ObjectCreated:Post", size=obj["size"], etag=etag
@@ -2273,6 +2550,11 @@ def _post_object(bucket_name: str, body: bytes, headers: dict):
         })
         for v in _object_versions[vkey][:-1]:
             v["is_latest"] = False
+
+    # Persist only after the versioning block: the .meta.json sidecar must
+    # carry the version_id assigned above (#1058).
+    if S3_PERSIST:
+        _persist_object(bucket_name, key, obj)
 
     if pending_tags is not None:
         _object_tags[(bucket_name, key, version_id)] = pending_tags
@@ -2342,6 +2624,13 @@ def _apply_object_lock_from_headers(bucket_name: str, key: str, headers: dict):
         _object_legal_hold[(bucket_name, key)] = lock_legal
 
 
+def _object_tagging_count_header(bucket_name: str, key: str, version_id) -> dict:
+    """GetObject returns ``x-amz-tagging-count`` (boto3 surfaces it as ``TagCount``)
+    only when the object carries at least one tag; AWS omits the header at zero (#1026)."""
+    n = len(_object_tags.get((bucket_name, key, version_id), {}))
+    return {"x-amz-tagging-count": str(n)} if n else {}
+
+
 def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = None):
     query_params = query_params or {}
     bucket = _ensure_bucket(bucket_name)
@@ -2363,7 +2652,7 @@ def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = 
         for v in versions:
             if v["version_id"] == version_id:
                 resp_headers = {
-                    "Content-Type": "application/octet-stream",
+                    "Content-Type": v.get("content_type") or "application/octet-stream",
                     "ETag": v["etag"],
                     "Content-Length": str(v["size"]),
                     "Last-Modified": iso_to_rfc7231(v["last_modified"]),
@@ -2378,7 +2667,9 @@ def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = 
                         resp_headers[f"x-amz-checksum-{alg.lower()}"] = val
                     if stored:
                         resp_headers["x-amz-checksum-type"] = "FULL_OBJECT"
-                return 200, resp_headers, v["data"]
+                resp_headers.update(_object_tagging_count_header(bucket_name, key, version_id))
+                body = v["data"] if v["data"] is not None else _read_body(bucket_name, key, bucket["objects"].get(key, {}))
+                return 200, resp_headers, body
         return _error("NoSuchVersion", "The specified version does not exist.", 404, f"/{bucket_name}/{key}")
 
     if key not in bucket["objects"]:
@@ -2399,6 +2690,7 @@ def _get_object(bucket_name: str, key: str, headers: dict, query_params: dict = 
     include_checksums = checksum_mode_on and not range_header
     resp_headers = _object_response_headers(obj, bucket_name, key,
                                             include_checksums=include_checksums)
+    resp_headers.update(_object_tagging_count_header(bucket_name, key, obj.get("version_id")))
 
     body = _read_body(bucket_name, key, obj)
     if range_header:
@@ -2451,8 +2743,96 @@ def _head_object(bucket_name: str, key: str, headers: dict | None = None):
                                          include_checksums=include_checksums), b""
 
 
-def _delete_object(bucket_name: str, key: str, headers: dict | None = None):
+def _purge_current_object(bucket_name: str, key: str, bucket: dict):
+    """Remove the current object plus its key-level metadata and on-disk copy."""
+    bucket["objects"].pop(key, None)
+    _object_tags.pop((bucket_name, key, None), None)
+    _object_retention.pop((bucket_name, key), None)
+    _object_legal_hold.pop((bucket_name, key), None)
+    _object_acl.pop((bucket_name, key), None)
+    _delete_persisted_object(bucket_name, key)
+
+
+def _object_record_from_version(v: dict) -> dict:
+    """Rebuild a current-object record from a stored version entry.
+
+    Used when a version delete removes the current version/marker and an older
+    real version becomes current again — the version index keeps the body plus
+    the wire-relevant metadata (etag/size/checksums/storage class), which is
+    enough to serve Head/GetObject without a VersionId."""
+    return {
+        "body": v.get("data"),
+        "content_type": v.get("content_type", "application/octet-stream"),
+        "content_encoding": v.get("content_encoding"),
+        "etag": v["etag"],
+        "last_modified": v["last_modified"],
+        "size": v["size"],
+        "metadata": v.get("metadata", {}),
+        "preserved_headers": v.get("preserved_headers", {}),
+        "storage_class": v.get("storage_class") or "STANDARD",
+        "checksums": v.get("checksums") or {},
+        "version_id": v["version_id"],
+    }
+
+
+def _delete_object_version(bucket: dict, bucket_name: str, key: str,
+                           version_id: str) -> tuple[bool, bool]:
+    """Physically remove the exact version (or delete marker) addressed by
+    `version_id`, then reconcile the current-object pointer and is_latest flags.
+
+    Returns (found, was_delete_marker). `found` is False when no version matched
+    — S3 reports that as an error in the batch API but 204s the single delete.
+    """
+    vkey = (bucket_name, key)
+    versions = _object_versions.get(vkey)
+
+    # No tracked history: the only addressable version is the current object,
+    # exposed under the "null" id (objects put before versioning was enabled).
+    if not versions:
+        if version_id == "null" and key in bucket["objects"]:
+            _purge_current_object(bucket_name, key, bucket)
+            return True, False
+        return False, False
+
+    idx = next(
+        (i for i, v in enumerate(versions) if v["version_id"] == version_id), None
+    )
+    if idx is None:
+        if version_id == "null" and key in bucket["objects"]:
+            _purge_current_object(bucket_name, key, bucket)
+            return True, False
+        return False, False
+
+    removed = versions.pop(idx)
+    was_delete_marker = bool(removed.get("is_delete_marker"))
+    # Per-version tags travel with the version being removed.
+    _object_tags.pop((bucket_name, key, version_id), None)
+
+    if not versions:
+        # History is now empty — drop the index entry and the current object.
+        _object_versions.pop(vkey, None)
+        _purge_current_object(bucket_name, key, bucket)
+        return True, was_delete_marker
+
+    # The newest surviving entry becomes latest (list is append-ordered).
+    for v in versions:
+        v["is_latest"] = False
+    latest = versions[-1]
+    latest["is_latest"] = True
+
+    # Reconcile the current-object pointer (used by Head/GetObject without a
+    # VersionId): a delete marker hides the object; a real version exposes it.
+    if latest.get("is_delete_marker"):
+        bucket["objects"].pop(key, None)
+    else:
+        bucket["objects"][key] = _object_record_from_version(latest)
+    return True, was_delete_marker
+
+
+def _delete_object(bucket_name: str, key: str, headers: dict | None = None,
+                   query_params: dict | None = None):
     headers = headers or {}
+    query_params = query_params or {}
     bucket = _ensure_bucket(bucket_name)
     if bucket is None:
         return _no_such_bucket(bucket_name)
@@ -2461,6 +2841,23 @@ def _delete_object(bucket_name: str, key: str, headers: dict | None = None):
         lock_err = _check_object_lock(bucket_name, key, headers)
         if lock_err:
             return lock_err
+
+    # An explicit VersionId permanently removes exactly that version (or that
+    # specific delete marker) — it never creates a new marker. Only a delete
+    # WITHOUT a VersionId falls through to the delete-marker path below.
+    version_id = _qp(query_params, "versionId", "")
+    if version_id:
+        _found, was_delete_marker = _delete_object_version(
+            bucket, bucket_name, key, version_id
+        )
+        # S3 returns 204 whether or not the version existed, echoing the
+        # addressed VersionId (and delete-marker flag when one was removed).
+        resp_headers = {"x-amz-version-id": version_id}
+        if was_delete_marker:
+            resp_headers["x-amz-delete-marker"] = "true"
+        if _found:
+            _fire_s3_event_async(bucket_name, key, "s3:ObjectRemoved:Delete")
+        return 204, resp_headers, b""
 
     versioning = _bucket_versioning.get(bucket_name, "")
     if versioning in ("Enabled", "Suspended"):
@@ -2483,7 +2880,9 @@ def _delete_object(bucket_name: str, key: str, headers: dict | None = None):
         existed = key in bucket["objects"]
         bucket["objects"].pop(key, None)
         if existed:
-            _fire_s3_event_async(bucket_name, key, "s3:ObjectRemoved:Delete")
+            _fire_s3_event_async(
+                bucket_name, key, "s3:ObjectRemoved:Delete", deletion_type="Delete Marker Created"
+            )
         return 204, {"x-amz-delete-marker": "true", "x-amz-version-id": delete_marker_id}, b""
 
     existed = key in bucket["objects"]
@@ -2637,7 +3036,7 @@ def _copy_object(bucket_name: str, dest_key: str, headers: dict):
         tagging_header = headers.get("x-amz-tagging", "")
         if tagging_header:
             pending_dest_tags = {
-                k: v[0] for k, v in _parse_qs(tagging_header).items()
+                k: v[0] for k, v in _parse_qs(tagging_header, keep_blank_values=True).items()
             }
     else:
         src_tags = _object_tags.get(
@@ -2658,9 +3057,6 @@ def _copy_object(bucket_name: str, dest_key: str, headers: dict):
         _object_legal_hold[(bucket_name, dest_key)] = src_hold
     else:
         _object_legal_hold.pop((bucket_name, dest_key), None)
-
-    if S3_PERSIST:
-        _persist_object(bucket_name, dest_key, dest_obj)
 
     _fire_s3_event_async(
         bucket_name,
@@ -2691,6 +3087,11 @@ def _copy_object(bucket_name: str, dest_key: str, headers: dict):
         })
         for v in _object_versions[vkey][:-1]:
             v["is_latest"] = False
+
+    # Persist only after the versioning block: the .meta.json sidecar must
+    # carry the version_id assigned above (#1058).
+    if S3_PERSIST:
+        _persist_object(bucket_name, dest_key, dest_obj)
 
     dest_version_id = dest_obj.get("version_id")
     if pending_dest_tags is not None:
@@ -3494,43 +3895,64 @@ def _delete_objects(bucket_name: str, body: bytes, headers: dict = None):
     if quiet_el is not None and quiet_el.text and quiet_el.text.lower() == "true":
         quiet = True
 
-    deleted_keys: list[str] = []
-    errors: list[tuple] = []
+    deleted: list[dict] = []
+    errors: list[dict] = []
     for obj_el in list(xml_root.findall("{%s}Object" % S3_NS)) or list(
         xml_root.findall("Object")
     ):
         key_el = _find_xml_tag(obj_el, "Key")
-        if key_el is not None and key_el.text:
-            k = key_el.text
-            if k in bucket["objects"]:
-                lock_err = _check_object_lock(bucket_name, k, headers)
-                if lock_err:
-                    errors.append(
-                        (
-                            k,
-                            "AccessDenied",
-                            "Access Denied because object protected by object lock.",
-                        )
-                    )
-                    continue
+        if key_el is None or not key_el.text:
+            continue
+        k = key_el.text
+        vid_el = _find_xml_tag(obj_el, "VersionId")
+        version_id = vid_el.text if (vid_el is not None and vid_el.text) else ""
+
+        if k in bucket["objects"]:
+            lock_err = _check_object_lock(bucket_name, k, headers)
+            if lock_err:
+                errors.append({
+                    "key": k,
+                    "version_id": version_id,
+                    "code": "AccessDenied",
+                    "msg": "Access Denied because object protected by object lock.",
+                })
+                continue
+
+        if version_id:
+            # Explicit VersionId → permanently purge that exact version/marker.
+            # S3 reports the delete as successful even if the version was absent.
+            _found, was_marker = _delete_object_version(
+                bucket, bucket_name, k, version_id
+            )
+            deleted.append({"key": k, "version_id": version_id, "was_marker": was_marker})
+        else:
+            # No VersionId → plain delete of the current object.
             bucket["objects"].pop(k, None)
             _object_tags.pop((bucket_name, k, None), None)
             _object_retention.pop((bucket_name, k), None)
             _object_legal_hold.pop((bucket_name, k), None)
             _object_acl.pop((bucket_name, k), None)
             _delete_persisted_object(bucket_name, k)
-            deleted_keys.append(k)
+            deleted.append({"key": k, "version_id": "", "was_marker": False})
 
     resp = Element("DeleteResult", xmlns=S3_NS)
     if not quiet:
-        for k in deleted_keys:
-            d = SubElement(resp, "Deleted")
-            SubElement(d, "Key").text = k
-    for k, code, msg in errors:
-        e = SubElement(resp, "Error")
-        SubElement(e, "Key").text = k
-        SubElement(e, "Code").text = code
-        SubElement(e, "Message").text = msg
+        for d in deleted:
+            el = SubElement(resp, "Deleted")
+            SubElement(el, "Key").text = d["key"]
+            if d["version_id"]:
+                SubElement(el, "VersionId").text = d["version_id"]
+                # AWS echoes the delete-marker flag when the purged entry was one.
+                if d["was_marker"]:
+                    SubElement(el, "DeleteMarker").text = "true"
+                    SubElement(el, "DeleteMarkerVersionId").text = d["version_id"]
+    for e in errors:
+        el = SubElement(resp, "Error")
+        SubElement(el, "Key").text = e["key"]
+        if e["version_id"]:
+            SubElement(el, "VersionId").text = e["version_id"]
+        SubElement(el, "Code").text = e["code"]
+        SubElement(el, "Message").text = e["msg"]
 
     return 200, {"Content-Type": "application/xml"}, _xml_body(resp)
 
@@ -3782,9 +4204,6 @@ def _complete_multipart_upload(
     }
     bucket["objects"][key] = obj
 
-    if S3_PERSIST:
-        _persist_object(bucket_name, key, obj)
-
     del _multipart_uploads[upload_id]
 
     _fire_s3_event_async(
@@ -3813,6 +4232,11 @@ def _complete_multipart_upload(
         })
         for v in _object_versions[vkey][:-1]:
             v["is_latest"] = False
+
+    # Persist only after the versioning block: the .meta.json sidecar must
+    # carry the version_id assigned above (#1058).
+    if S3_PERSIST:
+        _persist_object(bucket_name, key, obj)
 
     root = Element("CompleteMultipartUploadResult", xmlns=S3_NS)
     s3_host = os.environ.get("MINISTACK_HOST", os.environ.get("AWS_ENDPOINT_URL", "http://localhost:4566"))
@@ -4035,6 +4459,7 @@ def _persist_object(bucket: str, key: str, obj):
                 "preserved_headers": obj.get("preserved_headers", {}),
                 "storage_class": obj.get("storage_class", "STANDARD"),
                 "checksums": obj.get("checksums", {}),
+                "version_id": obj.get("version_id"),
             }
             _atomic_write(fpath + ".meta.json", json.dumps(meta), text=True)
         # Drop body from in-memory record to save RAM
@@ -4197,6 +4622,22 @@ def _load_persisted_bucket(account_id, bucket_name, bucket_path):
                 "storage_class": meta.get("storage_class", "STANDARD"),
                 "checksums": meta.get("checksums", {}),
             }
+            if meta.get("version_id"):
+                bucket["objects"][key]["version_id"] = meta["version_id"]
+                vkey = (bucket_name, key)
+                scoped_vkey = (account_id, vkey)
+                if scoped_vkey not in _object_versions._data:
+                    _object_versions._data[scoped_vkey] = []
+                _object_versions._data[scoped_vkey].append({
+                    "version_id": meta["version_id"],
+                    "last_modified": meta.get("last_modified") or now_iso(),
+                    "etag": etag,
+                    "size": size,
+                    "is_latest": True,
+                    "data": None,
+                    "storage_class": meta.get("storage_class", "STANDARD"),
+                    "checksums": meta.get("checksums", {}),
+                })
 
 
 _load_persisted_data()

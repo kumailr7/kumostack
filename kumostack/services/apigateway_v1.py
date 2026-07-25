@@ -35,6 +35,7 @@ Control plane endpoints implemented:
   POST   /restapis/{id}/stages                                             — CreateStage
   GET    /restapis/{id}/stages                                             — GetStages
   GET    /restapis/{id}/stages/{stageName}                                 — GetStage
+  GET    /restapis/{id}/stages/{stageName}/exports/{exportType}            — GetExport
   PATCH  /restapis/{id}/stages/{stageName}                                 — UpdateStage
   DELETE /restapis/{id}/stages/{stageName}                                 — DeleteStage
   POST   /restapis/{id}/authorizers                                        — CreateAuthorizer
@@ -46,6 +47,15 @@ Control plane endpoints implemented:
   GET    /restapis/{id}/models                                             — GetModels
   GET    /restapis/{id}/models/{modelName}                                 — GetModel
   DELETE /restapis/{id}/models/{modelName}                                 — DeleteModel
+  POST   /restapis/{id}/documentation/parts                                — CreateDocumentationPart
+  GET    /restapis/{id}/documentation/parts                                — GetDocumentationParts
+  GET    /restapis/{id}/documentation/parts/{partId}                       — GetDocumentationPart
+  PATCH  /restapis/{id}/documentation/parts/{partId}                       — UpdateDocumentationPart
+  DELETE /restapis/{id}/documentation/parts/{partId}                       — DeleteDocumentationPart
+  PUT    /restapis/{id}/gatewayresponses/{responseType}                    — PutGatewayResponse
+  GET    /restapis/{id}/gatewayresponses                                   — GetGatewayResponses
+  GET    /restapis/{id}/gatewayresponses/{responseType}                    — GetGatewayResponse
+  DELETE /restapis/{id}/gatewayresponses/{responseType}                    — DeleteGatewayResponse
   GET    /apikeys                                                          — GetApiKeys
   POST   /apikeys                                                          — CreateApiKey
   GET    /apikeys/{keyId}                                                  — GetApiKey
@@ -82,6 +92,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import yaml
+
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.responses import AccountScopedDict, get_account_id, get_region, new_uuid
 from kumostack.services.apigateway import _timeout_from_env, _urlopen_async
 
@@ -101,18 +114,90 @@ REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 # All per-tenant state uses AccountScopedDict so the same REST API id in two
 # different accounts never collides and list operations don't leak cross-account.
 _rest_apis = AccountScopedDict()           # rest_api_id -> RestApi
+_rest_api_regions = AccountScopedDict()    # rest_api_id -> owning region
 _resources = AccountScopedDict()           # rest_api_id -> {resource_id -> Resource}
 _stages_v1 = AccountScopedDict()           # rest_api_id -> {stage_name -> Stage}
 _deployments_v1 = AccountScopedDict()      # rest_api_id -> {deployment_id -> Deployment}
 _authorizers_v1 = AccountScopedDict()      # rest_api_id -> {authorizer_id -> Authorizer}
 _models = AccountScopedDict()              # rest_api_id -> {model_id -> Model}
 _api_keys = AccountScopedDict()            # key_id -> ApiKey
+_api_key_regions = AccountScopedDict()     # key_id -> owning region
 _usage_plans = AccountScopedDict()         # plan_id -> UsagePlan
+_usage_plan_regions = AccountScopedDict()  # plan_id -> owning region
 _usage_plan_keys = AccountScopedDict()     # plan_id -> {key_id -> UsagePlanKey}
 _domain_names = AccountScopedDict()        # domain_name -> DomainName
+_domain_name_regions = AccountScopedDict()  # domain_name -> owning region
 _base_path_mappings = AccountScopedDict()  # domain_name -> {base_path -> BasePathMapping}
 _v1_tags = AccountScopedDict()             # resource_arn -> {key -> value}
 _account_settings = AccountScopedDict()    # singleton per account: stores fields set via UpdateAccount
+_gateway_responses = AccountScopedDict()   # rest_api_id -> {response_type -> customized GatewayResponse}
+_documentation_parts = AccountScopedDict()  # rest_api_id -> {part_id -> DocumentationPart}
+
+
+_GATEWAY_RESPONSE_TYPES = (
+    "DEFAULT_4XX",
+    "DEFAULT_5XX",
+    "RESOURCE_NOT_FOUND",
+    "UNAUTHORIZED",
+    "INVALID_API_KEY",
+    "ACCESS_DENIED",
+    "AUTHORIZER_FAILURE",
+    "AUTHORIZER_CONFIGURATION_ERROR",
+    "INVALID_SIGNATURE",
+    "EXPIRED_TOKEN",
+    "MISSING_AUTHENTICATION_TOKEN",
+    "INTEGRATION_FAILURE",
+    "INTEGRATION_TIMEOUT",
+    "API_CONFIGURATION_ERROR",
+    "UNSUPPORTED_MEDIA_TYPE",
+    "BAD_REQUEST_PARAMETERS",
+    "BAD_REQUEST_BODY",
+    "REQUEST_TOO_LARGE",
+    "THROTTLED",
+    "QUOTA_EXCEEDED",
+    "WAF_FILTERED",
+)
+
+_DEFAULT_GATEWAY_RESPONSE_STATUS_CODES = {
+    "RESOURCE_NOT_FOUND": "404",
+    "UNAUTHORIZED": "401",
+    "INVALID_API_KEY": "403",
+    "ACCESS_DENIED": "403",
+    "AUTHORIZER_FAILURE": "500",
+    "AUTHORIZER_CONFIGURATION_ERROR": "500",
+    "INVALID_SIGNATURE": "403",
+    "EXPIRED_TOKEN": "403",
+    "MISSING_AUTHENTICATION_TOKEN": "403",
+    "INTEGRATION_FAILURE": "504",
+    "INTEGRATION_TIMEOUT": "504",
+    "API_CONFIGURATION_ERROR": "500",
+    "UNSUPPORTED_MEDIA_TYPE": "415",
+    "BAD_REQUEST_PARAMETERS": "400",
+    "BAD_REQUEST_BODY": "400",
+    "REQUEST_TOO_LARGE": "413",
+    "THROTTLED": "429",
+    "QUOTA_EXCEEDED": "429",
+    "WAF_FILTERED": "403",
+}
+
+_DEFAULT_GATEWAY_RESPONSE_TEMPLATE = '{"message":$context.error.messageString}'
+
+_DOCUMENTATION_LOCATION_TYPES = frozenset(
+    {
+        "API",
+        "AUTHORIZER",
+        "MODEL",
+        "RESOURCE",
+        "METHOD",
+        "PATH_PARAMETER",
+        "QUERY_PARAMETER",
+        "REQUEST_HEADER",
+        "REQUEST_BODY",
+        "RESPONSE",
+        "RESPONSE_HEADER",
+        "RESPONSE_BODY",
+    }
+)
 
 
 # ---- Helpers ----
@@ -478,7 +563,20 @@ def _match_recursive(resources, parent_id, segments, params):
     segment = segments[0]
     remaining = segments[1:]
     children = [r for r in resources.values() if r.get("parentId") == parent_id]
-    for child in children:
+
+    # AWS resolves by specificity, not resource-creation order: a literal
+    # segment wins over a {param} sibling, which wins over a greedy {proxy+}.
+    # Without this, a {id} resource registered before a literal sibling would
+    # match first and shadow it (405 on the literal path).
+    def _precedence(res):
+        pp = res.get("pathPart", "")
+        if pp.startswith("{") and pp.endswith("+}"):
+            return 2  # greedy {proxy+} — lowest priority
+        if pp.startswith("{") and pp.endswith("}"):
+            return 1  # path parameter
+        return 0      # literal segment — highest priority
+
+    for child in sorted(children, key=_precedence):
         pp = child.get("pathPart", "")
         if pp.endswith("+}") and pp.startswith("{"):
             # greedy {proxy+}
@@ -504,25 +602,42 @@ def _match_recursive(resources, parent_id, segments, params):
     return None, params
 
 
-async def _call_lambda(func_name, event, qualifier=None):
+def _extract_lambda_ref_from_integration_uri(uri: str) -> str:
+    if not uri:
+        return ""
+    if "/functions/" in uri:
+        inner = uri.split("/functions/", 1)[1]
+        if "/invocations" in inner:
+            inner = inner.split("/invocations", 1)[0]
+        return inner
+    if uri.endswith("/invocations"):
+        return uri[: -len("/invocations")]
+    return uri
+
+
+async def _call_lambda(function_ref, event, *, account_id=None, region=None):
     """Invoke a Lambda function and return the parsed response dict.
 
-    ``qualifier`` may be a version number or alias name; aliases resolve to
-    their target version via ``_get_func_record_for_qualifier`` so aliased
-    integration URIs (arn:...:function:<name>:<alias>) invoke correctly (#407)."""
+    ``function_ref`` may be a name, partial ARN, or full ARN. Full ARNs are
+    resolved through Lambda's scoped lookup so region-qualified integration URIs
+    invoke the function named in the ARN instead of the request/default region."""
     from kumostack.services import lambda_svc
 
-    func_data, func_config = lambda_svc._get_func_record_for_qualifier(func_name, qualifier)
-    if func_data is None:
-        label = f"{func_name}:{qualifier}" if qualifier else func_name
+    func_data, func_config, func_name = lambda_svc._get_func_record_for_ref_in_scope(
+        function_ref,
+        account_id=account_id,
+        region=region,
+    )
+    if func_data is None or func_config is None:
+        label = function_ref or func_name
         return None, f"Lambda function '{label}' not found"
 
     # Route through the central _execute_function dispatcher so CloudWatch
     # Logs emission and Docker log output work for API Gateway invocations.
     # Response shaping (throttle→429, error→502, body→envelope) goes through
     # the shared helper so v1/v2 stay consistent.
-    exec_record = {"config": func_config, "code_zip": func_data.get("code_zip")}
-    result = await asyncio.to_thread(lambda_svc._execute_function, exec_record, event)
+    exec_record = lambda_svc._execution_record_for_config(func_data, func_config)
+    result = await asyncio.to_thread(lambda_svc._execute_function_with_config_scope, exec_record, event)
     lambda_response, _ = lambda_svc.lambda_execute_result_to_api_proxy_response(result)
     # On error the helper returns {statusCode: 502, body: <msg>}; preserve
     # the _call_lambda contract of (None, error_msg) so callers that check
@@ -545,53 +660,130 @@ def get_state():
     import copy
     return {
         "rest_apis": copy.deepcopy(_rest_apis),
+        "rest_api_regions": copy.deepcopy(_rest_api_regions),
         "resources": copy.deepcopy(_resources),
         "stages_v1": copy.deepcopy(_stages_v1),
         "deployments_v1": copy.deepcopy(_deployments_v1),
         "authorizers_v1": copy.deepcopy(_authorizers_v1),
         "models": copy.deepcopy(_models),
         "api_keys": copy.deepcopy(_api_keys),
+        "api_key_regions": copy.deepcopy(_api_key_regions),
         "usage_plans": copy.deepcopy(_usage_plans),
+        "usage_plan_regions": copy.deepcopy(_usage_plan_regions),
         "usage_plan_keys": copy.deepcopy(_usage_plan_keys),
         "domain_names": copy.deepcopy(_domain_names),
+        "domain_name_regions": copy.deepcopy(_domain_name_regions),
         "base_path_mappings": copy.deepcopy(_base_path_mappings),
         "v1_tags": copy.deepcopy(_v1_tags),
         "account_settings": copy.deepcopy(_account_settings),
+        "gateway_responses": copy.deepcopy(_gateway_responses),
+        "documentation_parts": copy.deepcopy(_documentation_parts),
     }
+
+
+def _region_from_existing_tag_arn(account_id, target_resource):
+    for (tag_account_id, resource_arn), _tags in _v1_tags._data.items():
+        if tag_account_id != account_id:
+            continue
+        try:
+            spec = parse_arn(resource_arn)
+        except ArnParseError:
+            continue
+        if (
+            spec.partition == "aws"
+            and spec.service == "apigateway"
+            and spec.account_id == ""
+            and spec.resource == target_resource
+        ):
+            return spec.region
+    return None
+
+
+def _region_from_domain_name_record(domain_name, domain_record, account_id):
+    tag_region = _region_from_existing_tag_arn(account_id, f"/domainnames/{domain_name}")
+    if tag_region:
+        return tag_region
+
+    regional_domain = domain_record.get("regionalDomainName", "")
+    if ".execute-api." in regional_domain:
+        region = regional_domain.rsplit(".execute-api.", 1)[1].split(".", 1)[0]
+        if region:
+            return region
+    return get_region()
+
+
+def _region_from_api_key_record(api_key_id, _api_key, account_id):
+    return _region_from_existing_tag_arn(account_id, f"/apikeys/{api_key_id}") or get_region()
+
+
+def _region_from_usage_plan_record(plan_id, _usage_plan, account_id):
+    return _region_from_existing_tag_arn(account_id, f"/usageplans/{plan_id}") or get_region()
+
+
+def _region_from_rest_api_record(api_id, _rest_api, account_id):
+    return _region_from_existing_tag_arn(account_id, f"/restapis/{api_id}") or get_region()
+
+
+def _backfill_tag_region_map(resource_store, region_store, region_for_item):
+    # State files written before these side maps existed still need to resolve
+    # tag-resource ARNs for resources that already exist.
+    if isinstance(resource_store, AccountScopedDict) and isinstance(region_store, AccountScopedDict):
+        for scoped_key, value in resource_store._data.items():
+            account_id, key = scoped_key
+            region_store._data.setdefault(scoped_key, region_for_item(key, value, account_id))
+        return
+    for key, value in resource_store.items():
+        region_store.setdefault(key, region_for_item(key, value, get_account_id()))
 
 
 def load_persisted_state(data):
     """Restore module state from a previously persisted snapshot."""
     _rest_apis.update(data.get("rest_apis", {}))
+    _rest_api_regions.update(data.get("rest_api_regions", {}))
     _resources.update(data.get("resources", {}))
     _stages_v1.update(data.get("stages_v1", {}))
     _deployments_v1.update(data.get("deployments_v1", {}))
     _authorizers_v1.update(data.get("authorizers_v1", {}))
     _models.update(data.get("models", {}))
     _api_keys.update(data.get("api_keys", {}))
+    _api_key_regions.update(data.get("api_key_regions", {}))
     _usage_plans.update(data.get("usage_plans", {}))
+    _usage_plan_regions.update(data.get("usage_plan_regions", {}))
     _usage_plan_keys.update(data.get("usage_plan_keys", {}))
     _domain_names.update(data.get("domain_names", {}))
+    _domain_name_regions.update(data.get("domain_name_regions", {}))
     _base_path_mappings.update(data.get("base_path_mappings", {}))
     _v1_tags.update(data.get("v1_tags", {}))
     _account_settings.update(data.get("account_settings", {}))
+    _gateway_responses.update(data.get("gateway_responses", {}))
+    _documentation_parts.update(data.get("documentation_parts", {}))
+    _backfill_tag_region_map(_rest_apis, _rest_api_regions, _region_from_rest_api_record)
+    _backfill_tag_region_map(_api_keys, _api_key_regions, _region_from_api_key_record)
+    _backfill_tag_region_map(_usage_plans, _usage_plan_regions, _region_from_usage_plan_record)
+    _backfill_tag_region_map(_domain_names, _domain_name_regions, _region_from_domain_name_record)
 
 
 def reset():
     """Clear all module state."""
     _rest_apis.clear()
+    _rest_api_regions.clear()
     _resources.clear()
     _stages_v1.clear()
     _deployments_v1.clear()
     _authorizers_v1.clear()
     _models.clear()
     _api_keys.clear()
+    _api_key_regions.clear()
     _usage_plans.clear()
+    _usage_plan_regions.clear()
     _usage_plan_keys.clear()
     _domain_names.clear()
+    _domain_name_regions.clear()
     _base_path_mappings.clear()
     _v1_tags.clear()
     _account_settings.clear()
+    _gateway_responses.clear()
+    _documentation_parts.clear()
 
 
 # ---- Control plane router ----
@@ -817,12 +1009,17 @@ async def handle_request(method, path, headers, body, query_params):
         # /restapis/{id}/stages[/{stageName}]
         elif sub == "stages":
             stage_name = parts[3] if len(parts) > 3 else None
+            stage_sub = parts[4] if len(parts) > 4 else None
+            export_type = parts[5] if len(parts) > 5 else None
             if not stage_name:
                 if method == "POST":
                     return _create_stage(api_id, data)
                 if method == "GET":
                     return _get_stages(api_id)
-            else:
+            elif stage_sub == "exports":
+                if method == "GET" and export_type and len(parts) == 6:
+                    return _get_export(api_id, stage_name, export_type, headers, query_params)
+            elif stage_sub is None:
                 if method == "GET":
                     return _get_stage(api_id, stage_name)
                 if method == "PATCH":
@@ -862,6 +1059,36 @@ async def handle_request(method, path, headers, body, query_params):
                 if method == "DELETE":
                     return _delete_model(api_id, model_name)
 
+        # /restapis/{id}/documentation/parts[/{partId}]
+        elif sub == "documentation" and len(parts) > 3 and parts[3] == "parts":
+            part_id = parts[4] if len(parts) > 4 else None
+            if part_id is None:
+                if method == "POST":
+                    return _create_documentation_part(api_id, data)
+                if method == "GET":
+                    return _get_documentation_parts(api_id, query_params)
+            else:
+                if method == "GET":
+                    return _get_documentation_part(api_id, part_id)
+                if method == "PATCH":
+                    return _update_documentation_part(api_id, part_id, data)
+                if method == "DELETE":
+                    return _delete_documentation_part(api_id, part_id)
+
+        # /restapis/{id}/gatewayresponses[/{responseType}]
+        elif sub == "gatewayresponses":
+            response_type = parts[3] if len(parts) > 3 else None
+            if response_type is None:
+                if method == "GET":
+                    return _get_gateway_responses(api_id)
+            else:
+                if method == "PUT":
+                    return _put_gateway_response(api_id, response_type, data)
+                if method == "GET":
+                    return _get_gateway_response(api_id, response_type)
+                if method == "DELETE":
+                    return _delete_gateway_response(api_id, response_type)
+
     return _v1_error("NotFoundException", f"Unknown API Gateway v1 path: {path}", 404)
 
 
@@ -900,6 +1127,8 @@ async def handle_execute(api_id, stage_name, method, path, headers, body, query_
         return await _invoke_lambda_proxy_v1(
             integration, api_id, stage_name, stage, resource, path, method,
             headers, body, query_params, path_params,
+            owner_account_id=get_account_id(),
+            owner_region=_rest_api_regions.get(api_id, get_region()),
             binary_media_types=api.get("binaryMediaTypes") or [],
         )
     elif int_type in ("HTTP_PROXY", "HTTP"):
@@ -931,21 +1160,30 @@ def _media_type_matches(media_type, binary_media_types):
     return False
 
 
-async def _invoke_lambda_proxy_v1(integration, api_id, stage_name, stage, resource, request_path, method, headers, body, query_params, path_params, binary_media_types=None):
+async def _invoke_lambda_proxy_v1(
+    integration,
+    api_id,
+    stage_name,
+    stage,
+    resource,
+    request_path,
+    method,
+    headers,
+    body,
+    query_params,
+    path_params,
+    *,
+    owner_account_id=None,
+    owner_region=None,
+    binary_media_types=None,
+):
     """Invoke Lambda with API Gateway v1 payload format 1.0."""
     uri = integration.get("uri", "")
     # Supported URI formats:
     #   1. arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/arn:aws:lambda:{region}:{acct}:function:{name}[:{qualifier}]/invocations
     #   2. arn:aws:lambda:{region}:{acct}:function:{name}[:{qualifier}]
     #   3. plain function name: MyFunction[:{qualifier}]
-    from kumostack.services import lambda_svc as _lambda_svc
-    if "function:" in uri:
-        # Strip wrapper up through 'function:' and any trailing /invocations.
-        tail = uri.split("function:")[-1].split("/")[0]
-        # tail is now "<name>" or "<name>:<qualifier>".
-        func_name, qualifier = _lambda_svc._resolve_name_and_qualifier(tail)
-    else:
-        func_name, qualifier = _lambda_svc._resolve_name_and_qualifier(uri)
+    lambda_ref = _extract_lambda_ref_from_integration_uri(uri)
 
     qs_params = {k: v[0] for k, v in query_params.items()} if query_params else None
     mv_qs_params = {k: list(v) for k, v in query_params.items()} if query_params else None
@@ -1004,7 +1242,12 @@ async def _invoke_lambda_proxy_v1(integration, api_id, stage_name, stage, resour
         "isBase64Encoded": req_is_base64,
     }
 
-    lambda_response, err = await _call_lambda(func_name, event, qualifier=qualifier)
+    lambda_response, err = await _call_lambda(
+        lambda_ref,
+        event,
+        account_id=owner_account_id,
+        region=owner_region,
+    )
     if err:
         return 502, {"Content-Type": "application/json"}, json.dumps({"message": err}).encode()
 
@@ -1196,11 +1439,14 @@ def _create_rest_api(data):
         "disableExecuteApiEndpoint": data.get("disableExecuteApiEndpoint", False),
     }
     _rest_apis[api_id] = api
+    _rest_api_regions[api_id] = get_region()
     _resources[api_id] = {}
     _stages_v1[api_id] = {}
     _deployments_v1[api_id] = {}
     _authorizers_v1[api_id] = {}
     _models[api_id] = {}
+    _gateway_responses[api_id] = {}
+    _documentation_parts[api_id] = {}
 
     # Create root resource "/"
     root_id = _new_id()[:8]
@@ -1241,13 +1487,355 @@ def _delete_rest_api(api_id):
     if api_id not in _rest_apis:
         return _v1_error("NotFoundException", "Invalid API identifier specified", 404)
     _rest_apis.pop(api_id, None)
+    _rest_api_regions.pop(api_id, None)
     _resources.pop(api_id, None)
     _stages_v1.pop(api_id, None)
     _deployments_v1.pop(api_id, None)
     _authorizers_v1.pop(api_id, None)
     _models.pop(api_id, None)
+    _gateway_responses.pop(api_id, None)
+    _documentation_parts.pop(api_id, None)
     _v1_tags.pop(_rest_api_arn(api_id), None)
     return 202, {}, b""
+
+
+# ---- OpenAPI parsing ----
+
+_OPENAPI_HTTP_METHODS = {
+    "get", "post", "put", "delete", "patch", "head", "options",
+}
+
+
+def _import_rest_api(spec, base_data=None):
+    data = dict(base_data or {})
+    info = spec.get("info") or {}
+    if info.get("title") and not data.get("name"):
+        data["name"] = str(info["title"])
+    if info.get("version") and not data.get("version"):
+        data["version"] = str(info["version"])
+
+    _status, _headers, body = _create_rest_api(data)
+    api_id = json.loads(body)["id"]
+    for path, path_item in (spec.get("paths") or {}).items():
+        _import_path_item(api_id, path, path_item)
+    return api_id
+
+
+def _import_path_item(api_id, path, path_item):
+    resource_id = next(
+        rid for rid, res in _resources.get(api_id, {}).items()
+        if res.get("path") == "/"
+    )
+    if path != "/":
+        for segment in path.strip("/").split("/"):
+            child = next(
+                (rid for rid, res in _resources.get(api_id, {}).items()
+                 if res.get("parentId") == resource_id
+                 and res.get("pathPart") == segment),
+                None,
+            )
+            if child is None:
+                _status, _headers, body = _create_resource(
+                    api_id, resource_id, {"pathPart": segment}
+                )
+                child = json.loads(body)["id"]
+            resource_id = child
+
+    for method, operation in path_item.items():
+        if method.lower() in _OPENAPI_HTTP_METHODS:
+            _import_operation(api_id, resource_id, method.upper(), operation)
+
+
+def _import_operation(api_id, resource_id, http_method, operation):
+    _put_method(api_id, resource_id, http_method, {"authorizationType": "NONE"})
+
+    integration = (operation or {}).get("x-amazon-apigateway-integration")
+    if integration:
+        int_type = integration.get("type")
+        _put_integration(api_id, resource_id, http_method, {
+            "type": int_type.upper() if int_type else None,
+            "httpMethod": integration.get("httpMethod"),
+            "uri": integration.get("uri"),
+        })
+
+
+def _schema_ref(model_name, export_type):
+    escaped_name = str(model_name).replace("~", "~0").replace("/", "~1")
+    container = "components/schemas" if export_type == "oas30" else "definitions"
+    return {"$ref": f"#/{container}/{escaped_name}"}
+
+
+def _export_model_schemas(api_id):
+    schemas = {}
+    for model_name, model in _models.get(api_id, {}).items():
+        schema = model.get("schema")
+        if isinstance(schema, dict):
+            schemas[model_name] = schema
+            continue
+        try:
+            schemas[model_name] = json.loads(schema or "{}")
+        except (TypeError, json.JSONDecodeError):
+            schemas[model_name] = {}
+    return schemas
+
+
+def _export_method_parameters(method_obj, export_type):
+    parameters = []
+    location_map = {"path": "path", "querystring": "query", "header": "header"}
+    for parameter_name, required in method_obj.get("requestParameters", {}).items():
+        parts = parameter_name.split(".", 3)
+        if len(parts) != 4 or parts[:2] != ["method", "request"]:
+            continue
+        location = location_map.get(parts[2])
+        if location is None:
+            continue
+        parameter = {
+            "name": parts[3],
+            "in": location,
+            "required": True if location == "path" else bool(required),
+        }
+        if export_type == "oas30":
+            parameter["schema"] = {"type": "string"}
+        else:
+            parameter["type"] = "string"
+        parameters.append(parameter)
+    return parameters
+
+
+def _export_method_responses(method_obj, export_type):
+    exported = {}
+    for status_code, response in method_obj.get("methodResponses", {}).items():
+        item = {"description": f"{status_code} response"}
+        response_models = response.get("responseModels", {})
+        response_parameters = response.get("responseParameters", {})
+
+        if export_type == "oas30":
+            content = {}
+            for content_type, model_name in response_models.items():
+                content[content_type] = {"schema": _schema_ref(model_name, export_type)}
+            if content:
+                item["content"] = content
+            headers = {}
+            for parameter_name in response_parameters:
+                prefix = "method.response.header."
+                if parameter_name.startswith(prefix):
+                    headers[parameter_name[len(prefix):]] = {"schema": {"type": "string"}}
+            if headers:
+                item["headers"] = headers
+        else:
+            if response_models:
+                model_name = response_models.get("application/json") or next(iter(response_models.values()))
+                item["schema"] = _schema_ref(model_name, export_type)
+            headers = {}
+            for parameter_name in response_parameters:
+                prefix = "method.response.header."
+                if parameter_name.startswith(prefix):
+                    headers[parameter_name[len(prefix):]] = {"type": "string"}
+            if headers:
+                item["headers"] = headers
+
+        exported[str(status_code)] = item
+
+    if not exported:
+        exported["200"] = {"description": "200 response"}
+    return exported
+
+
+def _export_integration(integration):
+    result = {
+        "type": str(integration.get("type", "aws_proxy")).lower(),
+        "httpMethod": integration.get("httpMethod"),
+        "uri": integration.get("uri"),
+        "connectionType": integration.get("connectionType"),
+        "requestParameters": integration.get("requestParameters", {}),
+        "requestTemplates": integration.get("requestTemplates", {}),
+        "passthroughBehavior": integration.get("passthroughBehavior"),
+        "cacheNamespace": integration.get("cacheNamespace"),
+        "cacheKeyParameters": integration.get("cacheKeyParameters", []),
+        "timeoutInMillis": integration.get("timeoutInMillis"),
+    }
+    for optional_key in ("credentials", "contentHandling"):
+        if integration.get(optional_key) is not None:
+            result[optional_key] = integration[optional_key]
+
+    responses = {}
+    for response in integration.get("integrationResponses", {}).values():
+        response_key = response.get("selectionPattern") or "default"
+        exported_response = {"statusCode": response.get("statusCode")}
+        for optional_key in ("responseParameters", "responseTemplates", "contentHandling"):
+            value = response.get(optional_key)
+            if value not in (None, {}, []):
+                exported_response[optional_key] = value
+        responses[response_key] = exported_response
+    if responses:
+        result["responses"] = responses
+
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _export_operation(method_obj, export_type, include_integrations):
+    operation = {"responses": _export_method_responses(method_obj, export_type)}
+    if method_obj.get("operationName"):
+        operation["operationId"] = method_obj["operationName"]
+
+    parameters = _export_method_parameters(method_obj, export_type)
+    request_models = method_obj.get("requestModels", {})
+    if export_type == "oas30":
+        content = {
+            content_type: {"schema": _schema_ref(model_name, export_type)}
+            for content_type, model_name in request_models.items()
+        }
+        if content:
+            operation["requestBody"] = {"content": content}
+    elif request_models:
+        content_types = list(request_models)
+        model_name = request_models.get("application/json") or request_models[content_types[0]]
+        parameters.append({
+            "name": "body",
+            "in": "body",
+            "required": False,
+            "schema": _schema_ref(model_name, export_type),
+        })
+        operation["consumes"] = content_types
+
+    if parameters:
+        operation["parameters"] = parameters
+
+    response_models = method_obj.get("methodResponses", {}).values()
+    produced_types = {
+        content_type
+        for response in response_models
+        for content_type in response.get("responseModels", {})
+    }
+    if export_type == "swagger" and produced_types:
+        operation["produces"] = sorted(produced_types)
+
+    if method_obj.get("apiKeyRequired"):
+        operation["security"] = [{"api_key": []}]
+
+    integration = method_obj.get("methodIntegration")
+    if include_integrations and integration:
+        operation["x-amazon-apigateway-integration"] = _export_integration(integration)
+    return operation
+
+
+def _get_export_extensions(query_params):
+    # API Gateway's query-string map is flattened by botocore, so
+    # parameters={"extensions": "integrations"} is sent as
+    # ?extensions=integrations. Keep the bracketed form as a compatibility
+    # fallback for callers which serialize REST query maps that way.
+    raw = query_params.get("extensions") or query_params.get("parameters[extensions]", [])
+    if not raw:
+        return set()
+    if isinstance(raw, str):
+        raw = [raw]
+    return {
+        extension.strip().lower()
+        for value in raw
+        for extension in value.split(",")
+        if extension.strip()
+    }
+
+
+def _build_api_export(api_id, stage_name, export_type, include_integrations):
+    api = _rest_apis[api_id]
+    version = api.get("version") or "1.0"
+    info = {"title": api.get("name", "unnamed"), "version": version}
+    if api.get("description"):
+        info["description"] = api["description"]
+
+    schemas = _export_model_schemas(api_id)
+    paths = {}
+    has_api_key_method = False
+    for resource in _resources.get(api_id, {}).values():
+        exported_methods = {}
+        for http_method, method_obj in resource.get("resourceMethods", {}).items():
+            method_key = (
+                "x-amazon-apigateway-any-method"
+                if http_method.upper() == "ANY"
+                else http_method.lower()
+            )
+            exported_methods[method_key] = _export_operation(
+                method_obj, export_type, include_integrations
+            )
+            has_api_key_method = has_api_key_method or bool(method_obj.get("apiKeyRequired"))
+        if exported_methods:
+            paths[resource.get("path", "/")] = exported_methods
+
+    region = _rest_api_regions.get(api_id) or get_region()
+    execute_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/{stage_name}"
+    if export_type == "oas30":
+        components = {"schemas": schemas}
+        if has_api_key_method:
+            components["securitySchemes"] = {
+                "api_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}
+            }
+        return {
+            "openapi": "3.0.1",
+            "info": info,
+            "servers": [{"url": execute_url}],
+            "paths": paths,
+            "components": components,
+        }
+
+    document = {
+        "swagger": "2.0",
+        "info": info,
+        "host": f"{api_id}.execute-api.{region}.amazonaws.com",
+        "basePath": f"/{stage_name}",
+        "schemes": ["https"],
+        "paths": paths,
+        "definitions": schemas,
+    }
+    if has_api_key_method:
+        document["securityDefinitions"] = {
+            "api_key": {"type": "apiKey", "name": "x-api-key", "in": "header"}
+        }
+    return document
+
+
+def _get_export(api_id, stage_name, export_type, headers, query_params):
+    if api_id not in _rest_apis:
+        return _v1_error("NotFoundException", "Invalid API identifier specified", 404)
+    if stage_name not in _stages_v1.get(api_id, {}):
+        return _v1_error("NotFoundException", "Invalid Stage identifier specified", 404)
+
+    export_type = export_type.lower()
+    if export_type not in ("oas30", "swagger"):
+        return _v1_error(
+            "BadRequestException",
+            "Invalid export type. Supported types are 'oas30' and 'swagger'",
+            400,
+        )
+
+    accept = (headers.get("accept") or "application/json").split(",", 1)[0].split(";", 1)[0].strip().lower()
+    if accept == "application/json":
+        content_type = "application/json"
+        extension = "json"
+    elif accept in ("application/yaml", "application/x-yaml", "text/yaml"):
+        content_type = "application/yaml"
+        extension = "yaml"
+    else:
+        return _v1_error(
+            "BadRequestException",
+            "Invalid Accept header. Supported values are 'application/json' and 'application/yaml'",
+            400,
+        )
+
+    export_extensions = _get_export_extensions(query_params)
+    include_integrations = bool({"integrations", "apigateway"} & export_extensions)
+    document = _build_api_export(api_id, stage_name, export_type, include_integrations)
+    if extension == "json":
+        body = json.dumps(document, ensure_ascii=False).encode("utf-8")
+    else:
+        body = yaml.safe_dump(document, sort_keys=False).encode("utf-8")
+
+    api_name = re.sub(r"[^A-Za-z0-9._-]+", "-", _rest_apis[api_id].get("name", "api"))
+    filename = f"{api_name}-{stage_name}-{export_type}.{extension}"
+    return 200, {
+        "Content-Type": content_type,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }, body
 
 
 # ---- Control plane: Resources ----
@@ -1763,6 +2351,194 @@ def _delete_model(api_id, model_name):
     return 202, {}, b""
 
 
+# ---- Control plane: Documentation Parts ----
+
+def _validate_documentation_api(api_id):
+    if api_id not in _rest_apis:
+        return _v1_error("NotFoundException", "Invalid API identifier specified", 404)
+    return None
+
+
+def _create_documentation_part(api_id, data):
+    error = _validate_documentation_api(api_id)
+    if error is not None:
+        return error
+
+    location = dict(data.get("location") or {})
+    location_type = location.get("type")
+    if location_type not in _DOCUMENTATION_LOCATION_TYPES:
+        return _v1_error(
+            "BadRequestException",
+            "Invalid documentation part location type specified",
+            400,
+        )
+    if data.get("properties") is None:
+        return _v1_error(
+            "BadRequestException",
+            "Documentation part properties must be specified",
+            400,
+        )
+
+    part_id = _new_id()
+    part = {
+        "id": part_id,
+        "location": location,
+        "properties": data["properties"],
+    }
+    _documentation_parts.setdefault(api_id, {})[part_id] = part
+    return _v1_response(part, 201)
+
+
+def _get_documentation_part(api_id, part_id):
+    error = _validate_documentation_api(api_id)
+    if error is not None:
+        return error
+    part = _documentation_parts.get(api_id, {}).get(part_id)
+    if part is None:
+        return _v1_error(
+            "NotFoundException",
+            "Invalid DocumentationPart identifier specified",
+            404,
+        )
+    return _v1_response(part)
+
+
+def _get_documentation_parts(api_id, query_params):
+    error = _validate_documentation_api(api_id)
+    if error is not None:
+        return error
+
+    parts = list(_documentation_parts.get(api_id, {}).values())
+    location_type = _qp(query_params, "type")
+    name_query = _qp(query_params, "name")
+    path = _qp(query_params, "path")
+    location_status = _qp(query_params, "locationStatus")
+    if location_type:
+        parts = [part for part in parts if part["location"].get("type") == location_type]
+    if name_query:
+        parts = [part for part in parts if name_query in part["location"].get("name", "")]
+    if path:
+        parts = [part for part in parts if part["location"].get("path") == path]
+    # Stored parts are documented by definition. API Gateway also synthesizes
+    # undocumented API entities for this filter; MiniStack has no need to
+    # materialize those placeholder records.
+    if location_status == "UNDOCUMENTED":
+        parts = []
+    return _v1_paginated_response(parts, query_params)
+
+
+def _update_documentation_part(api_id, part_id, data):
+    error = _validate_documentation_api(api_id)
+    if error is not None:
+        return error
+    part = _documentation_parts.get(api_id, {}).get(part_id)
+    if part is None:
+        return _v1_error(
+            "NotFoundException",
+            "Invalid DocumentationPart identifier specified",
+            404,
+        )
+    _apply_patch(part, data.get("patchOperations", []))
+    return _v1_response(part)
+
+
+def _delete_documentation_part(api_id, part_id):
+    error = _validate_documentation_api(api_id)
+    if error is not None:
+        return error
+    parts = _documentation_parts.get(api_id, {})
+    if part_id not in parts:
+        return _v1_error(
+            "NotFoundException",
+            "Invalid DocumentationPart identifier specified",
+            404,
+        )
+    parts.pop(part_id, None)
+    return 202, {}, b""
+
+
+# ---- Control plane: Gateway Responses ----
+
+def _default_gateway_response(response_type):
+    """Return the API Gateway-generated response used when no customization exists."""
+    response = {
+        "defaultResponse": True,
+        "responseType": response_type,
+        "responseParameters": {},
+        "responseTemplates": {
+            "application/json": _DEFAULT_GATEWAY_RESPONSE_TEMPLATE,
+        },
+    }
+    status_code = _DEFAULT_GATEWAY_RESPONSE_STATUS_CODES.get(response_type)
+    if status_code is not None:
+        response["statusCode"] = status_code
+    return response
+
+
+def _validate_gateway_response_target(api_id, response_type):
+    if api_id not in _rest_apis:
+        return _v1_error("NotFoundException", "Invalid API identifier specified", 404)
+    if response_type not in _GATEWAY_RESPONSE_TYPES:
+        return _v1_error(
+            "BadRequestException",
+            f"Invalid gateway response type: {response_type}",
+            400,
+        )
+    return None
+
+
+def _put_gateway_response(api_id, response_type, data):
+    error = _validate_gateway_response_target(api_id, response_type)
+    if error is not None:
+        return error
+
+    status_code = data.get("statusCode")
+    if status_code is not None and not re.fullmatch(r"[1-5]\d\d", str(status_code)):
+        return _v1_error(
+            "BadRequestException",
+            "Invalid status code specified",
+            400,
+        )
+
+    response = _default_gateway_response(response_type)
+    response["defaultResponse"] = False
+    if status_code is not None:
+        response["statusCode"] = str(status_code)
+    response["responseParameters"] = dict(data.get("responseParameters") or {})
+    response["responseTemplates"] = dict(data.get("responseTemplates") or {})
+    _gateway_responses.setdefault(api_id, {})[response_type] = response
+    return _v1_response(response, 201)
+
+
+def _get_gateway_response(api_id, response_type):
+    error = _validate_gateway_response_target(api_id, response_type)
+    if error is not None:
+        return error
+    response = _gateway_responses.get(api_id, {}).get(response_type)
+    return _v1_response(response or _default_gateway_response(response_type))
+
+
+def _get_gateway_responses(api_id):
+    if api_id not in _rest_apis:
+        return _v1_error("NotFoundException", "Invalid API identifier specified", 404)
+    customized = _gateway_responses.get(api_id, {})
+    responses = [
+        customized.get(response_type) or _default_gateway_response(response_type)
+        for response_type in _GATEWAY_RESPONSE_TYPES
+    ]
+    # AWS returns the complete GatewayResponses collection and ignores the
+    # otherwise-standard API Gateway pagination parameters for this operation.
+    return _v1_response({"item": responses})
+
+
+def _delete_gateway_response(api_id, response_type):
+    error = _validate_gateway_response_target(api_id, response_type)
+    if error is not None:
+        return error
+    _gateway_responses.get(api_id, {}).pop(response_type, None)
+    return 202, {}, b""
+
+
 # ---- Control plane: API Keys ----
 
 def _create_api_key(data):
@@ -1780,6 +2556,7 @@ def _create_api_key(data):
         "tags": data.get("tags", {}),
     }
     _api_keys[key_id] = api_key
+    _api_key_regions[key_id] = get_region()
     return _v1_response(api_key, 201)
 
 
@@ -1808,6 +2585,7 @@ def _delete_api_key(key_id):
     if key_id not in _api_keys:
         return _v1_error("NotFoundException", "Invalid API Key identifier specified", 404)
     _api_keys.pop(key_id, None)
+    _api_key_regions.pop(key_id, None)
     return 202, {}, b""
 
 
@@ -1825,6 +2603,7 @@ def _create_usage_plan(data):
         "tags": data.get("tags", {}),
     }
     _usage_plans[plan_id] = plan
+    _usage_plan_regions[plan_id] = get_region()
     _usage_plan_keys[plan_id] = {}
     return _v1_response(plan, 201)
 
@@ -1853,6 +2632,7 @@ def _delete_usage_plan(plan_id):
     if plan_id not in _usage_plans:
         return _v1_error("NotFoundException", "Invalid Usage Plan identifier specified", 404)
     _usage_plans.pop(plan_id, None)
+    _usage_plan_regions.pop(plan_id, None)
     _usage_plan_keys.pop(plan_id, None)
     return 202, {}, b""
 
@@ -1904,10 +2684,17 @@ def _create_domain_name(data):
         "domainName": domain_name,
         "certificateName": data.get("certificateName", ""),
         "certificateArn": data.get("certificateArn", ""),
+        "regionalCertificateName": data.get("regionalCertificateName", ""),
+        "regionalCertificateArn": data.get("regionalCertificateArn", ""),
         "distributionDomainName": f"{domain_name}.cloudfront.net",
+        "distributionHostedZoneId": "Z2FDTNDATAQYW2",
         "regionalDomainName": f"{domain_name}.execute-api.{get_region()}.amazonaws.com",
         "regionalHostedZoneId": "Z1UJRXOUMOOFQ8",
         "endpointConfiguration": data.get("endpointConfiguration", {"types": ["REGIONAL"]}),
+        "endpointAccessMode": data.get("endpointAccessMode", ""),
+        "mutualTlsAuthentication": data.get("mutualTlsAuthentication", {}),
+        "ownershipVerificationCertificateArn": data.get("ownershipVerificationCertificateArn", ""),
+        "routingMode": data.get("routingMode", "BASE_PATH_MAPPING_ONLY"),
         # securityPolicy is an opaque enum at the wire level; AWS keeps adding
         # new values (e.g. SecurityPolicy-TLS13-1-2-FIPS-PFS-PQ-2025-09 in
         # 2026-03). Accept whatever the caller sends; default mirrors AWS.
@@ -1915,6 +2702,7 @@ def _create_domain_name(data):
         "tags": data.get("tags", {}),
     }
     _domain_names[domain_name] = dn
+    _domain_name_regions[domain_name] = get_region()
     _base_path_mappings[domain_name] = {}
     return _v1_response(dn, 201)
 
@@ -1934,6 +2722,7 @@ def _delete_domain_name(domain_name):
     if domain_name not in _domain_names:
         return _v1_error("NotFoundException", "Invalid domain name identifier specified", 404)
     _domain_names.pop(domain_name, None)
+    _domain_name_regions.pop(domain_name, None)
     _base_path_mappings.pop(domain_name, None)
     return 202, {}, b""
 
@@ -1971,19 +2760,85 @@ def _delete_base_path_mapping(domain_name, base_path):
 
 # ---- Control plane: Tags ----
 
+def _resolve_v1_tag_resource_arn(resource_arn):
+    try:
+        spec = parse_arn(resource_arn)
+    except ArnParseError:
+        return None, _v1_error("BadRequestException", "Invalid resource ARN specified", 400)
+
+    if (
+        spec.partition != "aws"
+        or spec.service != "apigateway"
+        or spec.region != get_region()
+        or spec.account_id
+    ):
+        return None, _v1_error("BadRequestException", "Invalid resource ARN specified", 400)
+
+    parts = spec.resource.split("/")
+    if len(parts) == 3 and parts[0] == "" and parts[2]:
+        resource_type = parts[1]
+        resource_id = parts[2]
+        if resource_type == "restapis":
+            if resource_id not in _rest_apis or _rest_api_regions.get(resource_id) != spec.region:
+                return None, _v1_error("NotFoundException", "Invalid API identifier specified", 404)
+            return _rest_api_arn(resource_id), None
+        if resource_type == "apikeys":
+            if resource_id not in _api_keys or _api_key_regions.get(resource_id) != spec.region:
+                return None, _v1_error("NotFoundException", "Invalid resource identifier specified", 404)
+            return f"arn:aws:apigateway:{spec.region}::/apikeys/{resource_id}", None
+        if resource_type == "usageplans":
+            if resource_id not in _usage_plans or _usage_plan_regions.get(resource_id) != spec.region:
+                return None, _v1_error("NotFoundException", "Invalid resource identifier specified", 404)
+            return f"arn:aws:apigateway:{spec.region}::/usageplans/{resource_id}", None
+        if resource_type == "domainnames":
+            if resource_id not in _domain_names or _domain_name_regions.get(resource_id) != spec.region:
+                return None, _v1_error("NotFoundException", "Invalid resource identifier specified", 404)
+            return f"arn:aws:apigateway:{spec.region}::/domainnames/{resource_id}", None
+        return None, _v1_error("BadRequestException", "Invalid resource ARN specified", 400)
+
+    if (
+        len(parts) == 5
+        and parts[0] == ""
+        and parts[1] == "restapis"
+        and parts[2]
+        and parts[3] == "stages"
+        and parts[4]
+    ):
+        api_id = parts[2]
+        stage_name = parts[4]
+        if (
+            api_id not in _rest_apis
+            or _rest_api_regions.get(api_id) != spec.region
+            or stage_name not in _stages_v1.get(api_id, {})
+        ):
+            return None, _v1_error("NotFoundException", "Invalid Stage identifier specified", 404)
+        return f"arn:aws:apigateway:{spec.region}::/restapis/{api_id}/stages/{stage_name}", None
+
+    return None, _v1_error("BadRequestException", "Invalid resource ARN specified", 400)
+
+
 def _get_v1_tags(resource_arn):
-    tags = _v1_tags.get(resource_arn, {})
+    tag_key, err = _resolve_v1_tag_resource_arn(resource_arn)
+    if err is not None:
+        return err
+    tags = _v1_tags.get(tag_key, {})
     return _v1_response({"tags": tags})
 
 
 def _tag_v1_resource(resource_arn, data):
+    tag_key, err = _resolve_v1_tag_resource_arn(resource_arn)
+    if err is not None:
+        return err
     tags = data.get("tags", {})
-    _v1_tags.setdefault(resource_arn, {}).update(tags)
+    _v1_tags.setdefault(tag_key, {}).update(tags)
     return 204, {}, b""
 
 
 def _untag_v1_resource(resource_arn, tag_keys):
-    existing = _v1_tags.get(resource_arn, {})
+    tag_key, err = _resolve_v1_tag_resource_arn(resource_arn)
+    if err is not None:
+        return err
+    existing = _v1_tags.get(tag_key, {})
     for key in tag_keys:
         existing.pop(key, None)
     return 204, {}, b""

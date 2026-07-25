@@ -98,6 +98,30 @@ def test_apigw_get_apis(apigw):
     assert "list-api-a" in names
     assert "list-api-b" in names
 
+
+def test_apigw_apis_are_region_isolated():
+    """apigw-v2 APIs are region-specific: GetApi/GetApis must not surface an API
+    owned by another region (the execute path already enforces this)."""
+    import boto3
+    from botocore.config import Config
+
+    def cli(r):
+        return boto3.client(
+            "apigatewayv2", endpoint_url=_endpoint,
+            aws_access_key_id="test", aws_secret_access_key="test",
+            region_name=r, config=Config(region_name=r),
+        )
+
+    east, west = cli("us-east-1"), cli("us-west-2")
+    name = f"region-iso-{_uuid_mod.uuid4().hex[:8]}"
+    api_id = east.create_api(Name=name, ProtocolType="HTTP")["ApiId"]
+    assert any(a["ApiId"] == api_id for a in east.get_apis()["Items"])
+    assert all(a["ApiId"] != api_id for a in west.get_apis()["Items"])
+    with pytest.raises(ClientError) as e:
+        west.get_api(ApiId=api_id)
+    assert e.value.response["Error"]["Code"] == "NotFoundException"
+
+
 def test_apigw_update_api(apigw):
     api_id = apigw.create_api(Name="update-api-before", ProtocolType="HTTP")["ApiId"]
     apigw.update_api(ApiId=api_id, Name="update-api-after")
@@ -112,6 +136,31 @@ def test_apigw_delete_api(apigw):
     with pytest.raises(ClientError) as exc:
         apigw.get_api(ApiId=api_id)
     assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+
+def test_apigw_cfn_api_tracks_owner_region():
+    from ministack.core.responses import get_region, set_request_region
+    from ministack.services import apigateway as _apigw
+    from ministack.services.cloudformation import provisioners as _provisioners
+
+    original_region = get_region()
+    api_id = None
+    try:
+        set_request_region("us-west-2")
+        api_id, _attrs = _provisioners._apigw_v2_api_create(
+            "HttpApi",
+            {"Name": "cfn-apigwv2-region-owner", "ProtocolType": "HTTP"},
+            "cfn-apigwv2-region",
+        )
+
+        assert _apigw._api_regions[api_id] == "us-west-2"
+
+        _provisioners._apigw_v2_api_delete(api_id, {})
+        assert api_id not in _apigw._api_regions
+        api_id = None
+    finally:
+        if api_id is not None:
+            _provisioners._apigw_v2_api_delete(api_id, {})
+        set_request_region(original_region)
 
 def test_apigw_create_route(apigw):
     api_id = apigw.create_api(Name="route-api", ProtocolType="HTTP")["ApiId"]
@@ -922,6 +971,98 @@ def test_apigw_query_params_and_headers_in_event(apigw, lam):
         lam.delete_function(FunctionName=fname)
 
 
+def test_apigw_v2_event_omits_null_fields_when_absent(apigw, lam):
+    """Real AWS omits queryStringParameters/body from the v2 proxy event
+    entirely when there is no query string / no request body, rather than
+    including the key with a null value. Strict event-shape validators (e.g.
+    AWS Lambda Powertools' isAPIGatewayProxyEventV2) accept `undefined`
+    (Python: key absent) or a proper value, but reject `null` — a
+    present-but-null key broke every bodyless/querystring-less request
+    against such a validator, even though the invocation itself succeeded.
+
+    dict.get() can't distinguish an absent key from one explicitly set to
+    None, so this checks for key presence via `in` rather than the value.
+    """
+    import urllib.request as _urlreq
+    import uuid as _uuid
+
+    fname = f"intg-nullfields-{_uuid.uuid4().hex[:8]}"
+    code = (
+        "import json\n"
+        "def handler(event, context):\n"
+        "    return {'statusCode': 200, 'body': json.dumps({\n"
+        "        'hasQs': 'queryStringParameters' in event,\n"
+        "        'hasBody': 'body' in event,\n"
+        "    })}\n"
+    )
+    lam.create_function(
+        FunctionName=fname,
+        Runtime="python3.12",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Code={"ZipFile": _make_zip(code)},
+    )
+    api_id = apigw.create_api(Name=f"nullfields-api-{fname}", ProtocolType="HTTP")["ApiId"]
+    int_id = apigw.create_integration(
+        ApiId=api_id,
+        IntegrationType="AWS_PROXY",
+        IntegrationUri=f"arn:aws:lambda:us-east-1:000000000000:function:{fname}",
+        PayloadFormatVersion="2.0",
+    )["IntegrationId"]
+    apigw.create_route(ApiId=api_id, RouteKey="GET /nofields", Target=f"integrations/{int_id}")
+    apigw.create_stage(ApiId=api_id, StageName="$default")
+
+    try:
+        url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/nofields"
+        req = _urlreq.Request(url, method="GET")
+        req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
+        resp = _urlreq.urlopen(req)
+        assert resp.status == 200
+        body = json.loads(resp.read())
+        assert body["hasQs"] is False
+        assert body["hasBody"] is False
+    finally:
+        apigw.delete_api(ApiId=api_id)
+        lam.delete_function(FunctionName=fname)
+
+
+def test_apigw_raw_query_string_percent_encoded(apigw, lam):
+    """rawQueryString must stay percent-encoded like AWS: a space in a value comes
+    back as %20, not a literal space (which breaks lambda_http / http::Uri) — #1035."""
+    import urllib.request as _urlreq
+    import uuid as _uuid
+
+    fname = f"intg-rawqs-{_uuid.uuid4().hex[:8]}"
+    code = (
+        "import json\n"
+        "def handler(event, context):\n"
+        "    return {'statusCode': 200, 'body': json.dumps({'rawQs': event.get('rawQueryString')})}\n"
+    )
+    lam.create_function(
+        FunctionName=fname, Runtime="python3.12", Role=_LAMBDA_ROLE,
+        Handler="index.handler", Code={"ZipFile": _make_zip(code)},
+    )
+    api_id = apigw.create_api(Name=f"rawqs-api-{fname}", ProtocolType="HTTP")["ApiId"]
+    int_id = apigw.create_integration(
+        ApiId=api_id, IntegrationType="AWS_PROXY",
+        IntegrationUri=f"arn:aws:lambda:us-east-1:000000000000:function:{fname}",
+        PayloadFormatVersion="2.0",
+    )["IntegrationId"]
+    apigw.create_route(ApiId=api_id, RouteKey="GET /authorize", Target=f"integrations/{int_id}")
+    apigw.create_stage(ApiId=api_id, StageName="$default")
+    try:
+        url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/authorize?scope=openid%20profile"
+        req = _urlreq.Request(url, method="GET")
+        req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
+        resp = _urlreq.urlopen(req)
+        body = json.loads(resp.read())
+        assert "openid%20profile" in body["rawQs"]
+        assert "openid profile" not in body["rawQs"]  # no literal space
+    finally:
+        apigw.delete_api(ApiId=api_id)
+        lam.delete_function(FunctionName=fname)
+
+
 def test_apigw_multiple_path_parameters(apigw, lam):
     """Multiple path parameters in one route should all be extracted."""
     import urllib.request as _urlreq
@@ -1355,6 +1496,55 @@ def test_apigw_resolve_jwks_url_falls_back_when_discovery_unavailable(monkeypatc
     assert resolved == f"{issuer}/.well-known/jwks.json"
 
 
+def test_apigw_oidc_discovery_failure_is_negative_cached(monkeypatch):
+    """A failed discovery must not poison the cache for the full 7200s TTL.
+
+    Regression test: a transient discovery failure used to be cached for
+    7200s, making every JWT validation for that issuer fail closed for up to
+    2 hours even after the underlying network issue cleared. It should
+    instead be negative-cached briefly (60s) so a flood of requests during
+    the outage doesn't each trigger their own discovery call, but recovery
+    happens quickly once the issuer is reachable again.
+    """
+    import asyncio
+
+    from ministack.services import apigateway as apigw_mod
+
+    issuer = "https://flaky-idp.test"
+    real_jwks_uri = f"{issuer}/id/keys"
+    calls = {"count": 0}
+
+    async def _flaky_then_ok_urlopen(_request_or_url, _timeout_seconds):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise OSError("connection refused")
+        body = json.dumps({"jwks_uri": real_jwks_uri}).encode("utf-8")
+        return 200, {"Content-Type": "application/json"}, body
+
+    fake_now = {"value": 1_000_000.0}
+    monkeypatch.setattr(apigw_mod, "_urlopen_async", _flaky_then_ok_urlopen)
+    monkeypatch.setattr(apigw_mod, "_oidc_config_cache", apigw_mod.AccountScopedDict())
+    monkeypatch.setattr(apigw_mod.time, "time", lambda: fake_now["value"])
+
+    authorizer = {"jwtConfiguration": {"Issuer": issuer, "Audience": ["ms-client"]}}
+
+    first = asyncio.run(apigw_mod._resolve_jwks_url(authorizer))
+    assert first == f"{issuer}/.well-known/jwks.json"
+
+    # Within the 60s negative-cache window, a retry must not re-trigger
+    # discovery — it should reuse the cached failure.
+    second = asyncio.run(apigw_mod._resolve_jwks_url(authorizer))
+    assert second == f"{issuer}/.well-known/jwks.json"
+    assert calls["count"] == 1
+
+    # Once the negative-cache TTL has elapsed, discovery is retried and
+    # the now-healthy issuer resolves successfully.
+    fake_now["value"] += 61
+    third = asyncio.run(apigw_mod._resolve_jwks_url(authorizer))
+    assert third == real_jwks_uri
+    assert calls["count"] == 2
+
+
 def test_apigw_resolve_jwks_url_cognito_skips_discovery(monkeypatch):
     """Cognito issuers keep using the local pool JWKS — no discovery call."""
     import asyncio
@@ -1503,6 +1693,74 @@ def test_apigw_integration_content_handling_strategy_roundtrip(apigw):
     )
     integ = apigw.get_integration(ApiId=api_id, IntegrationId=integ_id)
     assert integ.get("ContentHandlingStrategy") == "CONVERT_TO_BINARY"
+
+
+def test_apigw_websocket_lambda_worker_uses_function_region(monkeypatch):
+    import asyncio
+
+    from ministack.core import lambda_runtime
+    from ministack.core.responses import get_region, set_request_region
+    from ministack.services import apigateway as apigw_mod
+    from ministack.services import lambda_svc
+
+    api_id = f"ws-scope-{_uuid_mod.uuid4().hex[:8]}"
+    integration_id = f"int-{_uuid_mod.uuid4().hex[:8]}"
+    func_name = f"ws-scope-fn-{_uuid_mod.uuid4().hex[:8]}"
+    func_arn = f"arn:aws:lambda:us-west-2:000000000000:function:{func_name}"
+    func_config = {
+        "FunctionName": func_name,
+        "FunctionArn": func_arn,
+        "Runtime": "python3.12",
+    }
+    func_record = {"config": func_config, "code_zip": b"fake-zip"}
+    seen_regions = []
+
+    def fake_get_func_record_for_ref(function_ref):
+        assert function_ref == func_arn
+        return func_record, func_config, func_name
+
+    class FakeWorker:
+        def invoke(self, event, message_id):
+            seen_regions.append(("invoke", get_region()))
+            return {"status": "ok", "result": {"statusCode": 200, "body": "ok"}}
+
+    def fake_get_or_create_worker(name, config, code_zip, *, qualifier):
+        seen_regions.append(("spawn", get_region(), name, qualifier))
+        return FakeWorker()
+
+    monkeypatch.setattr(lambda_svc, "_get_func_record_for_ref", fake_get_func_record_for_ref)
+    monkeypatch.setattr(lambda_runtime, "get_or_create_worker", fake_get_or_create_worker)
+
+    apigw_mod._integrations[api_id] = {
+        integration_id: {"integrationType": "AWS_PROXY", "integrationUri": func_arn}
+    }
+    route = {"routeKey": "$default", "target": f"integrations/{integration_id}"}
+    set_request_region("us-east-1")
+    try:
+        result = asyncio.run(apigw_mod._invoke_ws_lambda(
+            api_id,
+            "000000000000",
+            "us-east-1",
+            route,
+            "$default",
+            "conn-1",
+            "MESSAGE",
+            "msg-1",
+            "{}",
+            "127.0.0.1",
+            {},
+            {},
+        ))
+    finally:
+        apigw_mod._integrations.pop(api_id, None)
+        set_request_region("us-east-1")
+
+    assert result == {"statusCode": 200, "body": "ok"}
+    assert seen_regions == [
+        ("spawn", "us-west-2", func_name, "$LATEST"),
+        ("invoke", "us-west-2"),
+    ]
+
 
 def test_apigw_delete_route_v2(apigw):
     """DeleteRoute removes the route from GetRoutes."""
@@ -2165,6 +2423,54 @@ def test_apigwv2_path_based_websocket(apigw, lam):
         ws.close()
 
 
+def test_ws_connect_jwt_authorizer_rejects_missing_token(apigw, lam, cognito_idp):
+    """$connect with a JWT authorizer rejects connections that lack a valid token (#1074)."""
+    from ministack.services import cognito as _cognito
+
+    pool_id = cognito_idp.create_user_pool(PoolName=f"ws-jwt-{_uuid_mod.uuid4().hex[:8]}")["UserPool"]["Id"]
+    issuer = f"https://cognito-idp.us-east-1.amazonaws.com/{pool_id}"
+    api = apigw.create_api(Name=f"ws-jwt-deny-{_uuid_mod.uuid4().hex[:8]}", ProtocolType="WEBSOCKET")
+    api_id = api["ApiId"]
+
+    fn_name = f"ws-jwt-con-{_uuid_mod.uuid4().hex[:6]}"
+    arn = _make_fn(lam, fn_name, _ECHO_CODE)
+    integ = apigw.create_integration(
+        ApiId=api_id, IntegrationType="AWS_PROXY",
+        IntegrationUri=arn, IntegrationMethod="POST",
+    )
+    auth_id = apigw.create_authorizer(
+        ApiId=api_id, AuthorizerType="JWT", Name="ws-jwt",
+        IdentitySource=["$request.querystring.token"],
+        JwtConfiguration={"Audience": ["ws-client"], "Issuer": issuer},
+    )["AuthorizerId"]
+    apigw.create_route(
+        ApiId=api_id, RouteKey="$connect",
+        Target=f"integrations/{integ['IntegrationId']}",
+        AuthorizationType="JWT", AuthorizerId=auth_id,
+    )
+    apigw.create_route(
+        ApiId=api_id, RouteKey="$default",
+        Target=f"integrations/{integ['IntegrationId']}",
+    )
+    apigw.create_stage(ApiId=api_id, StageName="prod")
+
+    # Without a token → connection must be rejected (close code 1008).
+    with pytest.raises(Exception):
+        _WSClient("localhost", _EXECUTE_PORT, "/prod",
+                  headers={"Host": f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}"})
+
+    # With a valid token → connection must be accepted.
+    now = int(time.time())
+    token = _make_signed_token({
+        "sub": "ws-user", "iss": issuer, "aud": "ws-client",
+        "iat": now, "nbf": now - 1, "exp": now + 3600,
+    })
+    ws = _WSClient("localhost", _EXECUTE_PORT, f"/prod?token={token}",
+                   headers={"Host": f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}"})
+    ws.close()
+    cognito_idp.delete_user_pool(UserPoolId=pool_id)
+
+
 def test_apigwv1_path_based_restapi_legacy_user_request(apigw_v1, lam):
     """REST API v1 reachable via /restapis/{apiId}/{stage}/_user_request_/{path} (LocalStack legacy)."""
     import urllib.request
@@ -2414,6 +2720,108 @@ def test_apigwv2_named_stage_still_requires_prefix(apigw, lam):
 def _wrapped_uri(fn_arn: str) -> str:
     """Build the APIGW integration URI Terraform/AWS actually send."""
     return f"arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/{fn_arn}/invocations"
+
+
+def _lambda_client(region: str):
+    import boto3
+
+    return boto3.client(
+        "lambda",
+        endpoint_url=_endpoint,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region,
+    )
+
+
+def _regional_marker_code(marker: str) -> str:
+    return f"""
+def handler(event, context):
+    return {{
+        'statusCode': 200,
+        'body': '{marker}:' + context.invoked_function_arn,
+    }}
+"""
+
+
+def _make_regional_fn(lam, name: str, marker: str) -> str:
+    created = lam.create_function(
+        FunctionName=name,
+        Runtime="python3.12",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Code={"ZipFile": _make_zip(_regional_marker_code(marker))},
+    )
+    lam.invoke(
+        FunctionName=name,
+        InvocationType="RequestResponse",
+        Payload=b'{"_ministack_warmup": true}',
+    )
+    return created["FunctionArn"]
+
+
+def test_apigwv2_lambda_integration_uses_function_arn_region(apigw, lam):
+    import urllib.request
+
+    west_lam = _lambda_client("us-west-2")
+    fn_name = f"apigw-region-{uuid.uuid4().hex[:6]}"
+    _make_regional_fn(lam, fn_name, "east")
+    west_arn = _make_regional_fn(west_lam, fn_name, "west")
+
+    api_id = apigw.create_api(Name="regional-lambda-api", ProtocolType="HTTP")["ApiId"]
+    integ = apigw.create_integration(
+        ApiId=api_id,
+        IntegrationType="AWS_PROXY",
+        IntegrationUri=_wrapped_uri(west_arn),
+        IntegrationMethod="POST",
+    )
+    apigw.create_route(ApiId=api_id, RouteKey="GET /hello", Target=f"integrations/{integ['IntegrationId']}")
+    apigw.create_stage(ApiId=api_id, StageName="$default", AutoDeploy=True)
+
+    req = urllib.request.Request(f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/hello")
+    req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
+    resp = urllib.request.urlopen(req, timeout=30)
+
+    assert resp.status == 200
+    body = resp.read().decode()
+    assert body.startswith("west:")
+    assert ":us-west-2:" in body
+
+
+def test_apigwv1_lambda_integration_uses_function_arn_region(apigw_v1, lam):
+    import urllib.request
+
+    west_lam = _lambda_client("us-west-2")
+    fn_name = f"apigwv1-region-{uuid.uuid4().hex[:6]}"
+    _make_regional_fn(lam, fn_name, "east")
+    west_arn = _make_regional_fn(west_lam, fn_name, "west")
+
+    api_id = apigw_v1.create_rest_api(name="regional-v1-api")["id"]
+    root = apigw_v1.get_resources(restApiId=api_id)["items"][0]["id"]
+    res_id = apigw_v1.create_resource(restApiId=api_id, parentId=root, pathPart="hello")["id"]
+    apigw_v1.put_method(
+        restApiId=api_id,
+        resourceId=res_id,
+        httpMethod="GET",
+        authorizationType="NONE",
+    )
+    apigw_v1.put_integration(
+        restApiId=api_id,
+        resourceId=res_id,
+        httpMethod="GET",
+        type="AWS_PROXY",
+        integrationHttpMethod="POST",
+        uri=_wrapped_uri(west_arn),
+    )
+    apigw_v1.create_deployment(restApiId=api_id, stageName="prod")
+
+    url = f"http://localhost:{_EXECUTE_PORT}/restapis/{api_id}/prod/_user_request_/hello"
+    resp = urllib.request.urlopen(url, timeout=30)
+
+    assert resp.status == 200
+    body = resp.read().decode()
+    assert body.startswith("west:")
+    assert ":us-west-2:" in body
 
 
 def test_apigwv2_integration_wrapped_function_arn(apigw, lam):

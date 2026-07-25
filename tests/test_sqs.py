@@ -6,7 +6,9 @@ import uuid as _uuid_mod
 import zipfile
 from urllib.parse import urlparse
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 
@@ -17,6 +19,19 @@ def _make_zip(code: str) -> bytes:
     return buf.getvalue()
 
 _LAMBDA_ROLE = "arn:aws:iam::000000000000:role/lambda-role"
+
+
+def _regional_sqs(region_name):
+    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    return boto3.client(
+        "sqs",
+        endpoint_url=endpoint,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region_name,
+        config=Config(region_name=region_name, retries={"mode": "standard"}),
+    )
+
 
 def test_sqs_create_queue(sqs):
     resp = sqs.create_queue(QueueName="intg-sqs-create")
@@ -46,10 +61,84 @@ def test_sqs_list_queues(sqs):
     assert any("intg-sqs-list-alpha" in u for u in urls)
     assert any("intg-sqs-list-beta" in u for u in urls)
 
+def test_sqs_list_queues_paginates_with_max_results(sqs):
+    prefix = f"intg-sqs-page-{_uuid_mod.uuid4().hex[:8]}-"
+    for i in range(5):
+        sqs.create_queue(QueueName=f"{prefix}{i}")
+
+    first = sqs.list_queues(QueueNamePrefix=prefix, MaxResults=2)
+    assert len(first["QueueUrls"]) == 2
+    assert "NextToken" in first
+
+    collected = list(first["QueueUrls"])
+    token = first["NextToken"]
+    while token:
+        page = sqs.list_queues(QueueNamePrefix=prefix, MaxResults=2, NextToken=token)
+        collected.extend(page["QueueUrls"])
+        token = page.get("NextToken")
+
+    assert len(collected) == 5
+    assert len(set(collected)) == 5
+
+
+def test_sqs_list_queues_no_next_token_without_max_results(sqs):
+    prefix = f"intg-sqs-nopage-{_uuid_mod.uuid4().hex[:8]}-"
+    sqs.create_queue(QueueName=f"{prefix}only")
+    resp = sqs.list_queues(QueueNamePrefix=prefix)
+    assert len(resp["QueueUrls"]) == 1
+    assert "NextToken" not in resp
+
+
+def test_sqs_list_queues_no_next_token_on_exact_fit(sqs):
+    prefix = f"intg-sqs-exact-{_uuid_mod.uuid4().hex[:8]}-"
+    for i in range(3):
+        sqs.create_queue(QueueName=f"{prefix}{i}")
+    resp = sqs.list_queues(QueueNamePrefix=prefix, MaxResults=3)
+    assert len(resp["QueueUrls"]) == 3
+    assert "NextToken" not in resp
+
+
 def test_sqs_get_queue_url(sqs):
     sqs.create_queue(QueueName="intg-sqs-geturl")
     resp = sqs.get_queue_url(QueueName="intg-sqs-geturl")
     assert "intg-sqs-geturl" in resp["QueueUrl"]
+
+
+def test_sqs_queues_are_region_scoped_by_name(sqs):
+    name = f"mr-sqs-same-name-{_uuid_mod.uuid4().hex[:8]}"
+    west = _regional_sqs("us-west-2")
+
+    east_url = sqs.create_queue(QueueName=name)["QueueUrl"]
+    west_url = west.create_queue(QueueName=name)["QueueUrl"]
+
+    east_arn = sqs.get_queue_attributes(
+        QueueUrl=east_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+    west_arn = west.get_queue_attributes(
+        QueueUrl=west_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+    assert east_arn == f"arn:aws:sqs:us-east-1:000000000000:{name}"
+    assert west_arn == f"arn:aws:sqs:us-west-2:000000000000:{name}"
+
+    sqs.send_message(QueueUrl=east_url, MessageBody="east")
+    west.send_message(QueueUrl=west_url, MessageBody="west")
+
+    east_msgs = sqs.receive_message(
+        QueueUrl=east_url, MaxNumberOfMessages=1, WaitTimeSeconds=0
+    )
+    west_msgs = west.receive_message(
+        QueueUrl=west_url, MaxNumberOfMessages=1, WaitTimeSeconds=0
+    )
+    assert [m["Body"] for m in east_msgs["Messages"]] == ["east"]
+    assert [m["Body"] for m in west_msgs["Messages"]] == ["west"]
+
+    west.delete_queue(QueueUrl=west_url)
+    with pytest.raises(ClientError):
+        west.get_queue_attributes(QueueUrl=west_url, AttributeNames=["QueueArn"])
+    assert sqs.get_queue_attributes(
+        QueueUrl=east_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"] == east_arn
+
 
 def test_sqs_queue_url_reflects_env_host(sqs):
     """QueueUrl host must come from KUMOSTACK_HOST env var, not hardcoded localhost."""
@@ -377,7 +466,8 @@ def test_sqs_tag_queue_rejects_null_tag_value(sqs):
     stored as Python None then serialised back as the literal string "null".
     Real AWS rejects at intake.
     """
-    import urllib.request, json as _json
+    import json as _json
+    import urllib.request
     url = sqs.create_queue(QueueName="intg-sqs-tag-null")["QueueUrl"]
 
     endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
@@ -707,6 +797,17 @@ def test_sqs_bare_queue_name_as_url(sqs):
     assert bodies == ["via-name", "via-url"]
 
 
+def test_sqs_localstack_queue_path_alias(sqs):
+    queue_name = "intg-sqs-localstack-alias"
+    sqs.create_queue(QueueName=queue_name)
+    alias_url = f"http://localhost:4566/queue/{queue_name}"
+
+    sqs.send_message(QueueUrl=alias_url, MessageBody="via-alias")
+
+    resp = sqs.receive_message(QueueUrl=queue_name, MaxNumberOfMessages=1)
+    assert resp["Messages"][0]["Body"] == "via-alias"
+
+
 # -- AWS-parity gaps from competitor audit ------------------------------
 # Three regressions, all surfaced when comparing MS behaviour against the
 # AWS SQS API reference: SendMessage size enforcement, AddPermission,
@@ -868,6 +969,26 @@ def test_sqs_create_queue_redrive_policy_accepts_int_max_receive_count(sqs):
     )
 
 
+def test_sqs_redrive_policy_rejects_cross_region_dlq(sqs):
+    west = _regional_sqs("us-west-2")
+    west_dlq_url = west.create_queue(
+        QueueName=f"rp-west-dlq-{_uuid_mod.uuid4().hex[:8]}"
+    )["QueueUrl"]
+    west_dlq_arn = west.get_queue_attributes(
+        QueueUrl=west_dlq_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+
+    with pytest.raises(ClientError) as exc:
+        sqs.create_queue(
+            QueueName=f"rp-east-src-{_uuid_mod.uuid4().hex[:8]}",
+            Attributes={"RedrivePolicy": json.dumps({
+                "deadLetterTargetArn": west_dlq_arn,
+                "maxReceiveCount": "2",
+            })},
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidAttributeValue"
+
+
 def test_sqs_set_queue_attributes_validates_redrive_policy(sqs):
     """SetQueueAttributes runs the same validator — otherwise CreateQueue
     rejects the bad value but SetQueueAttributes would let it through and
@@ -963,8 +1084,8 @@ def test_sqs_messages_endpoint_basic(sqs):
     # One account, one queue, two messages.
     accts = list(data["messages"].keys())
     assert len(accts) == 1
-    assert qurl in data["messages"][accts[0]]
-    msgs = data["messages"][accts[0]][qurl]
+    assert qurl in data["messages"][accts[0]]["us-east-1"]
+    msgs = data["messages"][accts[0]]["us-east-1"][qurl]
     bodies = sorted(m["Body"] for m in msgs)
     assert bodies == ["hello-peek-1", "hello-peek-2"]
     # Peek must not have receive-counted the messages.
@@ -981,6 +1102,27 @@ def test_sqs_messages_endpoint_basic(sqs):
     sqs.delete_queue(QueueUrl=qurl)
 
 
+def test_sqs_messages_endpoint_separates_same_url_regions(sqs):
+    """QueueUrl peeks keep same-name regional queues separate."""
+    import urllib.request
+
+    name = f"intg-peek-region-{_uuid_mod.uuid4().hex[:8]}"
+    west = _regional_sqs("us-west-2")
+    east_url = sqs.create_queue(QueueName=name)["QueueUrl"]
+    west_url = west.create_queue(QueueName=name)["QueueUrl"]
+    sqs.send_message(QueueUrl=east_url, MessageBody="east-peek")
+    west.send_message(QueueUrl=west_url, MessageBody="west-peek")
+    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+
+    with urllib.request.urlopen(f"{endpoint}/_ministack/sqs/messages?QueueUrl={east_url}") as r:
+        data = json.loads(r.read())
+
+    acct = next(iter(data["messages"]))
+    by_region = data["messages"][acct]
+    assert [m["Body"] for m in by_region["us-east-1"][east_url]] == ["east-peek"]
+    assert [m["Body"] for m in by_region["us-west-2"][west_url]] == ["west-peek"]
+
+
 def test_sqs_messages_endpoint_invalid_account_rejected(sqs):
     """?account=<not-12-digit> returns 400 InvalidAccountID."""
     import urllib.error
@@ -993,3 +1135,236 @@ def test_sqs_messages_endpoint_invalid_account_rejected(sqs):
         assert e.code == 400
         body = json.loads(e.read())
         assert body["__type"] == "InvalidAccountID"
+
+
+def test_sqs_restore_rebuilds_legacy_name_index_from_queue_arn():
+    import ministack.services.sqs as _sqs
+    from ministack.core.responses import (
+        AccountScopedDict,
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+
+    original_account = get_account_id()
+    original_region = get_region()
+    original_queues = dict(_sqs._queues._data)
+    original_names = dict(_sqs._queue_name_to_url._data)
+    try:
+        _sqs._queues.clear()
+        _sqs._queue_name_to_url.clear()
+        set_request_account_id("000000000000")
+        set_request_region("us-east-1")
+
+        legacy_queues = AccountScopedDict()
+        legacy_names = AccountScopedDict()
+        queue_name = f"legacy-west-{_uuid_mod.uuid4().hex[:8]}"
+        queue_url = f"http://localhost:4566/000000000000/{queue_name}"
+        legacy_queues[queue_url] = {
+            "name": queue_name,
+            "url": queue_url,
+            "attributes": {"QueueArn": f"arn:aws:sqs:us-west-2:000000000000:{queue_name}"},
+            "messages": [],
+            "tags": {},
+            "is_fifo": False,
+            "dedup_cache": {},
+            "fifo_seq": 0,
+        }
+        legacy_names[queue_name] = queue_url
+
+        _sqs.restore_state({"queues": legacy_queues, "queue_name_to_url": legacy_names})
+
+        assert _sqs._queue_name_to_url.get(queue_name) is None
+        set_request_region("us-west-2")
+        assert _sqs._queue_name_to_url.get(queue_name) == queue_url
+        assert _sqs._get_q(queue_url)["attributes"]["QueueArn"].endswith(queue_name)
+    finally:
+        _sqs._queues.clear()
+        _sqs._queues._data.update(original_queues)
+        _sqs._queue_name_to_url.clear()
+        _sqs._queue_name_to_url._data.update(original_names)
+        set_request_account_id(original_account)
+        set_request_region(original_region)
+
+
+# ── Numeric attribute range validation (#841) ────────────────────────
+
+
+def test_sqs_create_queue_rejects_visibility_timeout_too_high(sqs):
+    import botocore.exceptions
+    try:
+        sqs.create_queue(QueueName="q-vt-high", Attributes={"VisibilityTimeout": "99999"})
+    except botocore.exceptions.ClientError as exc:
+        assert exc.response["Error"]["Code"] == "InvalidAttributeValue"
+    else:
+        sqs.delete_queue(QueueUrl=sqs.get_queue_url(QueueName="q-vt-high")["QueueUrl"])
+        raise AssertionError("expected InvalidAttributeValue for VisibilityTimeout=99999")
+
+
+def test_sqs_create_queue_rejects_visibility_timeout_negative(sqs):
+    import botocore.exceptions
+    try:
+        sqs.create_queue(QueueName="q-vt-neg", Attributes={"VisibilityTimeout": "-1"})
+    except botocore.exceptions.ClientError as exc:
+        assert exc.response["Error"]["Code"] == "InvalidAttributeValue"
+    else:
+        raise AssertionError("expected InvalidAttributeValue for VisibilityTimeout=-1")
+
+
+def test_sqs_create_queue_rejects_delay_seconds_out_of_range(sqs):
+    import botocore.exceptions
+    try:
+        sqs.create_queue(QueueName="q-ds-bad", Attributes={"DelaySeconds": "901"})
+    except botocore.exceptions.ClientError as exc:
+        assert exc.response["Error"]["Code"] == "InvalidAttributeValue"
+    else:
+        raise AssertionError("expected InvalidAttributeValue for DelaySeconds=901")
+
+
+def test_sqs_create_queue_rejects_maximum_message_size_below_min(sqs):
+    import botocore.exceptions
+    try:
+        sqs.create_queue(QueueName="q-mms-low", Attributes={"MaximumMessageSize": "512"})
+    except botocore.exceptions.ClientError as exc:
+        assert exc.response["Error"]["Code"] == "InvalidAttributeValue"
+    else:
+        raise AssertionError("expected InvalidAttributeValue for MaximumMessageSize=512")
+
+
+def test_sqs_create_queue_rejects_receive_wait_too_long(sqs):
+    import botocore.exceptions
+    try:
+        sqs.create_queue(QueueName="q-rwt-bad",
+                          Attributes={"ReceiveMessageWaitTimeSeconds": "21"})
+    except botocore.exceptions.ClientError as exc:
+        assert exc.response["Error"]["Code"] == "InvalidAttributeValue"
+    else:
+        raise AssertionError("expected InvalidAttributeValue for ReceiveMessageWaitTimeSeconds=21")
+
+
+def test_sqs_set_queue_attributes_rejects_visibility_timeout_too_high(sqs):
+    import botocore.exceptions
+    url = sqs.create_queue(QueueName="q-set-vt-bad")["QueueUrl"]
+    try:
+        try:
+            sqs.set_queue_attributes(QueueUrl=url, Attributes={"VisibilityTimeout": "100000"})
+        except botocore.exceptions.ClientError as exc:
+            assert exc.response["Error"]["Code"] == "InvalidAttributeValue"
+        else:
+            raise AssertionError("expected InvalidAttributeValue on SetQueueAttributes")
+    finally:
+        sqs.delete_queue(QueueUrl=url)
+
+
+def test_sqs_set_queue_attributes_accepts_valid_visibility_timeout(sqs):
+    # Regression guard — must NOT reject in-range values.
+    url = sqs.create_queue(QueueName="q-set-vt-ok")["QueueUrl"]
+    try:
+        sqs.set_queue_attributes(QueueUrl=url, Attributes={"VisibilityTimeout": "120"})
+        attrs = sqs.get_queue_attributes(
+            QueueUrl=url, AttributeNames=["VisibilityTimeout"])["Attributes"]
+        assert attrs["VisibilityTimeout"] == "120"
+    finally:
+        sqs.delete_queue(QueueUrl=url)
+
+
+def test_sqs_create_queue_rejects_non_numeric_visibility_timeout(sqs):
+    import botocore.exceptions
+    try:
+        sqs.create_queue(QueueName="q-vt-nan", Attributes={"VisibilityTimeout": "abc"})
+    except botocore.exceptions.ClientError as exc:
+        assert exc.response["Error"]["Code"] == "InvalidAttributeValue"
+    else:
+        raise AssertionError("expected InvalidAttributeValue for non-numeric")
+
+
+def test_sqs_send_message_rejects_control_chars(sqs):
+    """SendMessage must reject message bodies containing XML 1.0 forbidden characters.
+
+    AWS SQS only allows: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+    Control characters like NULL, BEL, VT, etc. must result in InvalidMessageContents (400).
+    See: https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/quotas-messages.html
+    """
+    url = sqs.create_queue(QueueName="intg-sqs-invalid-chars")["QueueUrl"]
+
+    forbidden = [
+        "\x00",        # NULL
+        "\x01",        # SOH
+        "\x08",        # BS (last before tab)
+        "\x0b",        # VT (vertical tab)
+        "\x0c",        # FF (form feed)
+        "\x0e",        # SO (first after CR)
+        "\x1f",        # US (last C0 control char)
+        "hello\x00world",  # control char embedded in normal text
+        "\ufffe",      # non-character
+        "\uffff",      # non-character
+    ]
+    for body in forbidden:
+        with pytest.raises(ClientError) as exc:
+            sqs.send_message(QueueUrl=url, MessageBody=body)
+        code = exc.value.response["Error"]["Code"]
+        assert code == "InvalidMessageContents", (
+            f"expected InvalidMessageContents for {repr(body)}, got {code}"
+        )
+        assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+
+
+def test_sqs_send_message_allows_valid_chars(sqs):
+    """SendMessage must allow all XML 1.0 valid characters including tab, LF, CR, and Unicode."""
+    url = sqs.create_queue(QueueName="intg-sqs-valid-chars")["QueueUrl"]
+
+    allowed = [
+        "hello world",
+        "tab\there",
+        "newline\nhere",
+        "cr\rhere",
+        "こんにちは世界",
+        "héllo wörld",
+        "emoji \U0001f600",
+        "!@#$%^&*()",
+    ]
+    for body in allowed:
+        resp = sqs.send_message(QueueUrl=url, MessageBody=body)
+        assert "MessageId" in resp, f"send failed for {repr(body)}"
+
+
+def test_sqs_xml_query_error_code_uses_legacy_namespace():
+    """XML Query API error responses must use legacy namespaced codes
+    (e.g. AWS.SimpleQueueService.NonExistentQueue) not the short JSON codes
+    (e.g. QueueDoesNotExist). .NET SDK and other XML-protocol callers match
+    on the namespaced string (#1066)."""
+    import urllib.error
+    import urllib.request
+    import xml.etree.ElementTree as ET
+
+    endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+    try:
+        urllib.request.urlopen(f"{endpoint}/?Action=GetQueueUrl&QueueName=nonexistent-xml-test-queue")
+        raise AssertionError("expected HTTP error")
+    except urllib.error.HTTPError as e:
+        body = e.read()
+        root = ET.fromstring(body)
+        ns = {"ns": "http://queue.amazonaws.com/doc/2012-11-05/"}
+        code = root.find(".//ns:Code", ns).text
+        assert code == "AWS.SimpleQueueService.NonExistentQueue", (
+            f"XML error code must be legacy namespaced, got '{code}'"
+        )
+
+
+def test_sqs_invalid_chars_regex_matches_xml10_complement():
+    """The forbidden-char regex must be the exact complement of AWS SQS's allowed
+    set (#x9 | #xA | #xD | #x20-#xD7FF | #xE000-#xFFFD | #x10000-#x10FFFF), which
+    excludes the surrogate block #xD800-#xDFFF. Lone surrogates can't be sent
+    through boto3 (client-side UnicodeEncodeError), so this guards the regex
+    directly rather than via the wire."""
+    from ministack.services.sqs import _INVALID_SQS_CHARS_RE as rx
+
+    # Forbidden: C0 controls (except tab/LF/CR), surrogates, #xFFFE/#xFFFF.
+    for c in ("\x00", "\x08", "\x0b", "\x0c", "\x0e", "\x1f",
+              "\ud800", "\udfff", "￾", "￿"):
+        assert rx.search(c), f"must reject {c!r}"
+    # Allowed: tab/LF/CR, the range boundaries, BMP, supplementary.
+    for c in ("\t", "\n", "\r", "퟿", "", "�",
+              "a", "こ", "\U0001f600"):
+        assert not rx.search(c), f"must allow {c!r}"

@@ -34,8 +34,10 @@ import secrets
 import threading
 import time
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import load_state
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
@@ -44,7 +46,7 @@ from kumostack.core.responses import (
     new_uuid,
     now_iso,
 )
-from kumostack.services import ecs_metadata
+from kumostack.services import ecs_metadata, secretsmanager
 
 logger = logging.getLogger("ecs")
 
@@ -52,20 +54,21 @@ REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 _MINISTACK_HOST = os.environ.get("MINISTACK_HOST", "localhost")
 _GATEWAY_PORT = os.environ.get("GATEWAY_PORT", "4566")
 
-_clusters = AccountScopedDict()
-_task_defs = AccountScopedDict()
-_task_def_latest = AccountScopedDict()
-_services = AccountScopedDict()
-_tasks = AccountScopedDict()
+_clusters = AccountRegionScopedDict()
+_task_defs = AccountRegionScopedDict()
+_task_def_latest = AccountRegionScopedDict()
+_services = AccountRegionScopedDict()
+_tasks = AccountRegionScopedDict()
+# Account-scoped is deliberate: keys are region-embedding resource ARNs.
 _tags = AccountScopedDict()
-_account_settings = AccountScopedDict()
-_capacity_providers = AccountScopedDict()
+_account_settings = AccountRegionScopedDict()
+_capacity_providers = AccountRegionScopedDict()
 # `_attributes` was originally declared next to its handler block much
 # further down the file. Moved up here so the import-time `load_state`
 # block (which calls `restore_state` and references `_attributes`) sees
 # it defined; otherwise warm-boot fires NameError, the surrounding
 # try/except swallows it, and ALL ECS state silently fails to restore.
-_attributes = AccountScopedDict()
+_attributes = AccountRegionScopedDict()
 
 _docker = None
 
@@ -124,9 +127,8 @@ def get_state():
         "attributes": copy.deepcopy(_attributes),
     }
     # Save tasks but strip Docker container IDs.
-    # Iterate _data directly to capture ALL accounts.
-    from kumostack.core.responses import AccountScopedDict
-    tasks = AccountScopedDict()
+    # Iterate _data directly to capture ALL accounts and regions.
+    tasks = AccountRegionScopedDict()
     for scoped_key, task in _tasks._data.items():
         t = copy.deepcopy(task)
         t.pop("_docker_ids", None)
@@ -136,29 +138,89 @@ def get_state():
     return state
 
 
+def _restore_task_def_latest(latest_data):
+    if isinstance(latest_data, AccountRegionScopedDict):
+        _task_def_latest.update(latest_data)
+        return
+
+    task_defs = _task_defs.all_items()
+    for (account_id, region, _key), task_def in task_defs:
+        if not isinstance(task_def, dict):
+            continue
+        family = task_def.get("family")
+        revision = task_def.get("revision")
+        if not family or not isinstance(revision, int):
+            continue
+        current_revision = _task_def_latest.get_scoped(
+            account_id, region, family
+        )
+        if current_revision is None or revision > current_revision:
+            _task_def_latest.set_scoped(account_id, region, family, revision)
+
+    if not latest_data:
+        return
+
+    if isinstance(latest_data, AccountScopedDict):
+        latest_items = latest_data._data.items()
+    else:
+        latest_items = (
+            ((get_account_id(), family), revision)
+            for family, revision in latest_data.items()
+        )
+
+    for (account_id, family), revision in latest_items:
+        exact_key = f"{family}:{revision}"
+        exact_regions = {
+            region
+            for (candidate_account, region, key), _task_def in task_defs
+            if candidate_account == account_id and key == exact_key
+        }
+        family_regions = {
+            region
+            for (candidate_account, region, _key), task_def in task_defs
+            if candidate_account == account_id
+            and isinstance(task_def, dict)
+            and task_def.get("family") == family
+        }
+        matching_regions = exact_regions or family_regions
+        region = next(iter(matching_regions)) if len(matching_regions) == 1 else get_region()
+        current_revision = _task_def_latest.get_scoped(account_id, region, family)
+        if current_revision is None or revision > current_revision:
+            _task_def_latest.set_scoped(account_id, region, family, revision)
+
+
 def restore_state(data):
     if not data:
         return
     _clusters.update(data.get("clusters", {}))
     _task_defs.update(data.get("task_defs", {}))
-    _task_def_latest.update(data.get("task_def_latest", {}))
+    _restore_task_def_latest(data.get("task_def_latest", {}))
     _services.update(data.get("services", {}))
     _tags.update(data.get("tags", {}))
     _account_settings.update(data.get("account_settings", {}))
     _capacity_providers.update(data.get("capacity_providers", {}))
     _attributes.update(data.get("attributes", {}))
-    from kumostack.core.responses import AccountScopedDict
     tasks_data = data.get("tasks", {})
-    if isinstance(tasks_data, AccountScopedDict):
+    if isinstance(tasks_data, AccountRegionScopedDict):
         for scoped_key, task in tasks_data._data.items():
-            task["_docker_ids"] = []
-            task["lastStatus"] = "STOPPED"
-            _tasks._data[scoped_key] = task
+            restored_task = copy.deepcopy(task)
+            restored_task["_docker_ids"] = []
+            restored_task["lastStatus"] = "STOPPED"
+            _tasks._data[scoped_key] = restored_task
+    elif isinstance(tasks_data, AccountScopedDict):
+        for (account_id, arn), task in tasks_data._data.items():
+            restored_task = copy.deepcopy(task)
+            restored_task["_docker_ids"] = []
+            restored_task["lastStatus"] = "STOPPED"
+            region = _tasks._region_for_legacy_value(arn, restored_task)
+            _tasks.set_scoped(account_id, region, arn, restored_task)
     else:
         for arn, task in tasks_data.items():
-            task["_docker_ids"] = []
-            task["lastStatus"] = "STOPPED"
-            _tasks[arn] = task
+            restored_task = copy.deepcopy(task)
+            restored_task["_docker_ids"] = []
+            restored_task["lastStatus"] = "STOPPED"
+            region = _tasks._region_for_legacy_value(arn, restored_task)
+            _tasks.set_scoped(get_account_id(), region, arn, restored_task)
 
 
 try:
@@ -630,6 +692,8 @@ def _reconcile_service_tasks(cluster_name, svc_key):
 
 def _create_service(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     if cluster_name not in _clusters:
         _create_cluster({"clusterName": cluster_name})
 
@@ -646,6 +710,9 @@ def _create_service(data):
 
     td_ref = data.get("taskDefinition", "")
     td_key = _resolve_td_key(td_ref)
+    if td_ref.startswith("arn:") and td_key is None:
+        return error_response_json("ClientException",
+            f"Unable to find task definition: {td_ref}", 400)
     td_arn = _task_defs[td_key]["taskDefinitionArn"] if td_key in _task_defs else td_ref
 
     desired = data.get("desiredCount", 1)
@@ -700,8 +767,17 @@ def _create_service(data):
 
 def _delete_service(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     service_ref = data.get("service", "")
-    svc_name = _resolve_service_name(service_ref)
+    svc_ref = _resolve_service_ref(service_ref)
+    if svc_ref is None:
+        return error_response_json("ServiceNotFoundException",
+            "Service not found.", 400)
+    svc_name, svc_cluster_name = svc_ref
+    if svc_cluster_name is not None and svc_cluster_name != cluster_name:
+        return error_response_json("ServiceNotFoundException",
+            "Service not found.", 400)
     svc_key = f"{cluster_name}/{svc_name}"
     svc = _services.get(svc_key)
     if not svc:
@@ -743,12 +819,21 @@ def _delete_service(data):
 
 def _describe_services(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     refs = data.get("services", [])
     include = set(data.get("include", []))
     result = []
     failures = []
     for ref in refs:
-        svc_name = _resolve_service_name(ref)
+        svc_ref = _resolve_service_ref(ref)
+        if svc_ref is None:
+            failures.append({"arn": ref, "reason": "MISSING"})
+            continue
+        svc_name, svc_cluster_name = svc_ref
+        if svc_cluster_name is not None and svc_cluster_name != cluster_name:
+            failures.append({"arn": ref, "reason": "MISSING"})
+            continue
         svc_key = f"{cluster_name}/{svc_name}"
         if svc_key in _services:
             s = dict(_services[svc_key])
@@ -764,8 +849,15 @@ def _describe_services(data):
 
 def _update_service(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     service_ref = data.get("service", "")
-    svc_name = _resolve_service_name(service_ref)
+    svc_ref = _resolve_service_ref(service_ref)
+    if svc_ref is None:
+        return error_response_json("ServiceNotFoundException", "Service not found.", 400)
+    svc_name, svc_cluster_name = svc_ref
+    if svc_cluster_name is not None and svc_cluster_name != cluster_name:
+        return error_response_json("ServiceNotFoundException", "Service not found.", 400)
     svc_key = f"{cluster_name}/{svc_name}"
     svc = _services.get(svc_key)
     if not svc:
@@ -777,6 +869,9 @@ def _update_service(data):
 
     if new_td is not None:
         td_key = _resolve_td_key(new_td)
+        if new_td.startswith("arn:") and td_key is None:
+            return error_response_json("ClientException",
+                f"Unable to find task definition: {new_td}", 400)
         td_arn = _task_defs[td_key]["taskDefinitionArn"] if td_key in _task_defs else new_td
         if td_arn != svc["taskDefinition"]:
             for dep in svc["deployments"]:
@@ -822,6 +917,8 @@ def _update_service(data):
 
 def _list_services(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     launch_type = data.get("launchType")
     scheduling = data.get("schedulingStrategy")
     arns = []
@@ -950,6 +1047,13 @@ def _docker_binds_from_taskdef(td, cdef):
     return binds
 
 
+def _container_override_for(container_overrides, container_name):
+    for override in container_overrides:
+        if override.get("name") == container_name:
+            return override
+    return {}
+
+
 def _build_run_kwargs(cdef, td, env, port_bindings, ecs_network,
                       host_mode, task_id, task_arn, kumostack_net_ip,
                       cluster_arn):
@@ -995,8 +1099,61 @@ def _build_run_kwargs(cdef, td, env, port_bindings, ecs_network,
     return kwargs
 
 
+class _SecretResolutionError(Exception):
+    """A container secret's ``valueFrom`` could not be resolved.
+
+    AWS fails the whole task to start with a ``ResourceInitializationError``
+    rather than launching the container without the variable, so ``_run_task``
+    translates this into a STOPPED task.
+    """
+
+
+def _resolve_container_secrets(cdef):
+    """Resolve a container definition's ``secrets`` into a {name: value} mapping.
+
+    Each entry's ``valueFrom`` is either a Secrets Manager secret ARN (optionally
+    with a ``:json-key`` suffix selecting one field from a JSON ``SecretString``)
+    or an SSM Parameter Store name/ARN. A reference that cannot be resolved
+    raises ``_SecretResolutionError`` — matching AWS, which fails the task launch
+    instead of starting the container without the variable.
+    """
+    resolved = {}
+    for secret in cdef.get("secrets", []):
+        name = secret.get("name")
+        value_from = secret.get("valueFrom", "")
+        if not name or not value_from:
+            continue
+        json_key = None
+        if "secretsmanager" in value_from:
+            # A Secrets Manager ARN has 7 colon-separated fields; ECS may append
+            # :json-key:version-stage:version-id after it.
+            parts = value_from.split(":")
+            secret_arn = ":".join(parts[:7])
+            json_key = parts[7] if len(parts) > 7 and parts[7] else None
+            value = secretsmanager.resolve_secret_string(secret_arn)
+        else:
+            # SSM Parameter Store reference (ARN or bare name).
+            from ministack.services import ssm
+            value = ssm.resolve_parameter_value(value_from)
+        if value is None:
+            raise _SecretResolutionError(
+                f"unable to retrieve secret {value_from} for environment "
+                f"variable {name}")
+        if json_key:
+            try:
+                value = json.loads(value)[json_key]
+            except (ValueError, KeyError, TypeError):
+                raise _SecretResolutionError(
+                    f"unable to retrieve json key '{json_key}' from secret "
+                    f"{value_from} for environment variable {name}")
+        resolved[name] = str(value)
+    return resolved
+
+
 def _run_task(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     if cluster_name not in _clusters:
         _create_cluster({"clusterName": cluster_name})
 
@@ -1090,14 +1247,36 @@ def _run_task(data):
                 logger.debug("ECS: could not detect KumoStack network, using default")
 
             for i, cdef in enumerate(td.get("containerDefinitions", [])):
+                container_override = _container_override_for(
+                    container_overrides, cdef["name"]
+                )
                 env_override = {}
-                for ov in container_overrides:
-                    if ov.get("name") == cdef["name"]:
-                        for e in ov.get("environment", []):
-                            env_override[e["name"]] = e["value"]
+                for e in container_override.get("environment", []):
+                    env_override[e["name"]] = e["value"]
 
                 env = {e["name"]: e["value"] for e in cdef.get("environment", [])}
+                try:
+                    env.update(_resolve_container_secrets(cdef))
+                except _SecretResolutionError as exc:
+                    # AWS fails the whole task to start (ResourceInitializationError)
+                    # when a secret can't be retrieved — don't launch any container.
+                    now = _iso()
+                    task["lastStatus"] = "STOPPED"
+                    task["desiredStatus"] = "STOPPED"
+                    task["stoppingAt"] = now
+                    task["stoppedAt"] = now
+                    task["stopCode"] = "TaskFailedToStart"
+                    task["stoppedReason"] = (
+                        "ResourceInitializationError: unable to pull secrets or "
+                        "registry auth: execution resource retrieval failed: "
+                        + str(exc))
+                    for c in task.get("containers", []):
+                        c["lastStatus"] = "STOPPED"
+                    break
                 env.update(env_override)
+                effective_cdef = dict(cdef)
+                if "command" in container_override:
+                    effective_cdef["command"] = container_override["command"]
 
                 port_bindings = {}
                 for pm in cdef.get("portMappings", []):
@@ -1110,7 +1289,7 @@ def _run_task(data):
                     td, cdef, launch_type, env, host_mode, kumostack_net_ip,
                 )
                 run_kwargs = _build_run_kwargs(
-                    cdef, td, env, port_bindings, ecs_network,
+                    effective_cdef, td, env, port_bindings, ecs_network,
                     host_mode, task_id, task_arn, kumostack_net_ip,
                     _clusters[cluster_name]["clusterArn"],
                 )
@@ -1139,6 +1318,8 @@ def _run_task(data):
 def _stop_task(data):
     task_ref = data.get("task", "")
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     reason = data.get("reason", "Task stopped by user")
 
     task = _resolve_task(task_ref, cluster_name)
@@ -1182,6 +1363,8 @@ def _stop_task(data):
 
 def _describe_tasks(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     task_refs = data.get("tasks", [])
     include = set(data.get("include", []))
     result = []
@@ -1250,6 +1433,8 @@ def _maybe_mark_stopped(task):
 
 def _list_tasks(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     cluster_arn = f"arn:aws:ecs:{get_region()}:{get_account_id()}:cluster/{cluster_name}"
     status_filter = data.get("desiredStatus", "RUNNING")
     family = data.get("family", "")
@@ -1344,6 +1529,8 @@ def _list_tags_for_resource(data):
 
 def _execute_command(data):
     cluster_name = _resolve_cluster_name(data.get("cluster", "default"))
+    if cluster_name is None:
+        return error_response_json("ClusterNotFoundException", "Cluster not found.", 400)
     task_ref = data.get("task", "")
     task = _resolve_task(task_ref, cluster_name)
     if not task:
@@ -1408,6 +1595,7 @@ def _put_account_setting(data):
 
 def _describe_capacity_providers(data):
     names = data.get("capacityProviders", [])
+    resolved_names = [_resolve_capacity_provider_name(name) for name in names]
     include = data.get("include", [])
     providers = []
     defaults = [
@@ -1415,7 +1603,7 @@ def _describe_capacity_providers(data):
         {"name": "FARGATE_SPOT", "status": "ACTIVE", "autoScalingGroupProvider": {}},
     ]
     for p in defaults:
-        if not names or p["name"] in names:
+        if not names or p["name"] in resolved_names:
             cp = {
                 "capacityProviderArn": f"arn:aws:ecs:{get_region()}:{get_account_id()}:capacity-provider/{p['name']}",
                 "name": p["name"],
@@ -1428,7 +1616,7 @@ def _describe_capacity_providers(data):
             providers.append(cp)
 
     for cp_name, cp in _capacity_providers.items():
-        if not names or cp_name in names:
+        if not names or cp_name in resolved_names:
             entry = dict(cp)
             if "TAGS" in include:
                 entry["tags"] = _tags.get(cp["capacityProviderArn"], [])
@@ -1475,9 +1663,7 @@ def _create_capacity_provider(data):
 
 
 def _delete_capacity_provider(data):
-    name = data.get("capacityProvider", "")
-    if name.startswith("arn:"):
-        name = name.split("/")[-1]
+    name = _resolve_capacity_provider_name(data.get("capacityProvider", ""))
 
     cp = _capacity_providers.pop(name, None)
     if not cp:
@@ -1538,24 +1724,45 @@ def _resolve_cluster_name(ref):
     if not ref:
         return "default"
     if ref.startswith("arn:"):
-        return ref.split("/")[-1]
+        return _ecs_single_resource_tail(ref, "cluster")
     if "/" in ref:
         return ref.split("/")[-1]
     return ref
 
 
-def _resolve_service_name(ref):
+def _resolve_service_ref(ref):
+    if not ref:
+        return "", None
     if ref.startswith("arn:"):
-        return ref.split("/")[-1]
+        service_tail = _ecs_resource_tail(ref, "service")
+        if service_tail is None:
+            return None
+        parts = service_tail.split("/")
+        if len(parts) == 1:
+            service_name = parts[0]
+            service_cluster_name = None
+        elif len(parts) == 2:
+            service_cluster_name, service_name = parts
+            if not service_cluster_name:
+                return None
+        else:
+            return None
+        if not service_name:
+            return None
+        return service_name, service_cluster_name
     if "/" in ref:
-        return ref.split("/")[-1]
-    return ref
+        return None
+    return ref, None
 
 
 def _resolve_td_key(ref):
     if not ref:
         return ""
-    if "task-definition/" in ref:
+    if ref.startswith("arn:"):
+        ref = _ecs_single_resource_tail(ref, "task-definition")
+        if ref is None:
+            return None
+    elif "task-definition/" in ref:
         ref = ref.split("task-definition/")[-1]
     if ":" not in ref:
         rev = _task_def_latest.get(ref)
@@ -1565,19 +1772,44 @@ def _resolve_td_key(ref):
     return ref
 
 
+def _resolve_td_delete_key(ref):
+    if not ref:
+        return ""
+    if ref.startswith("arn:"):
+        ref = _ecs_single_resource_tail(ref, "task-definition")
+        if ref is None:
+            return None
+    elif "task-definition/" in ref:
+        ref = ref.split("task-definition/")[-1]
+    if ":" not in ref:
+        return None
+    return ref
+
+
 def _resolve_task(ref, cluster_name="default"):
     """Look up a task by full ARN or short ID, optionally scoped to a cluster."""
-    task = _tasks.get(ref)
-    if task:
-        return task
+    if cluster_name is None:
+        return None
+    is_arn = ref.startswith("arn:")
+    task_ref = _resolve_task_ref(ref)
+    if task_ref is None:
+        return None
+    task_id, arn_cluster_name = task_ref
+    if arn_cluster_name is not None and arn_cluster_name != cluster_name:
+        return None
     cluster_arn = f"arn:aws:ecs:{get_region()}:{get_account_id()}:cluster/{cluster_name}"
+    task = _tasks.get(ref)
+    if task and task.get("clusterArn") == cluster_arn:
+        return task
     for arn, t in _tasks.items():
         if t.get("clusterArn") != cluster_arn:
             continue
-        if arn.endswith(f"/{ref}") or arn.endswith(ref):
+        if arn.endswith(f"/{task_id}") or arn.endswith(task_id):
             return t
+    if is_arn:
+        return None
     for arn, t in _tasks.items():
-        if arn.endswith(f"/{ref}") or arn.endswith(ref):
+        if arn.endswith(f"/{task_id}") or arn.endswith(task_id):
             return t
     return None
 
@@ -1585,7 +1817,70 @@ def _resolve_task(ref, cluster_name="default"):
 def _cluster_name_from_arn(arn):
     if not arn:
         return ""
+    if arn.startswith("arn:"):
+        return _ecs_single_resource_tail(arn, "cluster") or ""
     return arn.split("/")[-1] if "/" in arn else arn
+
+
+def _resolve_task_ref(ref):
+    if not ref:
+        return "", None
+    if ref.startswith("arn:"):
+        task_tail = _ecs_resource_tail(ref, "task")
+        if task_tail is None:
+            return None
+        parts = task_tail.split("/")
+        if len(parts) == 1:
+            task_id = parts[0]
+            task_cluster_name = None
+        elif len(parts) == 2:
+            task_cluster_name, task_id = parts
+            if not task_cluster_name:
+                return None
+        else:
+            return None
+        if not task_id:
+            return None
+        return task_id, task_cluster_name
+    if "/" in ref:
+        return None
+    return ref, None
+
+
+def _resolve_capacity_provider_name(ref):
+    if not ref:
+        return ""
+    if ref.startswith("arn:"):
+        return _ecs_single_resource_tail(ref, "capacity-provider")
+    if "/" in ref:
+        return None
+    return ref
+
+
+def _ecs_resource_tail(ref, resource_type):
+    try:
+        spec = parse_arn(ref)
+    except ArnParseError:
+        return None
+    if (
+        spec.partition != "aws"
+        or spec.service != "ecs"
+        or spec.region != get_region()
+        or spec.account_id != get_account_id()
+    ):
+        return None
+    prefix = f"{resource_type}/"
+    if not spec.resource.startswith(prefix):
+        return None
+    tail = spec.resource[len(prefix):]
+    return tail or None
+
+
+def _ecs_single_resource_tail(ref, resource_type):
+    tail = _ecs_resource_tail(ref, resource_type)
+    if tail is None or "/" in tail:
+        return None
+    return tail
 
 
 def _sanitize(obj):
@@ -1618,13 +1913,15 @@ def _list_task_definition_families(data):
 def _delete_task_definitions(data):
     arns = data.get("taskDefinitions", [])
     failures = []
+    task_definitions = []
     for arn in arns:
-        key = arn.split("/")[-1] if "/" in arn else arn
+        key = _resolve_td_delete_key(arn)
         if key in _task_defs:
             _task_defs[key]["status"] = "DELETE_IN_PROGRESS"
+            task_definitions.append(_task_defs[key])
         else:
             failures.append({"arn": arn, "reason": "TASK_DEFINITION_NOT_FOUND"})
-    return json_response({"taskDefinitions": [_task_defs.get(a.split("/")[-1], {}) for a in arns if a.split("/")[-1] in _task_defs], "failures": failures})
+    return json_response({"taskDefinitions": task_definitions, "failures": failures})
 
 
 # ---------------------------------------------------------------------------
@@ -1705,7 +2002,7 @@ def _list_attributes(data):
 # ---------------------------------------------------------------------------
 
 def _update_capacity_provider(data):
-    name = data.get("name", "")
+    name = _resolve_capacity_provider_name(data.get("name", ""))
     cp = _capacity_providers.get(name)
     if not cp:
         return error_response_json("ClientException", f"Capacity provider {name} not found", 400)

@@ -29,14 +29,17 @@ import xml.etree.ElementTree as ET
 from datetime import date
 from urllib.parse import urlparse
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import PERSIST_STATE, load_state
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
     get_region,
     json_response,
     new_uuid,
+    set_request_region,
 )
 
 logger = logging.getLogger("athena")
@@ -57,14 +60,13 @@ def get_athena_engine():
     return engine
 
 
-_executions = AccountScopedDict()
-# Per-account workgroups / data catalogs. AWS's "primary" workgroup and
-# "AwsDataCatalog" exist in every account — we lazily seed them per-tenant
-# on first access so two accounts never share the same workgroup or catalog
-# state (creation times, configs, etc.).
-_workgroups = AccountScopedDict()
-_named_queries = AccountScopedDict()
-_data_catalogs = AccountScopedDict()
+_executions = AccountRegionScopedDict()
+# Per-account-and-region workgroups / data catalogs. AWS's "primary" workgroup
+# and "AwsDataCatalog" exist in every region — we lazily seed them per scope on
+# first access so requests never share workgroup or catalog state.
+_workgroups = AccountRegionScopedDict()
+_named_queries = AccountRegionScopedDict()
+_data_catalogs = AccountRegionScopedDict()
 
 
 def _ensure_default_workgroup():
@@ -88,7 +90,7 @@ def _ensure_default_data_catalog():
             "Type": "GLUE",
             "Parameters": {},
         }
-_prepared_statements = AccountScopedDict()  # "workgroup/name" -> statement dict
+_prepared_statements = AccountRegionScopedDict()  # "workgroup/name" -> statement dict
 _tags = AccountScopedDict()  # arn -> {key: value, ...}
 
 
@@ -106,19 +108,92 @@ def get_state():
 
 
 def restore_state(data):
-    # AccountScopedDicts are mutated in-place — no module-level reassignment.
+    # Scoped dicts are mutated in-place — no module-level reassignment.
     _executions.clear()
-    _executions.update(data.get("_executions", {}))
     _workgroups.clear()
-    _workgroups.update(data.get("_workgroups", {}))
     _named_queries.clear()
-    _named_queries.update(data.get("_named_queries", {}))
     _data_catalogs.clear()
-    _data_catalogs.update(data.get("_data_catalogs", {}))
     _prepared_statements.clear()
-    _prepared_statements.update(data.get("_prepared_statements", {}))
     _tags.clear()
+
+    legacy_workgroup_regions = _restore_regional_store(
+        _workgroups, data.get("_workgroups", {})
+    )
+    for store, key, workgroup_fields in (
+        (_executions, "_executions", ("WorkGroup",)),
+        (_named_queries, "_named_queries", ("WorkGroup",)),
+        (
+            _prepared_statements,
+            "_prepared_statements",
+            ("WorkGroupName", "WorkGroup"),
+        ),
+    ):
+        _restore_workgroup_child_store(
+            store,
+            data.get(key, {}),
+            legacy_workgroup_regions,
+            workgroup_fields,
+        )
+    _restore_regional_store(_data_catalogs, data.get("_data_catalogs", {}))
     _tags.update(data.get("_tags", {}))
+
+
+def _legacy_region_for_value(store, key, value):
+    """Infer an ARN region, falling back to Athena's configured boot region."""
+    request_region = get_region()
+    try:
+        set_request_region(REGION)
+        return store._region_for_legacy_value(key, value)
+    finally:
+        set_request_region(request_region)
+
+
+def _restore_regional_store(store, restored):
+    """Restore current state verbatim and legacy state deterministically."""
+    if isinstance(restored, AccountRegionScopedDict):
+        store.update(restored)
+        return {}
+
+    restored_regions = {}
+    if isinstance(restored, AccountScopedDict):
+        items = restored._data.items()
+    else:
+        account_id = get_account_id()
+        items = (((account_id, key), value) for key, value in restored.items())
+
+    for (account_id, key), value in items:
+        region = _legacy_region_for_value(store, key, value)
+        store.set_scoped(account_id, region, key, value)
+        restored_regions[(account_id, key)] = region
+    return restored_regions
+
+
+def _restore_workgroup_child_store(
+    store, restored, workgroup_regions, workgroup_fields
+):
+    """Place legacy child records beside their referenced workgroup."""
+    if isinstance(restored, AccountRegionScopedDict):
+        store.update(restored)
+        return
+
+    if isinstance(restored, AccountScopedDict):
+        items = restored._data.items()
+    else:
+        account_id = get_account_id()
+        items = (((account_id, key), value) for key, value in restored.items())
+
+    for (account_id, key), value in items:
+        workgroup = next(
+            (value.get(field) for field in workgroup_fields if value.get(field)),
+            None,
+        )
+        if not workgroup and store is _prepared_statements:
+            workgroup = str(key).partition("/")[0]
+        workgroup = workgroup or "primary"
+        region = workgroup_regions.get((account_id, workgroup))
+        if region is None:
+            region = _legacy_region_for_value(store, key, value)
+        store.set_scoped(account_id, region, key, value)
 
 
 try:
@@ -171,6 +246,38 @@ def _arn_workgroup(name):
 
 def _arn_datacatalog(name):
     return f"arn:aws:athena:{get_region()}:{get_account_id()}:datacatalog/{name}"
+
+
+def _is_taggable_athena_resource(resource):
+    for prefix in ("workgroup/", "datacatalog/"):
+        if resource.startswith(prefix):
+            name = resource[len(prefix):]
+            return bool(name) and "/" not in name
+    return False
+
+
+def _validate_tag_resource_arn(arn):
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return error_response_json(
+            "InvalidRequestException",
+            f"Invalid ResourceARN: {arn}",
+            400,
+        )
+    if (
+        spec.partition != "aws"
+        or spec.service != "athena"
+        or spec.region != get_region()
+        or spec.account_id != get_account_id()
+        or not _is_taggable_athena_resource(spec.resource)
+    ):
+        return error_response_json(
+            "InvalidRequestException",
+            f"Invalid ResourceARN: {arn}",
+            400,
+        )
+    return None
 
 
 async def handle_request(method, path, headers, body, query_params):
@@ -979,27 +1086,49 @@ def _list_prepared_statements(data):
 # ---- Table Metadata (stubs) ----
 
 
+def _glue_col(c):
+    col = {"Name": c.get("Name", ""), "Type": c.get("Type", "string")}
+    if c.get("Comment"):
+        col["Comment"] = c["Comment"]
+    return col
+
+
+def _glue_table_to_metadata(t):
+    # Athena tables are Glue Data Catalog tables; surface the real columns and
+    # partition keys rather than empty lists.
+    sd = t.get("StorageDescriptor", {}) or {}
+    return {
+        "Name": t.get("Name", ""),
+        "CreateTime": int(time.time()),
+        "LastAccessTime": int(time.time()),
+        "TableType": t.get("TableType", "EXTERNAL_TABLE"),
+        "Columns": [_glue_col(c) for c in sd.get("Columns", [])],
+        "PartitionKeys": [_glue_col(c) for c in t.get("PartitionKeys", [])],
+        "Parameters": t.get("Parameters", {}) or {"classification": "csv"},
+    }
+
+
 def _get_table_metadata(data):
-    catalog = data.get("CatalogName", "AwsDataCatalog")
+    from ministack.services import glue as glue_svc
     db = data.get("DatabaseName", "default")
     table = data.get("TableName", "")
-    return json_response(
-        {
-            "TableMetadata": {
-                "Name": table,
-                "CreateTime": int(time.time()),
-                "LastAccessTime": int(time.time()),
-                "TableType": "EXTERNAL_TABLE",
-                "Columns": [],
-                "PartitionKeys": [],
-                "Parameters": {"classification": "csv"},
-            }
-        }
-    )
+    t = glue_svc._tables.get(f"{db}/{table}")
+    if t:
+        return json_response({"TableMetadata": _glue_table_to_metadata(t)})
+    # Unknown table — keep the prior lenient empty shape.
+    return json_response({"TableMetadata": {
+        "Name": table, "CreateTime": int(time.time()),
+        "LastAccessTime": int(time.time()), "TableType": "EXTERNAL_TABLE",
+        "Columns": [], "PartitionKeys": [], "Parameters": {"classification": "csv"},
+    }})
 
 
 def _list_table_metadata(data):
-    return json_response({"TableMetadataList": []})
+    from ministack.services import glue as glue_svc
+    db = data.get("DatabaseName", "default")
+    tables = [_glue_table_to_metadata(t) for k, t in glue_svc._tables.items()
+              if k.startswith(f"{db}/")]
+    return json_response({"TableMetadataList": tables})
 
 
 # ---- Tags ----
@@ -1007,6 +1136,9 @@ def _list_table_metadata(data):
 
 def _tag_resource(data):
     arn = data.get("ResourceARN", "")
+    validation_error = _validate_tag_resource_arn(arn)
+    if validation_error:
+        return validation_error
     tags = data.get("Tags", [])
     tag_dict = _tags.setdefault(arn, {})
     for t in tags:
@@ -1016,6 +1148,9 @@ def _tag_resource(data):
 
 def _untag_resource(data):
     arn = data.get("ResourceARN", "")
+    validation_error = _validate_tag_resource_arn(arn)
+    if validation_error:
+        return validation_error
     keys = data.get("TagKeys", [])
     tag_dict = _tags.get(arn, {})
     for k in keys:
@@ -1025,6 +1160,9 @@ def _untag_resource(data):
 
 def _list_tags_for_resource(data):
     arn = data.get("ResourceARN", "")
+    validation_error = _validate_tag_resource_arn(arn)
+    if validation_error:
+        return validation_error
     tag_dict = _tags.get(arn, {})
     tags = [{"Key": k, "Value": v} for k, v in tag_dict.items()]
     return json_response({"Tags": tags})

@@ -316,7 +316,13 @@ SERVICE_REGISTRY = {
     "cloudtrail": {"module": "cloudtrail"},
     "cur": {"module": "cur"},
     "inspector2": {"module": "inspector2"},
+    "mq": {"module": "mq"},
     "s3tables": {"module": "s3tables"},
+    "bedrock": {"module": "bedrock"},
+    "bedrock-runtime": {"module": "bedrock_runtime"},
+    "bedrock-agent": {"module": "bedrock_agent"},
+    "bedrock-agent-runtime": {"module": "bedrock_agent_runtime"},
+    "kafka": {"module": "msk"},
 }
 
 SERVICE_HANDLERS = {
@@ -343,7 +349,7 @@ _state_map = {
     "stepfunctions": "stepfunctions", "alb": "alb",
     "glue": "glue", "mwaa": "mwaa", "efs": "efs", "waf": "waf",
     "athena": "athena", "emr": "emr", "cloudfront": "cloudfront",
-    "codebuild": "codebuild", "acm": "acm", "firehose": "firehose",
+    "codebuild": "codebuild", "batch": "batch", "acm": "acm", "firehose": "firehose",
     "ses": "ses", "ses_v2": "ses_v2",
     "servicediscovery": "servicediscovery", "s3files": "s3files",
     "appconfig": "appconfig", "transfer": "transfer",
@@ -353,8 +359,14 @@ _state_map = {
     "resource_groups": "resource_groups",
     "cloudtrail": "cloudtrail", "iot": "iot",
     "inspector2": "inspector2",
+    "mq": "mq",
     "s3tables": "s3tables",
     "lambda_durable": "lambda_durable",
+    "bedrock": "bedrock",
+    "bedrock_runtime": "bedrock_runtime",
+    "bedrock_agent": "bedrock_agent",
+    "bedrock_agent_runtime": "bedrock_agent_runtime",
+    "msk": "msk",
 }
 
 SERVICE_NAME_ALIASES = {
@@ -640,11 +652,24 @@ def _handle_lambda_download_request(path: str, method: str):
     """Serve KumoStack's Lambda layer and function-code download endpoints."""
     if path.startswith("/_kumostack/lambda-layers/") and method == "GET":
         path_parts = path.split("/")
+        if len(path_parts) >= 8 and path_parts[7] == "content" and path_parts[6].isdigit():
+            return _get_module("lambda_svc").serve_layer_content(
+                path_parts[5],
+                int(path_parts[6]),
+                account_id=path_parts[3],
+                region=path_parts[4],
+            )
         if len(path_parts) >= 6 and path_parts[5] == "content" and path_parts[4].isdigit():
             return _get_module("lambda_svc").serve_layer_content(path_parts[3], int(path_parts[4]))
 
     if path.startswith("/_kumostack/lambda-code/") and method == "GET":
         path_parts = path.split("/")
+        if len(path_parts) >= 6:
+            return _get_module("lambda_svc").serve_function_code(
+                path_parts[5],
+                account_id=path_parts[3],
+                region=path_parts[4],
+            )
         if len(path_parts) >= 4:
             return _get_module("lambda_svc").serve_function_code(path_parts[3])
     return None
@@ -701,8 +726,7 @@ async def _handle_ses_messages_request(method: str, path: str, headers: dict, qu
     """Handle SES messages inspection endpoint.
 
     Supports filtering by account via the 'account' query parameter. When provided,
-    sets the request context to that account so emails are retrieved from the correct
-    AccountScopedDict._sent_emails_list.
+    returns messages grouped by account across the service's regional stores.
     """
     if path != "/_kumostack/ses/messages" or method != "GET":
         return None
@@ -728,9 +752,15 @@ async def _handle_ses_messages_request(method: str, path: str, headers: dict, qu
         sent_emails_dict = {}
         try:
             all_data = mod._sent_emails.to_dict()
-            for (acct, key), val in all_data.items():
+            for scoped_key, val in all_data.items():
+                if len(scoped_key) == 2:
+                    acct, key = scoped_key
+                elif len(scoped_key) == 3:
+                    acct, _region, key = scoped_key
+                else:
+                    continue
                 if key == "entries" and isinstance(val, list):
-                    sent_emails_dict[acct] = val
+                    sent_emails_dict.setdefault(acct, []).extend(val)
         except Exception:
             # Fallback: empty dict on any unexpected shape
             sent_emails_dict = {}
@@ -772,8 +802,9 @@ async def _handle_sqs_messages_request(method: str, path: str, headers: dict, qu
 
     Filters:
       ?account=<12-digit-id>   restrict to one account
+      ?region=<aws-region>     restrict to one region
       ?QueueUrl=<url>          restrict to one queue (within whatever
-                               accounts pass the account filter)
+                               accounts/regions pass the filters)
     """
     if path != "/_kumostack/sqs/messages" or method != "GET":
         return None
@@ -798,20 +829,34 @@ async def _handle_sqs_messages_request(method: str, path: str, headers: dict, qu
     if "QueueUrl" in query_params:
         raw_qurl = query_params["QueueUrl"]
         queue_url_filter = raw_qurl[0] if isinstance(raw_qurl, (list, tuple)) else raw_qurl
+    region_filter = None
+    if "region" in query_params:
+        raw_region = query_params["region"]
+        region_filter = raw_region[0] if isinstance(raw_region, (list, tuple)) else raw_region
 
     try:
         mod = _get_module("sqs")
         now = time.time()
 
-        # AccountScopedDict._data is keyed by (account_id, queue_url).
-        per_account: dict[str, dict[str, list]] = {}
+        # Legacy AccountScopedDict state is keyed by (account_id, queue_url);
+        # AccountRegionScopedDict state is keyed by (account_id, region, queue_url).
+        per_account: dict[str, dict[str, dict[str, list]]] = {}
         try:
             all_data = mod._queues.to_dict()
         except Exception:
             all_data = {}
 
-        for (acct, qurl), queue in all_data.items():
+        for scoped_key, queue in all_data.items():
+            if len(scoped_key) == 3:
+                acct, region, qurl = scoped_key
+            elif len(scoped_key) == 2:
+                acct, qurl = scoped_key
+                region = os.environ.get("MINISTACK_REGION", "us-east-1")
+            else:
+                continue
             if account_id is not None and acct != account_id:
+                continue
+            if region_filter is not None and region != region_filter:
                 continue
             if queue_url_filter is not None and qurl != queue_url_filter:
                 continue
@@ -838,7 +883,7 @@ async def _handle_sqs_messages_request(method: str, path: str, headers: dict, qu
                     "MessageDeduplicationId": m.get("dedup_id"),
                     "SequenceNumber": m.get("seq"),
                 })
-            per_account.setdefault(acct, {})[qurl] = rendered
+            per_account.setdefault(acct, {}).setdefault(region, {})[qurl] = rendered
 
         response = {"messages": per_account}
     except Exception as e:
@@ -1702,7 +1747,7 @@ def _maybe_record_cloudtrail(
     try:
         event_name = _ct_event_name(service, method, path, headers, query_params)
         resources = _ct_resources(service, method, path, body)
-        access_key_id = extract_access_key_id(headers) or "test"
+        access_key_id = extract_access_key_id(headers, query_params) or "test"
         user_agent = headers.get("user-agent", "")
         request_params = _ct_request_params(headers, body, query_params)
         ct_mod.record_event(
@@ -3251,6 +3296,18 @@ async def app(scope, receive, send):
                 ws_headers[name.decode("latin-1").lower()] = value.decode("utf-8")
             except UnicodeDecodeError:
                 ws_headers[name.decode("latin-1").lower()] = value.decode("latin-1")
+        # WebSocket connect URLs are SigV4-presigned (credentials in query
+        # params, not the header). Set the request's tenant scope so
+        # account/region-scoped lookups resolve under the caller rather than the
+        # default — the WS entry path never did this before.
+        ws_query = parse_qs(
+            scope.get("query_string", b"").decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        _ws_key = extract_access_key_id(ws_headers, ws_query)
+        if _ws_key:
+            set_request_account_id(_ws_key)
+        set_request_region(extract_region(ws_headers, ws_query))
         ws_host = ws_headers.get("host", "")
         ws_path = scope.get("path", "")
         parsed = _parse_execute_api_url(ws_host, ws_path)
@@ -3313,14 +3370,15 @@ async def app(scope, receive, send):
 
     # Set per-request account ID from credentials (multi-tenancy support).
     # If the access key is a 12-digit number, it becomes the account ID.
-    _access_key = extract_access_key_id(headers)
+    _access_key = extract_access_key_id(headers, query_params)
     if _access_key:
         set_request_account_id(_access_key)
 
     # Set per-request region from SigV4 Credential scope so CFN's AWS::Region
     # pseudo-param and ARN-building use the caller's region, not MINISTACK_REGION
-    # (issue #398). Falls back to MINISTACK_REGION env.
-    set_request_region(extract_region(headers))
+    # (issue #398). Falls back to MINISTACK_REGION env. Presigned (SigV4 query)
+    # requests carry the credential in query params, not the header.
+    set_request_region(extract_region(headers, query_params))
 
     if await _send_if_handled(send, await _handle_pre_body_request(method, path, headers, query_params, request_id)):
         return
@@ -3400,6 +3458,12 @@ async def _handle_lifespan(scope, receive, send):
                 _eb_mod.start_scheduler()
             except Exception as e:
                 logger.warning("EventBridge scheduler startup failed: %s", e)
+            # EventBridge Scheduler standalone schedules also need a firing loop (#958).
+            try:
+                from ministack.services import scheduler as _sched_mod
+                _sched_mod.start_scheduler()
+            except Exception as e:
+                logger.warning("Scheduler startup failed: %s", e)
             await send({"type": "lifespan.startup.complete"})
             logger.info("Ready — %d services available on port %s.", len(SERVICE_HANDLERS), port)
             # Per-service "init completed" lines are logged at DEBUG only — at
@@ -3533,6 +3597,23 @@ def _load_persisted_state():
     if load_state("lambda_durable"):
         _get_module("lambda_durable")
         logger.info("Lambda Durable: eager-loaded module to restore persisted executions")
+
+    # Lambda event source mappings (SQS / Kinesis / DynamoDB Streams) are
+    # polled by a background thread that lambda_svc starts from its
+    # import-time restore (`_ensure_poller`). lambda_svc is otherwise imported
+    # lazily on the first Lambda request — so after a persisted restart a
+    # workload that is pure SQS (just sending to a mapped queue) never imports
+    # the module, the poller never starts, and the restored ESM sits
+    # Enabled-but-unpolled while messages pile up (#889). Eager-import at boot
+    # when persisted ESMs exist so polling resumes exactly like a fresh
+    # CreateEventSourceMapping. Narrow: only pay the cold-start when there are
+    # mappings to poll. The `_data` reach gets all accounts' ESMs (the bool of
+    # an AccountScopedDict is account-scoped and would be 0 with no request
+    # context at boot).
+    _lam = load_state("lambda")
+    if _lam and getattr(_lam.get("esms"), "_data", _lam.get("esms")):
+        _get_module("lambda_svc")  # module file is lambda_svc.py (lambda is a keyword)
+        logger.info("Lambda: eager-loaded module to resume event-source-mapping pollers at boot")
 
 
 async def _wait_for_port(port, timeout=30):

@@ -8,7 +8,9 @@ All in-memory, no actual instance scaling.
 
 Supports:
   ASG:       CreateAutoScalingGroup, DescribeAutoScalingGroups, UpdateAutoScalingGroup,
-             DeleteAutoScalingGroup, DescribeAutoScalingInstances, DescribeScalingActivities
+             DeleteAutoScalingGroup, SetDesiredCapacity, DescribeAutoScalingInstances,
+             DescribeScalingActivities
+  Refresh:   StartInstanceRefresh, DescribeInstanceRefreshes, CancelInstanceRefresh
   LC:        CreateLaunchConfiguration, DescribeLaunchConfigurations, DeleteLaunchConfiguration
   Policies:  PutScalingPolicy, DescribePolicies, DeletePolicy
   Hooks:     PutLifecycleHook, DescribeLifecycleHooks, DeleteLifecycleHook,
@@ -24,17 +26,33 @@ import time
 from collections import defaultdict
 
 from kumostack.core.persistence import load_state
-from kumostack.core.responses import AccountScopedDict, get_account_id, get_region, new_uuid, now_iso
+from kumostack.core.responses import (
+    AccountRegionScopedDict,
+    AccountScopedDict,
+    get_account_id,
+    get_region,
+    new_uuid,
+    now_iso,
+)
 
 logger = logging.getLogger("autoscaling")
 REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 
-_asgs = AccountScopedDict()
-_launch_configs = AccountScopedDict()
-_policies = AccountScopedDict()
-_hooks = AccountScopedDict()
-_scheduled_actions = AccountScopedDict()
-_tags = AccountScopedDict()  # asg_name -> [{"Key":..., "Value":...}, ...]
+_asgs = AccountRegionScopedDict()
+_launch_configs = AccountRegionScopedDict()
+_policies = AccountRegionScopedDict()
+_hooks = AccountRegionScopedDict()
+_scheduled_actions = AccountRegionScopedDict()
+_tags = AccountRegionScopedDict()  # asg_name -> [{"Key":..., "Value":...}, ...]
+
+
+def _clear_state():
+    _asgs.clear()
+    _launch_configs.clear()
+    _policies.clear()
+    _hooks.clear()
+    _scheduled_actions.clear()
+    _tags.clear()
 
 
 def get_state():
@@ -49,13 +67,45 @@ def get_state():
 
 
 def restore_state(data):
-    if data:
-        _asgs.update(data.get("asgs", {}))
-        _launch_configs.update(data.get("launch_configs", {}))
-        _policies.update(data.get("policies", {}))
-        _hooks.update(data.get("hooks", {}))
-        _scheduled_actions.update(data.get("scheduled_actions", {}))
-        _tags.update(data.get("tags", {}))
+    if not data:
+        return
+
+    _clear_state()
+    _asgs.update(data.get("asgs", {}))
+    _launch_configs.update(data.get("launch_configs", {}))
+
+    asg_regions = {
+        (account_id, asg_name): region
+        for (account_id, region, asg_name), _asg in _asgs.all_items()
+    }
+    for store, key in (
+        (_policies, "policies"),
+        (_hooks, "hooks"),
+        (_scheduled_actions, "scheduled_actions"),
+        (_tags, "tags"),
+    ):
+        _restore_asg_child_store(store, data.get(key, {}), asg_regions)
+
+
+def _restore_asg_child_store(store, restored, asg_regions):
+    """Adopt legacy name-keyed child state into its parent ASG's region."""
+    if isinstance(restored, AccountRegionScopedDict):
+        store.update(restored)
+        return
+
+    if isinstance(restored, AccountScopedDict):
+        items = restored._data.items()
+    else:
+        account_id = get_account_id()
+        items = (((account_id, key), value) for key, value in restored.items())
+
+    for (account_id, key), value in items:
+        asg_name = value.get("AutoScalingGroupName") if isinstance(value, dict) else key
+        region = asg_regions.get(
+            (account_id, asg_name),
+            store._region_for_legacy_value(key, value),
+        )
+        store.set_scoped(account_id, region, key, value)
 
 
 try:
@@ -67,12 +117,7 @@ except Exception:
 
 
 def reset():
-    _asgs.clear()
-    _launch_configs.clear()
-    _policies.clear()
-    _hooks.clear()
-    _scheduled_actions.clear()
-    _tags.clear()
+    _clear_state()
 
 
 def _p(params, key):
@@ -113,7 +158,73 @@ def _asg_arn(name):
 
 # ---------------------------------------------------------------------------
 # AutoScalingGroup
+#
+# No real instances run, but terraform-provider-aws's aws_autoscaling_group
+# capacity waiter polls DescribeAutoScalingGroups until DesiredCapacity
+# instances report InService/Healthy. A group that reports zero forever blocks
+# every apply for the full wait_for_capacity_timeout (10m) and then fails, so we
+# materialize DesiredCapacity mock instances the same way a real ASG launches
+# them. They ride the group record, inheriting the existing persistence / reset
+# plumbing (like InstanceRefreshes).
 # ---------------------------------------------------------------------------
+
+def _reconcile_instances(asg):
+    """Resize the group's Instances list to exactly DesiredCapacity entries.
+
+    Scale-up appends InService/Healthy instances round-robined across the
+    group's AZs; scale-down removes from the end, matching a Default
+    termination policy.
+    """
+    desired = asg["DesiredCapacity"]
+    instances = asg["Instances"]
+    if len(instances) > desired:
+        del instances[desired:]
+        return
+    azs = asg["AvailabilityZones"] or [f"{get_region()}a"]
+    launch_template = asg.get("LaunchTemplate") or {}
+    launch_config = asg.get("LaunchConfigurationName", "")
+    while len(instances) < desired:
+        instances.append({
+            "InstanceId": "i-" + new_uuid().replace("-", "")[:17],
+            "LifecycleState": "InService",
+            "HealthStatus": "Healthy",
+            "AvailabilityZone": azs[len(instances) % len(azs)],
+            # Real ASGs stamp new instances with the group's scale-in setting.
+            "ProtectedFromScaleIn": asg["NewInstancesProtectedFromScaleIn"],
+            "LaunchTemplate": launch_template,
+            "LaunchConfigurationName": launch_config,
+        })
+
+
+def _instance_member_xml(inst, include_group_name=""):
+    """Render one instance. DescribeAutoScalingInstances also carries the
+    owning AutoScalingGroupName, so callers pass it when needed."""
+    launch_template = inst.get("LaunchTemplate") or {}
+    lt_xml = ""
+    if launch_template:
+        lt_xml = (f"<LaunchTemplate>"
+                  f"<LaunchTemplateId>{launch_template.get('LaunchTemplateId', '')}</LaunchTemplateId>"
+                  f"<LaunchTemplateName>{launch_template.get('LaunchTemplateName', '')}</LaunchTemplateName>"
+                  f"<Version>{launch_template.get('Version', '')}</Version></LaunchTemplate>")
+    launch_config = inst.get("LaunchConfigurationName", "")
+    lc_xml = f"<LaunchConfigurationName>{launch_config}</LaunchConfigurationName>" if launch_config else ""
+    group_xml = f"<AutoScalingGroupName>{include_group_name}</AutoScalingGroupName>" if include_group_name else ""
+    return (f"<member>"
+            f"<InstanceId>{inst['InstanceId']}</InstanceId>"
+            f"{group_xml}"
+            f"<AvailabilityZone>{inst['AvailabilityZone']}</AvailabilityZone>"
+            f"<LifecycleState>{inst['LifecycleState']}</LifecycleState>"
+            f"<HealthStatus>{inst['HealthStatus']}</HealthStatus>"
+            f"<ProtectedFromScaleIn>{'true' if inst['ProtectedFromScaleIn'] else 'false'}</ProtectedFromScaleIn>"
+            f"{lt_xml}{lc_xml}"
+            f"</member>")
+
+
+def _instances_xml(asg):
+    if not asg["Instances"]:
+        return "<Instances/>"
+    return "<Instances>" + "".join(_instance_member_xml(i) for i in asg["Instances"]) + "</Instances>"
+
 
 def _create_asg(p):
     name = _p(p, "AutoScalingGroupName")
@@ -170,6 +281,8 @@ def _create_asg(p):
     _asgs[name]["Tags"] = tags
     _tags[name] = tags
 
+    _reconcile_instances(_asgs[name])
+
     logger.info("CreateAutoScalingGroup: %s", name)
     return _xml(200, "CreateAutoScalingGroupResponse", "<CreateAutoScalingGroupResult/>")
 
@@ -210,7 +323,7 @@ def _describe_asgs(p):
                     f"<TerminationPolicies>{tp}</TerminationPolicies>"
                     f"<NewInstancesProtectedFromScaleIn>{'true' if asg['NewInstancesProtectedFromScaleIn'] else 'false'}</NewInstancesProtectedFromScaleIn>"
                     f"<Tags>{tags_xml}</Tags>"
-                    f"<Instances/>"
+                    f"{_instances_xml(asg)}"
                     f"{lt_xml}"
                     f"<LaunchConfigurationName>{asg.get('LaunchConfigurationName', '')}</LaunchConfigurationName>"
                     f"</member>")
@@ -232,7 +345,21 @@ def _update_asg(p):
         asg["HealthCheckType"] = _p(p, "HealthCheckType")
     if _p(p, "VPCZoneIdentifier"):
         asg["VPCZoneIdentifier"] = _p(p, "VPCZoneIdentifier")
+    _reconcile_instances(asg)
     return _xml(200, "UpdateAutoScalingGroupResponse", "<UpdateAutoScalingGroupResult/>")
+
+
+def _set_desired_capacity(p):
+    name = _p(p, "AutoScalingGroupName")
+    asg = _asgs.get(name)
+    if not asg:
+        return _error("ValidationError", f"AutoScalingGroup {name} not found")
+    desired = _p(p, "DesiredCapacity")
+    if desired == "":
+        return _error("ValidationError", "DesiredCapacity is required")
+    asg["DesiredCapacity"] = int(desired)
+    _reconcile_instances(asg)
+    return _xml(200, "SetDesiredCapacityResponse", "")
 
 
 def _delete_asg(p):
@@ -247,13 +374,98 @@ def _delete_asg(p):
 
 
 def _describe_asg_instances(p):
+    wanted = _parse_member_list(p, "InstanceIds")
+    members = ""
+    for name, asg in _asgs.items():
+        for inst in asg["Instances"]:
+            if wanted and inst["InstanceId"] not in wanted:
+                continue
+            members += _instance_member_xml(inst, include_group_name=name)
     return _xml(200, "DescribeAutoScalingInstancesResponse",
-                "<DescribeAutoScalingInstancesResult><AutoScalingInstances/></DescribeAutoScalingInstancesResult>")
+                f"<DescribeAutoScalingInstancesResult><AutoScalingInstances>{members}</AutoScalingInstances></DescribeAutoScalingInstancesResult>")
 
 
 def _describe_scaling_activities(p):
     return _xml(200, "DescribeScalingActivitiesResponse",
                 "<DescribeScalingActivitiesResult><Activities/></DescribeScalingActivitiesResult>")
+
+
+# ---------------------------------------------------------------------------
+# Instance Refresh
+#
+# No real instances run, so a refresh has nothing to roll. We record it and
+# report it as immediately Successful (100% complete) to satisfy the
+# terraform-provider-aws contract, which polls DescribeInstanceRefreshes until
+# the refresh reaches a terminal state.
+# ---------------------------------------------------------------------------
+
+def _start_instance_refresh(p):
+    name = _p(p, "AutoScalingGroupName")
+    asg = _asgs.get(name)
+    if not asg:
+        return _error("ValidationError", f"AutoScalingGroup {name} not found")
+    refresh_id = new_uuid()
+    ts = now_iso()
+    refresh = {
+        "InstanceRefreshId": refresh_id,
+        "AutoScalingGroupName": name,
+        "Status": "Successful",
+        "StatusReason": "Refresh completed",
+        "StartTime": ts,
+        "EndTime": ts,
+        "PercentageComplete": 100,
+        "InstancesToUpdate": 0,
+        "Preferences": {
+            "MinHealthyPercentage": _p(p, "Preferences.MinHealthyPercentage"),
+            "InstanceWarmup": _p(p, "Preferences.InstanceWarmup"),
+        },
+    }
+    # Most-recent-first, matching AWS describe ordering.
+    asg.setdefault("InstanceRefreshes", []).insert(0, refresh)
+    return _xml(200, "StartInstanceRefreshResponse",
+                f"<StartInstanceRefreshResult><InstanceRefreshId>{refresh_id}</InstanceRefreshId></StartInstanceRefreshResult>")
+
+
+def _describe_instance_refreshes(p):
+    name = _p(p, "AutoScalingGroupName")
+    asg = _asgs.get(name)
+    if not asg:
+        return _error("ValidationError", f"AutoScalingGroup {name} not found")
+    wanted = _parse_member_list(p, "InstanceRefreshIds")
+    members = ""
+    for r in asg.get("InstanceRefreshes", []):
+        if wanted and r["InstanceRefreshId"] not in wanted:
+            continue
+        members += (f"<member>"
+                    f"<InstanceRefreshId>{r['InstanceRefreshId']}</InstanceRefreshId>"
+                    f"<AutoScalingGroupName>{r['AutoScalingGroupName']}</AutoScalingGroupName>"
+                    f"<Status>{r['Status']}</Status>"
+                    f"<StatusReason>{r['StatusReason']}</StatusReason>"
+                    f"<StartTime>{r['StartTime']}</StartTime>"
+                    f"<EndTime>{r['EndTime']}</EndTime>"
+                    f"<PercentageComplete>{r['PercentageComplete']}</PercentageComplete>"
+                    f"<InstancesToUpdate>{r['InstancesToUpdate']}</InstancesToUpdate>"
+                    f"</member>")
+    return _xml(200, "DescribeInstanceRefreshesResponse",
+                f"<DescribeInstanceRefreshesResult><InstanceRefreshes>{members}</InstanceRefreshes></DescribeInstanceRefreshesResult>")
+
+
+def _cancel_instance_refresh(p):
+    name = _p(p, "AutoScalingGroupName")
+    asg = _asgs.get(name)
+    if not asg:
+        return _error("ValidationError", f"AutoScalingGroup {name} not found")
+    refreshes = asg.get("InstanceRefreshes", [])
+    active = next((r for r in refreshes if r["Status"] not in
+                   ("Successful", "Failed", "Cancelled")), None)
+    if not active:
+        return _error("ActiveInstanceRefreshNotFound",
+                      f"No active Instance Refresh for Auto Scaling group {name}")
+    active["Status"] = "Cancelled"
+    active["StatusReason"] = "Cancelled by user"
+    active["EndTime"] = now_iso()
+    return _xml(200, "CancelInstanceRefreshResponse",
+                f"<CancelInstanceRefreshResult><InstanceRefreshId>{active['InstanceRefreshId']}</InstanceRefreshId></CancelInstanceRefreshResult>")
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +724,12 @@ _ACTION_MAP = {
     "DescribeAutoScalingGroups": _describe_asgs,
     "UpdateAutoScalingGroup": _update_asg,
     "DeleteAutoScalingGroup": _delete_asg,
+    "SetDesiredCapacity": _set_desired_capacity,
     "DescribeAutoScalingInstances": _describe_asg_instances,
     "DescribeScalingActivities": _describe_scaling_activities,
+    "StartInstanceRefresh": _start_instance_refresh,
+    "DescribeInstanceRefreshes": _describe_instance_refreshes,
+    "CancelInstanceRefresh": _cancel_instance_refresh,
     "CreateLaunchConfiguration": _create_lc,
     "DescribeLaunchConfigurations": _describe_lcs,
     "DeleteLaunchConfiguration": _delete_lc,

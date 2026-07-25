@@ -24,7 +24,9 @@ import os
 import threading
 import time
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
@@ -41,9 +43,9 @@ ITERATOR_EXPIRY_SECONDS = 300
 
 from kumostack.core.persistence import PERSIST_STATE, load_state
 
-_streams = AccountScopedDict()
-_shard_iterators = AccountScopedDict()
-_consumers = AccountScopedDict()
+_streams = AccountRegionScopedDict()
+_shard_iterators = AccountRegionScopedDict()
+_consumers = AccountRegionScopedDict()
 _sequence_counter = 0
 _sequence_lock = threading.Lock()
 
@@ -53,14 +55,117 @@ _sequence_lock = threading.Lock()
 def get_state():
     return {
         "streams": copy.deepcopy(_streams),
+        "shard_iterators": copy.deepcopy(_shard_iterators),
         "consumers": copy.deepcopy(_consumers),
     }
 
 
 def restore_state(data):
     if data:
-        _streams.update(data.get("streams", {}))
-        _consumers.update(data.get("consumers", {}))
+        _restore_stream_store(data.get("streams", {}))
+        _restore_shard_iterator_store(data.get("shard_iterators", {}))
+        _restore_consumer_store(data.get("consumers", {}))
+
+
+def _kinesis_arn_scope(value, default_account_id: str | None = None) -> tuple[str, str]:
+    try:
+        spec = parse_arn(value)
+    except ArnParseError:
+        return default_account_id or get_account_id(), get_region()
+    if spec.service != "kinesis":
+        return default_account_id or get_account_id(), get_region()
+    return spec.account_id or default_account_id or get_account_id(), spec.region or get_region()
+
+
+def _stream_record_scope(stream: dict, default_account_id: str | None = None) -> tuple[str, str]:
+    return _kinesis_arn_scope(stream.get("StreamARN", ""), default_account_id)
+
+
+def _consumer_record_scope(consumer: dict, default_account_id: str | None = None) -> tuple[str, str]:
+    return _kinesis_arn_scope(
+        consumer.get("ConsumerARN") or consumer.get("StreamARN", ""),
+        default_account_id,
+    )
+
+
+def _shard_iterator_record_scope(state: dict, default_account_id: str | None = None) -> tuple[str, str]:
+    stream_arn = state.get("stream_arn")
+    if stream_arn:
+        return _kinesis_arn_scope(stream_arn, default_account_id)
+
+    stream_name = state.get("stream")
+    if stream_name:
+        expected_account_id = default_account_id or get_account_id()
+        for (account_id, region, name), _stream in _streams.all_items():
+            if account_id == expected_account_id and name == stream_name:
+                return account_id, region
+    return default_account_id or get_account_id(), get_region()
+
+
+def _restore_stream_store(data) -> None:
+    if isinstance(data, AccountRegionScopedDict):
+        _streams.update(data)
+        return
+    if isinstance(data, AccountScopedDict):
+        for (account_id, name), stream in data._data.items():
+            restored_account_id, region = _stream_record_scope(stream, account_id)
+            _streams.set_scoped(restored_account_id, region, name, copy.deepcopy(stream))
+        return
+    if isinstance(data, dict):
+        for key, stream in data.items():
+            if isinstance(key, tuple) and len(key) == 3:
+                account_id, region, name = key
+            elif isinstance(key, tuple) and len(key) == 2:
+                account_id, name = key
+                account_id, region = _stream_record_scope(stream, account_id)
+            else:
+                name = key
+                account_id, region = _stream_record_scope(stream)
+            _streams.set_scoped(account_id, region, name, copy.deepcopy(stream))
+
+
+def _restore_shard_iterator_store(data) -> None:
+    if isinstance(data, AccountRegionScopedDict):
+        _shard_iterators.update(data)
+        return
+    if isinstance(data, AccountScopedDict):
+        for (account_id, token), state in data._data.items():
+            restored_account_id, region = _shard_iterator_record_scope(state, account_id)
+            _shard_iterators.set_scoped(restored_account_id, region, token, copy.deepcopy(state))
+        return
+    if isinstance(data, dict):
+        for key, state in data.items():
+            if isinstance(key, tuple) and len(key) == 3:
+                account_id, region, token = key
+            elif isinstance(key, tuple) and len(key) == 2:
+                account_id, token = key
+                account_id, region = _shard_iterator_record_scope(state, account_id)
+            else:
+                token = key
+                account_id, region = _shard_iterator_record_scope(state)
+            _shard_iterators.set_scoped(account_id, region, token, copy.deepcopy(state))
+
+
+def _restore_consumer_store(data) -> None:
+    if isinstance(data, AccountRegionScopedDict):
+        _consumers.update(data)
+        return
+    if isinstance(data, AccountScopedDict):
+        for (account_id, consumer_arn), consumer in data._data.items():
+            restored_account_id, region = _consumer_record_scope(consumer, account_id)
+            _consumers.set_scoped(restored_account_id, region, consumer_arn, copy.deepcopy(consumer))
+        return
+    if isinstance(data, dict):
+        for key, consumer in data.items():
+            if isinstance(key, tuple) and len(key) == 3:
+                account_id, region, consumer_arn = key
+            elif isinstance(key, tuple) and len(key) == 2:
+                account_id, consumer_arn = key
+                account_id, region = _consumer_record_scope(consumer, account_id)
+            else:
+                consumer_arn = key
+                account_id, region = _consumer_record_scope(consumer)
+            _consumers.set_scoped(account_id, region, consumer_arn, copy.deepcopy(consumer))
 
 
 try:
@@ -119,6 +224,64 @@ def _route_to_shard(hash_key_int: int, stream: dict) -> str:
     return next(iter(stream["shards"]))
 
 
+def _kinesis_resource_tail(value, resource_type):
+    try:
+        spec = parse_arn(value)
+    except ArnParseError:
+        return None
+    if (
+        spec.partition != "aws"
+        or spec.service != "kinesis"
+        or spec.region != get_region()
+        or spec.account_id != get_account_id()
+    ):
+        return None
+    prefix = f"{resource_type}/"
+    if not spec.resource.startswith(prefix):
+        return None
+    tail = spec.resource[len(prefix):]
+    return tail or None
+
+
+def _stream_name_from_arn(stream_arn):
+    tail = _kinesis_resource_tail(stream_arn, "stream")
+    if not tail or "/" in tail:
+        return None
+    return tail
+
+
+def _resolve_stream_by_arn(stream_arn):
+    name = _stream_name_from_arn(stream_arn)
+    if not name:
+        return None
+    stream = _streams.get(name)
+    if stream and stream.get("StreamARN") == stream_arn:
+        return stream
+    return None
+
+
+def _consumer_from_arn(consumer_arn):
+    tail = _kinesis_resource_tail(consumer_arn, "stream")
+    if not tail:
+        return None
+    parts = tail.split("/")
+    if len(parts) != 3 or parts[1] != "consumer" or not parts[0] or not parts[2]:
+        return None
+    return _consumers.get(consumer_arn)
+
+
+def _consumer_by_stream_and_name(stream_arn, consumer_name):
+    if not _resolve_stream_by_arn(stream_arn):
+        return None
+    return next(
+        (
+            c for c in _consumers.values()
+            if c["StreamARN"] == stream_arn and c["ConsumerName"] == consumer_name
+        ),
+        None,
+    )
+
+
 def _expire_records(stream):
     cutoff = time.time() - stream["RetentionPeriodHours"] * 3600
     for shard in stream["shards"].values():
@@ -144,9 +307,9 @@ def _resolve_stream(data):
     if name and name in _streams:
         return name, _streams[name]
     if arn:
-        for n, s in _streams.items():
-            if s["StreamARN"] == arn:
-                return n, s
+        stream = _resolve_stream_by_arn(arn)
+        if stream:
+            return stream["StreamName"], stream
     return name or arn, None
 
 
@@ -162,7 +325,7 @@ def put_record_internal(stream_arn: str, partition_key: str, data: bytes) -> boo
     or not ACTIVE (matches AWS behaviour where delivery to a disabled
     destination is dropped without surfacing an error on the writer).
     """
-    stream = next((s for s in _streams.values() if s.get("StreamARN") == stream_arn), None)
+    stream = _resolve_stream_by_arn(stream_arn)
     if not stream or stream.get("StreamStatus") != "ACTIVE":
         return False
     _expire_records(stream)
@@ -603,6 +766,7 @@ def _get_shard_iterator(data):
     token = new_uuid()
     _shard_iterators[token] = {
         "stream": resolved_name,
+        "stream_arn": stream["StreamARN"],
         "shard_id": shard_id,
         "position": position,
         "created_at": time.time(),
@@ -666,6 +830,7 @@ def _get_records(data):
     next_token = new_uuid()
     _shard_iterators[next_token] = {
         "stream": state["stream"],
+        "stream_arn": state.get("stream_arn") or stream.get("StreamARN"),
         "shard_id": state["shard_id"],
         "position": new_pos,
         "created_at": time.time(),
@@ -862,7 +1027,7 @@ def _register_consumer(data):
     if not stream_arn or not consumer_name:
         return error_response_json("ValidationException",
                                    "StreamARN and ConsumerName are required", 400)
-    stream = next((s for s in _streams.values() if s["StreamARN"] == stream_arn), None)
+    stream = _resolve_stream_by_arn(stream_arn)
     if not stream:
         return error_response_json("ResourceNotFoundException",
                                    f"Stream with ARN {stream_arn} not found", 400)
@@ -893,15 +1058,15 @@ def _deregister_consumer(data):
     stream_arn = data.get("StreamARN")
     consumer_name = data.get("ConsumerName")
     if consumer_arn:
-        if consumer_arn not in _consumers:
+        consumer = _consumer_from_arn(consumer_arn)
+        if not consumer:
             return error_response_json("ResourceNotFoundException", "Consumer not found", 400)
-        del _consumers[consumer_arn]
+        del _consumers[consumer["ConsumerARN"]]
     elif stream_arn and consumer_name:
-        found = next((a for a, c in _consumers.items()
-                       if c["StreamARN"] == stream_arn and c["ConsumerName"] == consumer_name), None)
-        if not found:
+        consumer = _consumer_by_stream_and_name(stream_arn, consumer_name)
+        if not consumer:
             return error_response_json("ResourceNotFoundException", "Consumer not found", 400)
-        del _consumers[found]
+        del _consumers[consumer["ConsumerARN"]]
     else:
         return error_response_json("ValidationException",
                                    "ConsumerARN or StreamARN+ConsumerName required", 400)
@@ -912,6 +1077,8 @@ def _list_consumers(data):
     stream_arn = data.get("StreamARN")
     if not stream_arn:
         return error_response_json("ValidationException", "StreamARN is required", 400)
+    if not _resolve_stream_by_arn(stream_arn):
+        return error_response_json("ResourceNotFoundException", f"Stream with ARN {stream_arn} not found", 400)
     max_results = data.get("MaxResults", 100)
     next_token = data.get("NextToken")
 
@@ -942,13 +1109,9 @@ def _describe_stream_consumer(data):
 
     consumer = None
     if consumer_arn:
-        consumer = _consumers.get(consumer_arn)
+        consumer = _consumer_from_arn(consumer_arn)
     elif stream_arn and consumer_name:
-        consumer = next(
-            (c for c in _consumers.values()
-             if c["StreamARN"] == stream_arn and c["ConsumerName"] == consumer_name),
-            None,
-        )
+        consumer = _consumer_by_stream_and_name(stream_arn, consumer_name)
 
     if not consumer:
         return error_response_json("ResourceNotFoundException", "Consumer not found", 400)

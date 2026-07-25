@@ -6,8 +6,23 @@ import uuid as _uuid_mod
 import zipfile
 from urllib.parse import urlparse
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
+
+ENDPOINT = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+
+
+def _regional_client(service: str, region: str):
+    return boto3.client(
+        service,
+        endpoint_url=ENDPOINT,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region,
+        config=Config(region_name=region, retries={"mode": "standard"}),
+    )
 
 
 def test_firehose_create_and_describe(fh):
@@ -30,6 +45,38 @@ def test_firehose_create_and_describe(fh):
     assert len(desc["Destinations"]) == 1
     assert "ExtendedS3DestinationDescription" in desc["Destinations"][0]
     assert desc["VersionId"] == "1"
+
+
+@pytest.mark.parametrize(
+    "config_key",
+    ("ExtendedS3DestinationConfiguration", "S3DestinationConfiguration"),
+)
+@pytest.mark.parametrize(
+    "bucket_arn",
+    (
+        "not-an-arn",
+        "arn:aws:sns:us-east-1:000000000000:topic-name",
+        "arn:aws:s3:us-east-1::my-bucket",
+        "arn:aws:s3::000000000000:my-bucket",
+        "arn:aws:s3:::my-bucket/path/to/object",
+        "arn:aws:s3:::my-bucket:extra",
+        "arn:aws:s3:::bad*bucket",
+    ),
+)
+def test_firehose_rejects_invalid_s3_bucket_arns(fh, config_key, bucket_arn):
+    with pytest.raises(ClientError) as exc:
+        fh.create_delivery_stream(
+            DeliveryStreamName=f"intg-fh-bad-bucket-arn-{_uuid_mod.uuid4().hex[:8]}",
+            DeliveryStreamType="DirectPut",
+            **{
+                config_key: {
+                    "BucketARN": bucket_arn,
+                    "RoleARN": "arn:aws:iam::000000000000:role/firehose-role",
+                },
+            },
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidArgumentException"
+
 
 def test_firehose_list_streams(fh):
     fh.create_delivery_stream(DeliveryStreamName="intg-fh-list-a", DeliveryStreamType="DirectPut")
@@ -300,6 +347,37 @@ def test_firehose_update_destination_version_mismatch(fh):
         )
     assert exc.value.response["Error"]["Code"] == "ConcurrentModificationException"
 
+
+def test_firehose_update_destination_rejects_invalid_s3_bucket_arn(fh):
+    name = f"qa-fh-update-bad-bucket-arn-{_uuid_mod.uuid4().hex[:8]}"
+    fh.create_delivery_stream(
+        DeliveryStreamName=name,
+        ExtendedS3DestinationConfiguration={
+            "BucketARN": "arn:aws:s3:::qa-fh-bucket3",
+            "RoleARN": "arn:aws:iam::000000000000:role/r",
+        },
+    )
+    desc = fh.describe_delivery_stream(DeliveryStreamName=name)["DeliveryStreamDescription"]
+    dest_id = desc["Destinations"][0]["DestinationId"]
+    version_id = desc["VersionId"]
+
+    with pytest.raises(ClientError) as exc:
+        fh.update_destination(
+            DeliveryStreamName=name,
+            CurrentDeliveryStreamVersionId=version_id,
+            DestinationId=dest_id,
+            ExtendedS3DestinationUpdate={
+                "BucketARN": "arn:aws:s3:::qa-fh-bucket3/object",
+            },
+        )
+
+    assert exc.value.response["Error"]["Code"] == "InvalidArgumentException"
+    after = fh.describe_delivery_stream(DeliveryStreamName=name)["DeliveryStreamDescription"]
+    s3 = after["Destinations"][0]["ExtendedS3DestinationDescription"]
+    assert after["VersionId"] == version_id
+    assert s3["BucketARN"] == "arn:aws:s3:::qa-fh-bucket3"
+
+
 def test_firehose_s3_destination_writes(s3, fh):
     """PutRecord with S3 destination actually writes data to the S3 bucket."""
     import base64
@@ -337,7 +415,9 @@ def test_firehose_describe_nonexistent_carries_errortype(fh):
 def test_firehose_kinesis_stream_as_source_fans_out_to_s3(fh, kin, s3):
     """KinesisStreamAsSource: records put into the source Kinesis stream
     must reach the configured S3 destination. Issue #744."""
-    import base64 as _b64, time as _time, uuid as _uuid
+    import time as _time
+    import uuid as _uuid
+
     stream_name = f"src-stream-{_uuid.uuid4().hex[:8]}"
     delivery_name = f"fh-{_uuid.uuid4().hex[:8]}"
     bucket = f"fh-src-bucket-{_uuid.uuid4().hex[:8]}"
@@ -381,10 +461,14 @@ def test_firehose_kinesis_stream_as_source_fans_out_to_s3(fh, kin, s3):
         )
         assert bodies == [b'{"a":1}', b'{"a":2}', b'{"a":3}']
     finally:
-        try: fh.delete_delivery_stream(DeliveryStreamName=delivery_name)
-        except Exception: pass
-        try: kin.delete_stream(StreamName=stream_name)
-        except Exception: pass
+        try:
+            fh.delete_delivery_stream(DeliveryStreamName=delivery_name)
+        except Exception:
+            pass
+        try:
+            kin.delete_stream(StreamName=stream_name)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -606,3 +690,168 @@ def test_firehose_kinesis_source_with_lambda_processor(fh, s3, lam, kin):
         except Exception: pass
         try: kin.delete_stream(StreamName=stream)
         except Exception: pass
+
+
+def test_firehose_same_name_streams_are_region_scoped(fh):
+    """Same-named delivery streams in two regions stay isolated with region-bearing ARNs."""
+    west = _regional_client("firehose", "us-west-2")
+    name = f"intg-fh-region-scope-{_uuid_mod.uuid4().hex[:8]}"
+
+    east_arn = fh.create_delivery_stream(
+        DeliveryStreamName=name, DeliveryStreamType="DirectPut"
+    )["DeliveryStreamARN"]
+    west_arn = west.create_delivery_stream(
+        DeliveryStreamName=name, DeliveryStreamType="DirectPut"
+    )["DeliveryStreamARN"]
+
+    assert east_arn == f"arn:aws:firehose:us-east-1:000000000000:deliverystream/{name}"
+    assert west_arn == f"arn:aws:firehose:us-west-2:000000000000:deliverystream/{name}"
+
+    east_desc = fh.describe_delivery_stream(DeliveryStreamName=name)["DeliveryStreamDescription"]
+    west_desc = west.describe_delivery_stream(DeliveryStreamName=name)["DeliveryStreamDescription"]
+    assert east_desc["DeliveryStreamARN"] == east_arn
+    assert west_desc["DeliveryStreamARN"] == west_arn
+
+    # Use a high Limit so the assertion is robust to other streams the shared
+    # session fixture accumulates (default page size is 10).
+    assert name in fh.list_delivery_streams(Limit=10000)["DeliveryStreamNames"]
+    assert name in west.list_delivery_streams(Limit=10000)["DeliveryStreamNames"]
+
+
+def test_firehose_stream_names_do_not_fallback_across_region(fh):
+    """A stream created in one region is not visible from another region."""
+    west = _regional_client("firehose", "us-west-2")
+    name = f"intg-fh-no-fallback-{_uuid_mod.uuid4().hex[:8]}"
+
+    west.create_delivery_stream(DeliveryStreamName=name, DeliveryStreamType="DirectPut")
+
+    with pytest.raises(ClientError) as exc:
+        fh.describe_delivery_stream(DeliveryStreamName=name)
+    assert exc.value.response["Error"]["Code"] == "ResourceNotFoundException"
+
+    # West still resolves it, and it never leaks into the east listing.
+    assert name in west.list_delivery_streams(Limit=10000)["DeliveryStreamNames"]
+    assert name not in fh.list_delivery_streams(Limit=10000)["DeliveryStreamNames"]
+
+
+def test_firehose_restore_legacy_account_scoped_state_uses_arn_region():
+    """Legacy account-scoped persisted streams migrate to the region in their ARN."""
+    from ministack.core.responses import (
+        AccountScopedDict,
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from ministack.services import firehose as _fh
+
+    original_account = get_account_id()
+    original_region = get_region()
+    account_id = "000000000000"
+    name = "LegacyFirehoseStream"
+    stream_arn = f"arn:aws:firehose:us-west-2:{account_id}:deliverystream/{name}"
+
+    legacy_streams = AccountScopedDict()
+    legacy_streams._data[(account_id, name)] = {
+        "name": name,
+        "arn": stream_arn,
+        "status": "ACTIVE",
+        "type": "DirectPut",
+        "version": 1,
+        "created_at": 1700000000,
+        "updated_at": 1700000000,
+        "destinations": [],
+        "tags": {},
+        "encryption": None,
+        "kinesis_source": None,
+    }
+
+    _fh.reset()
+    try:
+        set_request_account_id(account_id)
+        set_request_region("us-east-1")
+
+        _fh.restore_state({"_streams": legacy_streams})
+
+        # The legacy stream lands in the region carried by its ARN, not the
+        # active request region.
+        assert _fh._streams.get_scoped(account_id, "us-east-1", name) is None
+        assert _fh._streams.get_scoped(account_id, "us-west-2", name)["arn"] == stream_arn
+    finally:
+        _fh.reset()
+        set_request_account_id(original_account)
+        set_request_region(original_region)
+
+
+def test_firehose_kinesis_source_ingest_is_region_scoped():
+    """ingest_from_kinesis_source only fans out to same-region delivery streams.
+
+    A KinesisStreamAsSource delivery stream registered in us-west-2 must NOT be
+    matched by a Kinesis-source ingest running under a different request region,
+    even when the source ARN matches. Exercises the regional filtering inside
+    ``ingest_from_kinesis_source`` (``_streams.values()`` is scoped to the
+    current account+region), which the positive same-region tests don't cover.
+    """
+    from ministack.core.responses import (
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from ministack.services import firehose as _fh
+
+    original_account = get_account_id()
+    original_region = get_region()
+    account_id = "000000000000"
+    name = "KinSrcRegionScoped"
+    source_arn = f"arn:aws:kinesis:us-west-2:{account_id}:stream/src"
+
+    def _make_stream():
+        return {
+            "name": name,
+            "arn": f"arn:aws:firehose:us-west-2:{account_id}:deliverystream/{name}",
+            "status": "ACTIVE",
+            "type": "KinesisStreamAsSource",
+            "version": 1,
+            "created_at": 1700000000,
+            "updated_at": 1700000000,
+            "destinations": [
+                {
+                    "id": "destinationId-000000000001",
+                    "type": "ExtendedS3",
+                    "config": {"BucketARN": "arn:aws:s3:::no-such-bucket", "Prefix": "out/"},
+                    "records": [],
+                }
+            ],
+            "tags": {},
+            "encryption": None,
+            "kinesis_source": {
+                "KinesisStreamARN": source_arn,
+                "RoleARN": "arn:aws:iam::000000000000:role/test",
+                "DeliveryStartTimestamp": 0,
+            },
+        }
+
+    _fh.reset()
+    try:
+        set_request_account_id(account_id)
+
+        # Register the delivery stream in us-west-2.
+        set_request_region("us-west-2")
+        west_stream = _make_stream()
+        _fh._streams.set_scoped(account_id, "us-west-2", name, west_stream)
+
+        # Ingest under a DIFFERENT region: the us-west-2 stream is out of scope,
+        # so nothing is delivered even though the source ARN matches.
+        set_request_region("us-east-1")
+        _fh.ingest_from_kinesis_source(source_arn, [("pk", b'{"a":1}')])
+        assert west_stream["destinations"][0]["records"] == []
+
+        # Control: same-region ingest matches and appends the record.
+        set_request_region("us-west-2")
+        _fh.ingest_from_kinesis_source(source_arn, [("pk", b'{"a":1}')])
+        assert len(west_stream["destinations"][0]["records"]) == 1
+    finally:
+        _fh.reset()
+        set_request_account_id(original_account)
+        set_request_region(original_region)

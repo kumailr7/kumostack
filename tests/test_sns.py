@@ -7,10 +7,24 @@ import uuid as _uuid_mod
 import zipfile
 from urllib.parse import urlencode, urlparse
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
+
+
+def _regional_client(service: str, region: str):
+    return boto3.client(
+        service,
+        endpoint_url=ENDPOINT,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region,
+        config=Config(region_name=region, retries={"mode": "standard"}),
+    )
+
 
 def _make_zip(code: str) -> bytes:
     buf = io.BytesIO()
@@ -44,6 +58,29 @@ def test_sns_get_topic_attributes(sns):
     resp = sns.get_topic_attributes(TopicArn=arn)
     assert resp["Attributes"]["TopicArn"] == arn
     assert resp["Attributes"]["DisplayName"] == ""  # AWS default is empty, not topic name
+
+
+def test_sns_topics_are_region_scoped_by_name(sns):
+    name = f"mr-sns-same-name-{_uuid_mod.uuid4().hex[:8]}"
+    west = _regional_client("sns", "us-west-2")
+
+    east_arn = sns.create_topic(Name=name)["TopicArn"]
+    west_arn = west.create_topic(Name=name)["TopicArn"]
+
+    assert east_arn == f"arn:aws:sns:us-east-1:000000000000:{name}"
+    assert west_arn == f"arn:aws:sns:us-west-2:000000000000:{name}"
+
+    east_arns = [t["TopicArn"] for t in sns.list_topics()["Topics"]]
+    west_arns = [t["TopicArn"] for t in west.list_topics()["Topics"]]
+    assert east_arn in east_arns
+    assert west_arn not in east_arns
+    assert west_arn in west_arns
+    assert east_arn not in west_arns
+
+    with pytest.raises(ClientError) as exc:
+        sns.get_topic_attributes(TopicArn=west_arn)
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+
 
 def test_sns_set_topic_attributes(sns):
     arn = sns.create_topic(Name="intg-sns-setattr")["TopicArn"]
@@ -109,6 +146,38 @@ def test_sns_list_subscriptions_by_topic(sns):
     assert len(subs) >= 1
     assert all(s["TopicArn"] == arn for s in subs)
 
+
+def test_sns_subscription_attributes_are_region_scoped(sns):
+    west = _regional_client("sns", "us-west-2")
+    name = f"mr-sns-sub-region-{_uuid_mod.uuid4().hex[:8]}"
+    east_arn = sns.create_topic(Name=name)["TopicArn"]
+    west_arn = west.create_topic(Name=name)["TopicArn"]
+    east_sub = sns.subscribe(
+        TopicArn=east_arn, Protocol="email", Endpoint=f"{name}-east@example.com",
+    )["SubscriptionArn"]
+    west_sub = west.subscribe(
+        TopicArn=west_arn, Protocol="email", Endpoint=f"{name}-west@example.com",
+    )["SubscriptionArn"]
+
+    assert sns.get_subscription_attributes(
+        SubscriptionArn=east_sub,
+    )["Attributes"]["TopicArn"] == east_arn
+    assert west.get_subscription_attributes(
+        SubscriptionArn=west_sub,
+    )["Attributes"]["TopicArn"] == west_arn
+
+    east_subs = [sub["SubscriptionArn"] for sub in sns.list_subscriptions()["Subscriptions"]]
+    west_subs = [sub["SubscriptionArn"] for sub in west.list_subscriptions()["Subscriptions"]]
+    assert east_sub in east_subs
+    assert west_sub not in east_subs
+    assert west_sub in west_subs
+    assert east_sub not in west_subs
+
+    with pytest.raises(ClientError) as exc:
+        sns.get_subscription_attributes(SubscriptionArn=west_sub)
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+
+
 def test_sns_publish(sns):
     arn = sns.create_topic(Name="intg-sns-publish")["TopicArn"]
     resp = sns.publish(
@@ -145,6 +214,75 @@ def test_sns_sqs_fanout(sns, sqs):
     assert body["Message"] == "fanout msg"
     assert body["TopicArn"] == topic_arn
 
+
+@pytest.mark.parametrize("protocol, endpoint", [
+    ("sqs", "not-an-arn"),
+    ("sqs", "arn:aws:rds:us-east-1:000000000000:db:wrong-service"),
+    ("lambda", "arn:aws:sqs:us-east-1:000000000000:wrong-service-q"),
+    ("lambda", "arn:aws:lambda:us-east-1:000000000000:not-function-resource"),
+])
+def test_sns_subscribe_rejects_invalid_sqs_and_lambda_endpoint_arns(sns, protocol, endpoint):
+    topic_arn = sns.create_topic(Name=f"intg-sns-invalid-endpoint-{_uuid_mod.uuid4().hex[:8]}")["TopicArn"]
+
+    with pytest.raises(ClientError) as exc:
+        sns.subscribe(TopicArn=topic_arn, Protocol=protocol, Endpoint=endpoint)
+    assert exc.value.response["Error"]["Code"] == "InvalidParameterException"
+
+
+def test_sns_sqs_fanout_does_not_tail_match_foreign_account_endpoint(sns, sqs):
+    queue_name = f"intg-sns-foreign-tail-{_uuid_mod.uuid4().hex[:8]}"
+    q_url = sqs.create_queue(QueueName=queue_name)["QueueUrl"]
+    topic_arn = sns.create_topic(Name=f"intg-sns-foreign-tail-{_uuid_mod.uuid4().hex[:8]}")["TopicArn"]
+
+    sns.subscribe(
+        TopicArn=topic_arn,
+        Protocol="sqs",
+        Endpoint=f"arn:aws:sqs:us-east-1:111111111111:{queue_name}",
+    )
+    sns.publish(TopicArn=topic_arn, Message="must-not-tail-match")
+
+    msgs = sqs.receive_message(QueueUrl=q_url, MaxNumberOfMessages=1, WaitTimeSeconds=1)
+    assert "Messages" not in msgs
+
+
+def test_sns_sqs_fanout_delivers_to_matching_cross_region_queue_arn(sns):
+    west_sqs = _regional_client("sqs", "us-west-2")
+    queue_name = f"intg-sns-cross-region-ok-{_uuid_mod.uuid4().hex[:8]}"
+    q_url = west_sqs.create_queue(QueueName=queue_name)["QueueUrl"]
+    q_arn = west_sqs.get_queue_attributes(
+        QueueUrl=q_url,
+        AttributeNames=["QueueArn"],
+    )["Attributes"]["QueueArn"]
+    assert ":us-west-2:" in q_arn
+    topic_arn = sns.create_topic(Name=f"intg-sns-cross-region-ok-{_uuid_mod.uuid4().hex[:8]}")["TopicArn"]
+
+    sns.subscribe(TopicArn=topic_arn, Protocol="sqs", Endpoint=q_arn)
+    sns.publish(TopicArn=topic_arn, Message="cross-region-delivery")
+
+    msgs = west_sqs.receive_message(QueueUrl=q_url, MaxNumberOfMessages=1, WaitTimeSeconds=1)
+    assert len(msgs.get("Messages", [])) == 1
+    body = json.loads(msgs["Messages"][0]["Body"])
+    assert body["Message"] == "cross-region-delivery"
+    assert body["TopicArn"] == topic_arn
+
+
+def test_sns_sqs_fanout_does_not_tail_match_foreign_region_endpoint(sns, sqs):
+    queue_name = f"intg-sns-cross-region-{_uuid_mod.uuid4().hex[:8]}"
+    q_url = sqs.create_queue(QueueName=queue_name)["QueueUrl"]
+    q_arn = sqs.get_queue_attributes(
+        QueueUrl=q_url,
+        AttributeNames=["QueueArn"],
+    )["Attributes"]["QueueArn"]
+    west_q_arn = q_arn.replace(":us-east-1:", ":us-west-2:")
+    topic_arn = sns.create_topic(Name=f"intg-sns-cross-region-{_uuid_mod.uuid4().hex[:8]}")["TopicArn"]
+
+    sns.subscribe(TopicArn=topic_arn, Protocol="sqs", Endpoint=west_q_arn)
+    sns.publish(TopicArn=topic_arn, Message="must-not-tail-match-region")
+
+    msgs = sqs.receive_message(QueueUrl=q_url, MaxNumberOfMessages=1, WaitTimeSeconds=1)
+    assert "Messages" not in msgs
+
+
 def test_sns_tags(sns):
     arn = sns.create_topic(Name="intg-sns-tags")["TopicArn"]
     sns.tag_resource(
@@ -164,6 +302,48 @@ def test_sns_tags(sns):
     tags = {t["Key"]: t["Value"] for t in resp["Tags"]}
     assert "team" not in tags
     assert tags["env"] == "staging"
+
+
+def test_sns_tag_resource_accepts_empty_account_topic_arn(sns):
+    arn = sns.create_topic(Name=f"intg-sns-empty-account-{_uuid_mod.uuid4().hex[:8]}")["TopicArn"]
+    empty_account_arn = arn.replace(":000000000000:", "::")
+
+    sns.tag_resource(ResourceArn=empty_account_arn, Tags=[{"Key": "env", "Value": "test"}])
+
+    resp = sns.list_tags_for_resource(ResourceArn=arn)
+    tags = {t["Key"]: t["Value"] for t in resp["Tags"]}
+    assert tags["env"] == "test"
+
+
+def test_sns_topic_tag_apis_reject_invalid_arns(sns):
+    arn = sns.create_topic(Name=f"intg-sns-invalid-tags-{_uuid_mod.uuid4().hex[:8]}")["TopicArn"]
+    invalid_cases = [
+        ("not-an-arn", "InvalidParameterException"),
+        ("arn:aws:sns:us-east-1", "InvalidParameterException"),
+        (arn.replace(":sns:", ":sqs:"), "InvalidParameterException"),
+        (arn.replace(":000000000000:", ":111111111111:"), "ResourceNotFoundException"),
+        (arn.replace(":us-east-1:", ":us-west-2:"), "ResourceNotFoundException"),
+        ("arn:aws:sns:us-east-1:000000000000:app/APNS/example", "InvalidParameterException"),
+    ]
+
+    for bad_arn, expected_code in invalid_cases:
+        with pytest.raises(ClientError) as exc:
+            sns.tag_resource(ResourceArn=bad_arn, Tags=[{"Key": "bad", "Value": "value"}])
+        assert exc.value.response["Error"]["Code"] == expected_code
+
+    resp = sns.list_tags_for_resource(ResourceArn=arn)
+    assert resp["Tags"] == []
+
+
+def test_sns_topic_list_and_untag_reject_invalid_arns(sns):
+    for operation, kwargs in [
+        (sns.list_tags_for_resource, {}),
+        (sns.untag_resource, {"TagKeys": ["missing"]}),
+    ]:
+        with pytest.raises(ClientError) as exc:
+            operation(ResourceArn="arn:aws:sqs:us-east-1:000000000000:not-a-topic", **kwargs)
+        assert exc.value.response["Error"]["Code"] == "InvalidParameterException"
+
 
 def test_sns_subscription_attributes(sns):
     arn = sns.create_topic(Name="intg-sns-subattr")["TopicArn"]
@@ -260,7 +440,7 @@ def test_sns_publish_batch(sns):
     assert len(resp.get("Failed", [])) == 0
 
 def test_sns_to_lambda_fanout(lam, sns):
-    """SNS publish with lambda protocol invokes the function synchronously."""
+    """SNS publish with lambda protocol delivers to the function."""
     import uuid as _uuid_mod
 
     fn = f"intg-sns-lam-{_uuid_mod.uuid4().hex[:8]}"
@@ -281,6 +461,68 @@ def test_sns_to_lambda_fanout(lam, sns):
     # Publish — should not raise; Lambda invoked synchronously
     resp = sns.publish(TopicArn=topic_arn, Message="hello-lambda")
     assert "MessageId" in resp
+
+def test_sns_to_lambda_delivery_is_async(lam, sns, sqs):
+    """SNS→Lambda delivery must not block Publish on the subscriber.
+
+    Regression: lambda fanout invoked the subscriber synchronously inside
+    Publish, so a slow (or hung) subscriber Lambda stalled the Publish call and
+    its upstream caller (e.g. a Step Functions task that publishes a
+    notification). AWS delivers SNS→Lambda asynchronously: Publish returns
+    immediately and the subscriber runs in the background.
+    """
+    import time
+    import uuid as _uuid
+
+    qname = f"sns-async-signal-{_uuid.uuid4().hex[:8]}"
+    q_url = sqs.create_queue(QueueName=qname)["QueueUrl"]
+
+    fn = f"intg-sns-async-{_uuid.uuid4().hex[:8]}"
+    # The subscriber simulates a slow handler (sleep) and then signals receipt
+    # out-of-band via SQS so the test can confirm eventual delivery.
+    code = (
+        "import os, time, boto3\n"
+        f"QNAME = {qname!r}\n"
+        "def handler(event, context):\n"
+        "    time.sleep(5)\n"
+        "    sqs = boto3.client('sqs', endpoint_url=os.environ['AWS_ENDPOINT_URL'])\n"
+        "    url = sqs.get_queue_url(QueueName=QNAME)['QueueUrl']\n"
+        "    sqs.send_message(QueueUrl=url, MessageBody='delivered')\n"
+        "    return {'ok': True}\n"
+    )
+    lam.create_function(
+        FunctionName=fn,
+        Runtime="python3.12",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Timeout=30,
+        Code={"ZipFile": _make_zip(code)},
+    )
+    func_arn = f"arn:aws:lambda:us-east-1:000000000000:function:{fn}"
+    topic_arn = sns.create_topic(
+        Name=f"intg-sns-async-topic-{_uuid.uuid4().hex[:8]}"
+    )["TopicArn"]
+    sns.subscribe(TopicArn=topic_arn, Protocol="lambda", Endpoint=func_arn)
+
+    start = time.time()
+    resp = sns.publish(TopicArn=topic_arn, Message="async-check")
+    elapsed = time.time() - start
+    assert "MessageId" in resp
+    # Publish must return well before the subscriber's 5s sleep completes; a
+    # synchronous fanout would block here for the cold start plus the sleep.
+    assert elapsed < 3.0, f"Publish blocked on the subscriber ({elapsed:.1f}s)"
+
+    # The subscriber still runs in the background and eventually signals.
+    deadline = time.time() + 30
+    received = False
+    while time.time() < deadline:
+        msgs = sqs.receive_message(
+            QueueUrl=q_url, WaitTimeSeconds=1, MaxNumberOfMessages=1
+        ).get("Messages", [])
+        if msgs:
+            received = True
+            break
+    assert received, "subscriber Lambda was never delivered the SNS message"
 
 def test_sns_to_lambda_event_subscription_arn(lam, sns):
     """SNS→Lambda fanout must set EventSubscriptionArn to the real subscription ARN."""
@@ -1289,3 +1531,258 @@ def test_sns_publish_batch_rejects_oversized_entry_per_entry(sns):
     assert "too-big" in failed_ids
     failed = next(r for r in resp["Failed"] if r["Id"] == "too-big")
     assert failed["Code"] == "InvalidParameter"
+
+
+def _create_gcm_app(sns, name):
+    return sns.create_platform_application(
+        Name=name, Platform="GCM", Attributes={"PlatformCredential": ""},
+    )["PlatformApplicationArn"]
+
+
+def test_sns_create_platform_application(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-create-app")
+    assert ":app/GCM/intg-sns-pe-create-app" in app_arn
+
+
+def test_sns_platform_applications_and_endpoints_are_region_scoped(sns):
+    west = _regional_client("sns", "us-west-2")
+    name = f"mr-sns-platform-region-{_uuid_mod.uuid4().hex[:8]}"
+    token = _uuid_mod.uuid4().hex
+
+    east_app = _create_gcm_app(sns, name)
+    west_app = _create_gcm_app(west, name)
+    east_endpoint = sns.create_platform_endpoint(
+        PlatformApplicationArn=east_app, Token=token,
+    )["EndpointArn"]
+    west_endpoint = west.create_platform_endpoint(
+        PlatformApplicationArn=west_app, Token=token,
+    )["EndpointArn"]
+
+    assert east_app == f"arn:aws:sns:us-east-1:000000000000:app/GCM/{name}"
+    assert west_app == f"arn:aws:sns:us-west-2:000000000000:app/GCM/{name}"
+    assert east_endpoint != west_endpoint
+    assert sns.get_endpoint_attributes(EndpointArn=east_endpoint)["Attributes"]["Token"] == token
+    assert west.get_endpoint_attributes(EndpointArn=west_endpoint)["Attributes"]["Token"] == token
+
+    with pytest.raises(ClientError) as exc:
+        sns.get_endpoint_attributes(EndpointArn=west_endpoint)
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+
+    sns.delete_platform_application(PlatformApplicationArn=east_app)
+    with pytest.raises(ClientError) as exc:
+        sns.get_endpoint_attributes(EndpointArn=east_endpoint)
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+    assert west.get_endpoint_attributes(EndpointArn=west_endpoint)["Attributes"]["Token"] == token
+
+
+def test_sns_create_platform_endpoint_stores_token_and_enabled(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-token")
+    token = _uuid_mod.uuid4().hex
+    arn = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=token,
+    )["EndpointArn"]
+    attrs = sns.get_endpoint_attributes(EndpointArn=arn)["Attributes"]
+    assert attrs["Token"] == token
+    assert attrs["Enabled"] == "true"  # AWS default when unspecified
+
+
+def test_sns_create_platform_endpoint_stores_custom_user_data(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-cud")
+    arn = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=_uuid_mod.uuid4().hex,
+        CustomUserData="u-42",
+    )["EndpointArn"]
+    attrs = sns.get_endpoint_attributes(EndpointArn=arn)["Attributes"]
+    assert attrs["CustomUserData"] == "u-42"
+
+
+def test_sns_create_platform_endpoint_idempotent_when_attributes_match(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-idem")
+    token = _uuid_mod.uuid4().hex
+    a1 = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=token, CustomUserData="same",
+    )["EndpointArn"]
+    a2 = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=token, CustomUserData="same",
+    )["EndpointArn"]
+    assert a1 == a2
+
+
+def test_sns_create_platform_endpoint_duplicate_token_different_attrs_raises(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-dup")
+    token = _uuid_mod.uuid4().hex
+    existing = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=token, CustomUserData="first",
+    )["EndpointArn"]
+    with pytest.raises(ClientError) as exc:
+        sns.create_platform_endpoint(
+            PlatformApplicationArn=app_arn, Token=token, CustomUserData="second",
+        )
+    msg = exc.value.response["Error"]["Message"]
+    # AWS-style message; consumers parse the existing endpoint ARN out of it.
+    assert "already exists with the same Token" in msg
+    assert existing in msg
+
+
+def test_sns_get_endpoint_attributes_not_found(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-getmiss")
+    with pytest.raises(ClientError) as exc:
+        sns.get_endpoint_attributes(EndpointArn=f"{app_arn}/does-not-exist")
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+
+
+def test_sns_set_endpoint_attributes_merges(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-set")
+    arn = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=_uuid_mod.uuid4().hex,
+    )["EndpointArn"]
+    new_token = _uuid_mod.uuid4().hex
+    sns.set_endpoint_attributes(
+        EndpointArn=arn,
+        Attributes={"Token": new_token, "Enabled": "false", "CustomUserData": "x"},
+    )
+    attrs = sns.get_endpoint_attributes(EndpointArn=arn)["Attributes"]
+    assert attrs["Token"] == new_token
+    assert attrs["Enabled"] == "false"
+    assert attrs["CustomUserData"] == "x"
+
+
+def test_sns_set_endpoint_attributes_not_found(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-setmiss")
+    with pytest.raises(ClientError) as exc:
+        sns.set_endpoint_attributes(
+            EndpointArn=f"{app_arn}/nope", Attributes={"Enabled": "false"},
+        )
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+
+
+def test_sns_delete_endpoint_then_get_not_found(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-del")
+    arn = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=_uuid_mod.uuid4().hex,
+    )["EndpointArn"]
+    sns.delete_endpoint(EndpointArn=arn)
+    with pytest.raises(ClientError) as exc:
+        sns.get_endpoint_attributes(EndpointArn=arn)
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+
+
+def test_sns_delete_endpoint_is_idempotent(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-delidem")
+    # Deleting a non-existent endpoint succeeds in AWS (no error).
+    sns.delete_endpoint(EndpointArn=f"{app_arn}/never-existed")
+
+
+def test_sns_delete_platform_application_removes_endpoints(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-delapp")
+    arn = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=_uuid_mod.uuid4().hex,
+    )["EndpointArn"]
+    sns.delete_platform_application(PlatformApplicationArn=app_arn)
+    with pytest.raises(ClientError) as exc:
+        sns.get_endpoint_attributes(EndpointArn=arn)
+    assert exc.value.response["Error"]["Code"] == "NotFound"
+
+
+def test_sns_publish_to_platform_endpoint(sns):
+    app_arn = _create_gcm_app(sns, "intg-sns-pe-publish")
+    arn = sns.create_platform_endpoint(
+        PlatformApplicationArn=app_arn, Token=_uuid_mod.uuid4().hex,
+    )["EndpointArn"]
+    resp = sns.publish(TargetArn=arn, Message="hi")
+    assert resp["MessageId"]
+
+
+def test_sns_restore_legacy_account_scoped_state_adopts_arn_regions():
+    import ministack.services.sns as _sns
+    from ministack.core.responses import (
+        AccountScopedDict,
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+
+    original_account = get_account_id()
+    original_region = get_region()
+    original_topics = dict(_sns._topics._data)
+    original_subs = dict(_sns._sub_arn_to_topic._data)
+    original_apps = dict(_sns._platform_applications._data)
+    original_endpoints = dict(_sns._platform_endpoints._data)
+    try:
+        _sns.reset()
+        set_request_account_id("000000000000")
+        set_request_region("us-east-1")
+
+        suffix = _uuid_mod.uuid4().hex[:8]
+        topic_arn = f"arn:aws:sns:us-west-2:000000000000:legacy-sns-{suffix}"
+        sub_arn = f"{topic_arn}:{_uuid_mod.uuid4()}"
+        app_arn = f"arn:aws:sns:us-west-2:000000000000:app/GCM/LegacyApp-{suffix}"
+        endpoint_arn = f"{app_arn}/{_uuid_mod.uuid4()}"
+
+        legacy_topics = AccountScopedDict()
+        legacy_topics[topic_arn] = {
+            "name": f"legacy-sns-{suffix}",
+            "arn": topic_arn,
+            "attributes": {
+                "TopicArn": topic_arn,
+                "SubscriptionsConfirmed": "1",
+                "SubscriptionsPending": "0",
+            },
+            "subscriptions": [{
+                "arn": sub_arn,
+                "protocol": "email",
+                "endpoint": "legacy@example.com",
+                "confirmed": True,
+                "topic_arn": topic_arn,
+                "owner": "000000000000",
+                "attributes": {"SubscriptionArn": sub_arn, "TopicArn": topic_arn},
+            }],
+            "messages": [],
+            "tags": {},
+        }
+
+        legacy_subs = AccountScopedDict()
+        legacy_subs[sub_arn] = topic_arn
+        legacy_apps = AccountScopedDict()
+        legacy_apps[app_arn] = {
+            "arn": app_arn,
+            "name": f"LegacyApp-{suffix}",
+            "platform": "GCM",
+            "attributes": {},
+        }
+        legacy_endpoints = AccountScopedDict()
+        legacy_endpoints[endpoint_arn] = {
+            "arn": endpoint_arn,
+            "application_arn": app_arn,
+            "attributes": {"Token": "legacy-token", "Enabled": "true"},
+        }
+
+        _sns.restore_state({
+            "topics": legacy_topics,
+            "sub_arn_to_topic": legacy_subs,
+            "platform_applications": legacy_apps,
+            "platform_endpoints": legacy_endpoints,
+        })
+
+        assert _sns._topics.get(topic_arn) is None
+        assert _sns._sub_arn_to_topic.get(sub_arn) is None
+        assert _sns._platform_applications.get(app_arn) is None
+        assert _sns._platform_endpoints.get(endpoint_arn) is None
+
+        set_request_region("us-west-2")
+        assert _sns._topics[topic_arn]["arn"] == topic_arn
+        assert _sns._sub_arn_to_topic[sub_arn] == topic_arn
+        assert _sns._platform_applications[app_arn]["arn"] == app_arn
+        assert _sns._platform_endpoints[endpoint_arn]["application_arn"] == app_arn
+    finally:
+        _sns._topics.clear()
+        _sns._topics._data.update(original_topics)
+        _sns._sub_arn_to_topic.clear()
+        _sns._sub_arn_to_topic._data.update(original_subs)
+        _sns._platform_applications.clear()
+        _sns._platform_applications._data.update(original_apps)
+        _sns._platform_endpoints.clear()
+        _sns._platform_endpoints._data.update(original_endpoints)
+        set_request_account_id(original_account)
+        set_request_region(original_region)

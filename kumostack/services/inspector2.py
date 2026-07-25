@@ -9,8 +9,10 @@ import logging
 import time
 import uuid
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import load_state
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
@@ -20,12 +22,12 @@ from kumostack.core.responses import (
 
 logger = logging.getLogger("inspector2")
 
-_account_config = AccountScopedDict()
-_findings = AccountScopedDict()
-_coverage = AccountScopedDict()
-_scan_history = AccountScopedDict()
+_account_config = AccountRegionScopedDict()
+_findings = AccountRegionScopedDict()
+_coverage = AccountRegionScopedDict()
+_scan_history = AccountRegionScopedDict()
 _tags = AccountScopedDict()
-_filters = AccountScopedDict()
+_filters = AccountRegionScopedDict()
 
 
 def _now_iso():
@@ -34,6 +36,29 @@ def _now_iso():
 
 def _finding_arn(acct_id, finding_id):
     return f"arn:aws:inspector2:{get_region()}:{acct_id}:finding/{finding_id}"
+
+
+def _parse_local_resource_arn(arn, account_id, resource_prefixes):
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return None
+
+    if spec.service != "inspector2" or spec.account_id != account_id or spec.region != get_region():
+        return None
+
+    for prefix in resource_prefixes:
+        if spec.resource.startswith(prefix) and spec.resource[len(prefix):]:
+            return spec
+    return None
+
+
+def _resource_not_found(arn):
+    return error_response_json(
+        "ResourceNotFoundException",
+        f"The resource with arn '{arn}' does not exist",
+        400,
+    )
 
 
 _STUB_PACKAGES = [
@@ -836,6 +861,8 @@ def _tag_resource(data, account_id):
     tags = data.get("tags", {})
     if not arn:
         return error_response_json("ValidationException", "resourceArn is required", 400)
+    if not _parse_local_resource_arn(arn, account_id, ("finding/", "filter/")):
+        return _resource_not_found(arn)
 
     existing = _tags.get(account_id, {}).get(arn, {})
     existing.update(tags)
@@ -850,6 +877,8 @@ def _untag_resource(data, account_id):
     tag_keys = data.get("tagKeys", [])
     if not arn:
         return error_response_json("ValidationException", "resourceArn is required", 400)
+    if not _parse_local_resource_arn(arn, account_id, ("finding/", "filter/")):
+        return _resource_not_found(arn)
 
     existing = _tags.get(account_id, {}).get(arn, {})
     for key in tag_keys:
@@ -864,6 +893,8 @@ def _list_tags_for_resource(data, account_id):
     arn = data.get("resourceArn", "")
     if not arn:
         return error_response_json("ValidationException", "resourceArn is required", 400)
+    if not _parse_local_resource_arn(arn, account_id, ("finding/", "filter/")):
+        return _resource_not_found(arn)
 
     tags = _tags.get(account_id, {}).get(arn, {})
     return json_response({"tags": tags})
@@ -914,8 +945,8 @@ def _delete_filter(data, account_id):
     if not arn:
         return error_response_json("ValidationException", "arn is required", 400)
 
-    # Extract filter name from ARN: arn:aws:inspector2:...:filter/<name>
-    name = arn.split("/")[-1] if "/" in arn else ""
+    spec = _parse_local_resource_arn(arn, account_id, ("filter/",))
+    name = spec.resource[len("filter/"):] if spec else ""
     account_filters = _filters.get(account_id, {})
 
     if name not in account_filters:
@@ -995,37 +1026,62 @@ async def handle_request(method, path, headers, body, query_params):
 
 
 def get_state():
-    return {
-        "account_config": copy.deepcopy(dict(_account_config._data)),
-        "findings": copy.deepcopy(dict(_findings._data)),
-        "coverage": copy.deepcopy(dict(_coverage._data)),
-        "scan_history": copy.deepcopy(dict(_scan_history._data)),
-        "tags": copy.deepcopy(dict(_tags._data)),
-        "filters": copy.deepcopy(dict(_filters._data)),
-    }
+    return copy.deepcopy(
+        {
+            "account_config": _account_config,
+            "findings": _findings,
+            "coverage": _coverage,
+            "scan_history": _scan_history,
+            "tags": _tags,
+            "filters": _filters,
+        }
+    )
 
 
 def restore_state(data):
     if not data:
         return
-    acc_config = data.get("account_config", {})
-    if acc_config:
-        _account_config._data.update(acc_config)
-    findings = data.get("findings", {})
-    if findings:
-        _findings._data.update(findings)
-    coverage = data.get("coverage", {})
-    if coverage:
-        _coverage._data.update(coverage)
-    scan_history = data.get("scan_history", {})
-    if scan_history:
-        _scan_history._data.update(scan_history)
-    tags = data.get("tags", {})
-    if tags:
-        _tags._data.update(tags)
-    filters_data = data.get("filters", {})
-    if filters_data:
-        _filters._data.update(filters_data)
+    reset()
+    for store, state_key in (
+        (_account_config, "account_config"),
+        (_findings, "findings"),
+        (_coverage, "coverage"),
+        (_scan_history, "scan_history"),
+        (_filters, "filters"),
+    ):
+        _restore_regional_bucket(store, data.get(state_key, {}))
+    _restore_account_bucket(_tags, data.get("tags", {}))
+
+
+def _restore_regional_bucket(store, restored):
+    """Restore each legacy account bucket intact into the boot region."""
+    if isinstance(restored, AccountRegionScopedDict):
+        store.update(restored)
+        return
+
+    if isinstance(restored, AccountScopedDict):
+        items = restored._data.items()
+    else:
+        items = restored.items()
+
+    boot_region = get_region()
+    for key, value in items:
+        if isinstance(key, tuple) and len(key) == 2:
+            account_id, bucket_key = key
+        else:
+            account_id, bucket_key = get_account_id(), key
+        store.set_scoped(account_id, boot_region, bucket_key, value)
+
+
+def _restore_account_bucket(store, restored):
+    if isinstance(restored, AccountScopedDict):
+        store.update(restored)
+        return
+    for key, value in restored.items():
+        if isinstance(key, tuple) and len(key) == 2:
+            store._data[key] = value
+        else:
+            store[key] = value
 
 
 def reset():

@@ -13,7 +13,9 @@ import os
 import time
 import xml.etree.ElementTree as ET
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
@@ -27,15 +29,16 @@ logger = logging.getLogger("servicediscovery")
 
 REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 
-# In-memory state
-_namespaces = AccountScopedDict()     # ns_id -> namespace dict
-_services = AccountScopedDict()       # svc_id -> service dict
-_instances = AccountScopedDict()      # svc_id -> {instance_id -> instance dict}
-_operations = AccountScopedDict()     # op_id -> operation dict
-_resource_tags = AccountScopedDict()  # resource_arn -> [{"Key": ..., "Value": ...}]
-_service_attributes = AccountScopedDict()      # svc_id -> {key: value}
-_instance_health_status = AccountScopedDict()  # svc_id -> {instance_id: status}
-_instances_revision = AccountScopedDict()      # svc_id -> int
+# In-memory state. Resource and child stores are regional. ARN-keyed tags stay
+# account-scoped because the resource ARN already includes its region.
+_namespaces = AccountRegionScopedDict()     # ns_id -> namespace dict
+_services = AccountRegionScopedDict()       # svc_id -> service dict
+_instances = AccountRegionScopedDict()      # svc_id -> {instance_id -> instance dict}
+_operations = AccountRegionScopedDict()     # op_id -> operation dict
+_resource_tags = AccountScopedDict()        # resource_arn -> [{"Key": ..., "Value": ...}]
+_service_attributes = AccountRegionScopedDict()      # svc_id -> {key: value}
+_instance_health_status = AccountRegionScopedDict()  # svc_id -> {instance_id: status}
+_instances_revision = AccountRegionScopedDict()      # svc_id -> int
 
 
 def get_state():
@@ -51,17 +54,65 @@ def get_state():
     }
 
 
+def _restore_regional_store(target, saved, region_for_value=None):
+    if isinstance(saved, AccountRegionScopedDict):
+        target.update(saved)
+        return
+
+    if isinstance(saved, AccountScopedDict):
+        saved_items = saved._data.items()
+    else:
+        account_id = get_account_id()
+        saved_items = (((account_id, key), value) for key, value in saved.items())
+
+    for (account_id, key), value in saved_items:
+        region = region_for_value(account_id, key, value) if region_for_value else None
+        region = region or target._region_for_legacy_value(key, value)
+        target.set_scoped(account_id, region, key, value)
+
+
 def load_persisted_state(data):
     if not data:
         return
     _namespaces.update(data.get("namespaces", {}))
     _services.update(data.get("services", {}))
-    _instances.update(data.get("instances", {}))
-    _operations.update(data.get("operations", {}))
+
+    namespace_regions = {
+        (account_id, namespace_id): region
+        for (account_id, region, namespace_id), _namespace in _namespaces.all_items()
+    }
+    service_regions = {
+        (account_id, service_id): region
+        for (account_id, region, service_id), _service in _services.all_items()
+    }
+
+    def service_region(account_id, service_id, _value):
+        return service_regions.get((account_id, service_id))
+
+    def operation_region(account_id, _operation_id, operation):
+        targets = operation.get("Targets", {})
+        service_id = targets.get("SERVICE")
+        namespace_id = targets.get("NAMESPACE")
+        return service_regions.get((account_id, service_id)) or namespace_regions.get(
+            (account_id, namespace_id)
+        )
+
+    # Legacy child records have no ARN of their own. Keep them beside their
+    # migrated parent service instead of assigning them to the boot region.
+    _restore_regional_store(_instances, data.get("instances", {}), service_region)
+    _restore_regional_store(_operations, data.get("operations", {}), operation_region)
     _resource_tags.update(data.get("resource_tags", {}))
-    _service_attributes.update(data.get("service_attributes", {}))
-    _instance_health_status.update(data.get("instance_health_status", {}))
-    _instances_revision.update(data.get("instances_revision", {}))
+    _restore_regional_store(
+        _service_attributes, data.get("service_attributes", {}), service_region
+    )
+    _restore_regional_store(
+        _instance_health_status,
+        data.get("instance_health_status", {}),
+        service_region,
+    )
+    _restore_regional_store(
+        _instances_revision, data.get("instances_revision", {}), service_region
+    )
 
 
 def reset():
@@ -138,6 +189,44 @@ def _namespace_arn(ns_id: str) -> str:
 
 def _service_arn(svc_id: str) -> str:
     return f"arn:aws:servicediscovery:{get_region()}:{get_account_id()}:service/{svc_id}"
+
+
+def _invalid_resource_arn(arn):
+    return error_response_json("InvalidInput", f"Invalid ResourceARN: {arn}", 400)
+
+
+def _resolve_taggable_resource_arn(arn):
+    if not arn:
+        return None, error_response_json("InvalidInput", "ResourceARN is required", 400)
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return None, _invalid_resource_arn(arn)
+    if (
+        spec.partition != "aws"
+        or spec.service != "servicediscovery"
+        or spec.account_id != get_account_id()
+        or spec.region != get_region()
+    ):
+        return None, _invalid_resource_arn(arn)
+
+    resource_type, separator, resource_id = spec.resource.partition("/")
+    if separator != "/" or not resource_id or "/" in resource_id:
+        return None, _invalid_resource_arn(arn)
+
+    if resource_type == "namespace":
+        namespace = _namespaces.get(resource_id)
+        if not namespace or namespace.get("Arn") != arn:
+            return None, error_response_json("NamespaceNotFound", "Namespace not found", 404)
+        return arn, None
+
+    if resource_type == "service":
+        service = _services.get(resource_id)
+        if not service or service.get("Arn") != arn:
+            return None, error_response_json("ServiceNotFound", "Service not found", 404)
+        return arn, None
+
+    return None, _invalid_resource_arn(arn)
 
 
 def _create_operation(op_type: str, targets=None):
@@ -624,9 +713,9 @@ def _update_service(data):
 
 
 def _tag_resource(data):
-    arn = data.get("ResourceARN")
-    if not arn:
-        return error_response_json("InvalidInput", "ResourceARN is required", 400)
+    arn, err = _resolve_taggable_resource_arn(data.get("ResourceARN"))
+    if err:
+        return err
 
     incoming = data.get("Tags", [])
     existing = {t.get("Key"): t for t in _resource_tags.get(arn, []) if t.get("Key")}
@@ -639,9 +728,9 @@ def _tag_resource(data):
 
 
 def _untag_resource(data):
-    arn = data.get("ResourceARN")
-    if not arn:
-        return error_response_json("InvalidInput", "ResourceARN is required", 400)
+    arn, err = _resolve_taggable_resource_arn(data.get("ResourceARN"))
+    if err:
+        return err
 
     keys = set(data.get("TagKeys", []))
     if arn in _resource_tags:
@@ -650,7 +739,7 @@ def _untag_resource(data):
 
 
 def _list_tags_for_resource(data):
-    arn = data.get("ResourceARN")
-    if not arn:
-        return error_response_json("InvalidInput", "ResourceARN is required", 400)
+    arn, err = _resolve_taggable_resource_arn(data.get("ResourceARN"))
+    if err:
+        return err
     return json_response({"Tags": _resource_tags.get(arn, [])})

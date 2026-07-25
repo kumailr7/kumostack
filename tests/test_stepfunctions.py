@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -6,8 +7,11 @@ import uuid as _uuid_mod
 import zipfile
 from urllib.parse import urlparse
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
+from conftest import ENDPOINT
 
 
 def _make_zip(code: str) -> bytes:
@@ -16,7 +20,13 @@ def _make_zip(code: str) -> bytes:
         zf.writestr("index.py", code)
     return buf.getvalue()
 
+
+def _make_zip_b64(code: str) -> str:
+    return base64.b64encode(_make_zip(code)).decode("ascii")
+
+
 _LAMBDA_ROLE = "arn:aws:iam::000000000000:role/lambda-role"
+
 
 def _wait_sfn(sfn, exec_arn, timeout=10):
     """Poll DescribeExecution until terminal state."""
@@ -26,6 +36,149 @@ def _wait_sfn(sfn, exec_arn, timeout=10):
         if desc["status"] != "RUNNING":
             return desc
     return desc
+
+
+def _regional_sfn(region):
+    return boto3.client(
+        "stepfunctions",
+        endpoint_url=ENDPOINT,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region,
+        config=Config(
+            region_name=region,
+            retries={"mode": "standard"},
+            max_pool_connections=50,
+        ),
+    )
+
+
+def _regional_rds(region):
+    return boto3.client(
+        "rds",
+        endpoint_url=ENDPOINT,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region,
+        config=Config(
+            region_name=region,
+            retries={"mode": "standard"},
+            max_pool_connections=50,
+        ),
+    )
+
+
+def _pass_definition(result="ok"):
+    return json.dumps(
+        {
+            "StartAt": "P",
+            "States": {"P": {"Type": "Pass", "Result": result, "End": True}},
+        }
+    )
+
+
+def test_sfn_state_machines_are_region_scoped():
+    east = _regional_sfn("us-east-1")
+    west = _regional_sfn("us-west-2")
+    name = f"sfn-region-scope-{_uuid_mod.uuid4().hex}"
+
+    east_sm = east.create_state_machine(
+        name=name,
+        definition=_pass_definition("east"),
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    west_sm = west.create_state_machine(
+        name=name,
+        definition=_pass_definition("west"),
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+
+    assert ":us-east-1:" in east_sm["stateMachineArn"]
+    assert ":us-west-2:" in west_sm["stateMachineArn"]
+    assert east_sm["stateMachineArn"] != west_sm["stateMachineArn"]
+
+    east_arns = {sm["stateMachineArn"] for sm in east.list_state_machines()["stateMachines"]}
+    west_arns = {sm["stateMachineArn"] for sm in west.list_state_machines()["stateMachines"]}
+    assert east_sm["stateMachineArn"] in east_arns
+    assert east_sm["stateMachineArn"] not in west_arns
+    assert west_sm["stateMachineArn"] in west_arns
+    assert west_sm["stateMachineArn"] not in east_arns
+
+    with pytest.raises(ClientError) as exc:
+        west.describe_state_machine(stateMachineArn=east_sm["stateMachineArn"])
+    assert exc.value.response["Error"]["Code"] == "StateMachineDoesNotExist"
+
+
+def test_sfn_executions_are_region_scoped():
+    east = _regional_sfn("us-east-1")
+    west = _regional_sfn("us-west-2")
+    name = f"sfn-exec-region-scope-{_uuid_mod.uuid4().hex}"
+    execution_name = "same-execution-name"
+
+    east_sm = east.create_state_machine(
+        name=name,
+        definition=_pass_definition("east"),
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    west_sm = west.create_state_machine(
+        name=name,
+        definition=_pass_definition("west"),
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+
+    east_ex = east.start_execution(
+        stateMachineArn=east_sm["stateMachineArn"],
+        name=execution_name,
+        input="{}",
+    )
+    west_ex = west.start_execution(
+        stateMachineArn=west_sm["stateMachineArn"],
+        name=execution_name,
+        input="{}",
+    )
+
+    assert ":us-east-1:" in east_ex["executionArn"]
+    assert ":us-west-2:" in west_ex["executionArn"]
+    assert east_ex["executionArn"] != west_ex["executionArn"]
+
+    east_desc = _wait_sfn(east, east_ex["executionArn"])
+    west_desc = _wait_sfn(west, west_ex["executionArn"])
+    assert east_desc["status"] == "SUCCEEDED"
+    assert west_desc["status"] == "SUCCEEDED"
+    assert json.loads(east_desc["output"]) == "east"
+    assert json.loads(west_desc["output"]) == "west"
+
+    east_exec_arns = {
+        ex["executionArn"]
+        for ex in east.list_executions(stateMachineArn=east_sm["stateMachineArn"])["executions"]
+    }
+    west_exec_arns = {
+        ex["executionArn"]
+        for ex in west.list_executions(stateMachineArn=west_sm["stateMachineArn"])["executions"]
+    }
+    assert east_ex["executionArn"] in east_exec_arns
+    assert east_ex["executionArn"] not in west_exec_arns
+    assert west_ex["executionArn"] in west_exec_arns
+    assert west_ex["executionArn"] not in east_exec_arns
+
+    with pytest.raises(ClientError) as exc:
+        west.describe_execution(executionArn=east_ex["executionArn"])
+    assert exc.value.response["Error"]["Code"] == "ExecutionDoesNotExist"
+
+
+def test_sfn_start_execution_rejects_cross_region_state_machine_arn():
+    east = _regional_sfn("us-east-1")
+    west = _regional_sfn("us-west-2")
+    name = f"sfn-cross-region-start-{_uuid_mod.uuid4().hex}"
+    east_sm = east.create_state_machine(
+        name=name,
+        definition=_pass_definition("east"),
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+
+    with pytest.raises(ClientError) as exc:
+        west.start_execution(stateMachineArn=east_sm["stateMachineArn"], input="{}")
+    assert exc.value.response["Error"]["Code"] == "StateMachineDoesNotExist"
 
 def test_sfn_create_execute(sfn):
     definition = json.dumps(
@@ -255,6 +408,73 @@ def test_sfn_tags_v2(sfn):
     assert not any(t["key"] == "init" for t in tags3)
     assert any(t["key"] == "env" for t in tags3)
 
+
+def test_sfn_tags_scope_by_resource_arn_region():
+    from ministack.core.responses import (
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from ministack.services import stepfunctions as m
+
+    original_account = get_account_id()
+    original_region = get_region()
+    original_tags = dict(m._tags._data)
+    arn = "arn:aws:states:us-east-1:000000000000:stateMachine:tagged-east"
+    foreign_region_arn = "arn:aws:states:us-west-2:000000000000:stateMachine:tagged-west"
+    foreign_account_arn = "arn:aws:states:us-east-1:111111111111:stateMachine:foreign"
+
+    def assert_error(response, code):
+        status, headers, body = response
+        assert status == 400
+        assert headers["x-amzn-errortype"] == code
+        assert json.loads(body)["__type"] == code
+
+    try:
+        m._tags.clear()
+        set_request_account_id("000000000000")
+        set_request_region("us-east-1")
+
+        m._tag_resource({"resourceArn": arn, "tags": [{"key": "env", "value": "east"}]})
+
+        assert m._tags.get_scoped("000000000000", "us-east-1", arn) == [
+            {"key": "env", "value": "east"},
+        ]
+        assert m._tags.get_scoped("000000000000", "us-west-2", arn) is None
+
+        _status, _headers, body = m._list_tags_for_resource({"resourceArn": arn})
+        assert json.loads(body)["tags"] == [{"key": "env", "value": "east"}]
+
+        assert_error(
+            m._tag_resource({
+                "resourceArn": foreign_region_arn,
+                "tags": [{"key": "env", "value": "west"}],
+            }),
+            "InvalidArn",
+        )
+        assert m._tags.get_scoped("000000000000", "us-west-2", foreign_region_arn) is None
+
+        assert_error(
+            m._tag_resource({
+                "resourceArn": foreign_account_arn,
+                "tags": [{"key": "owner", "value": "other"}],
+            }),
+            "AccessDeniedException",
+        )
+        assert_error(
+            m._list_tags_for_resource({"resourceArn": foreign_account_arn}),
+            "AccessDeniedException",
+        )
+        assert m._tags.get_scoped("111111111111", "us-east-1", foreign_account_arn) is None
+        assert m._tags.get_scoped("000000000000", "us-east-1", foreign_account_arn) is None
+    finally:
+        m._tags.clear()
+        m._tags._data.update(original_tags)
+        set_request_account_id(original_account)
+        set_request_region(original_region)
+
+
 def test_sfn_intrinsic_string_to_json(sfn, sfn_sync):
     """States.StringToJson parses a JSON string into structured data."""
     definition = json.dumps({
@@ -281,6 +501,41 @@ def test_sfn_intrinsic_string_to_json(sfn, sfn_sync):
     assert resp["status"] == "SUCCEEDED"
     output = json.loads(resp["output"])
     assert output["parsed"] == {"a": 1, "b": 2}
+
+def test_sfn_pass_parameters_resolve_context_object(sfn):
+    """Pass state Parameters can resolve Step Functions context object paths."""
+    unique = str(time.time_ns())
+    execution_name = f"pass-context-{unique}"
+    definition = json.dumps({
+        "StartAt": "Build",
+        "States": {
+            "Build": {
+                "Type": "Pass",
+                "Parameters": {
+                    "executionName.$": "$$.Execution.Name",
+                    "inputValue.$": "$.value",
+                },
+                "End": True,
+            }
+        },
+    })
+    sm = sfn.create_state_machine(
+        name=f"sfn-pass-context-{unique}",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    ex = sfn.start_execution(
+        stateMachineArn=sm["stateMachineArn"],
+        name=execution_name,
+        input=json.dumps({"value": "from-input"}),
+    )
+
+    desc = _wait_sfn(sfn, ex["executionArn"])
+    assert desc["status"] == "SUCCEEDED"
+    assert json.loads(desc["output"]) == {
+        "executionName": execution_name,
+        "inputValue": "from-input",
+    }
 
 def test_sfn_intrinsic_json_merge(sfn, sfn_sync):
     """States.JsonMerge shallow-merges two objects."""
@@ -800,6 +1055,242 @@ def test_sfn_aws_sdk_lambda_get_alias_and_configuration(sfn_sync, lam):
     assert output["alias"]["FunctionVersion"] == version
     assert output["config"]["FunctionName"] == fn
     assert output["config"]["Version"] == version
+
+
+def test_sfn_aws_sdk_lambda_write_actions_and_pascal_outputs(sfn_sync, lam):
+    """aws-sdk:lambda write actions route through Lambda REST and return PascalCase output."""
+    suffix = _uuid_mod.uuid4().hex[:8]
+    fn = f"sfn-sdk-lambda-write-{suffix}"
+    sm_name = f"sfn-sdk-lambda-write-{suffix}"
+    function_arn = f"arn:aws:lambda:us-east-1:000000000000:function:{fn}"
+    kms_key_arn = f"arn:aws:kms:us-east-1:000000000000:key/{suffix}"
+    vpc_config = {
+        "SubnetIds": [f"subnet-{suffix}"],
+        "SecurityGroupIds": [f"sg-{suffix}"],
+    }
+    create_zip = _make_zip_b64("def handler(e, c): return {'version': 1}")
+    update_zip = _make_zip_b64("def handler(e, c): return {'version': 2}")
+    sm_arn = None
+
+    definition = json.dumps({
+        "StartAt": "CreateFunction",
+        "States": {
+            "CreateFunction": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:createFunction",
+                "Parameters": {
+                    "FunctionName": fn,
+                    "Runtime": "python3.12",
+                    "Role": _LAMBDA_ROLE,
+                    "Handler": "index.handler",
+                    "Code": {"ZipFile": create_zip},
+                    "Timeout": 10,
+                    "Architectures": ["x86_64"],
+                    "KmsKeyArn": kms_key_arn,
+                    "VpcConfig": vpc_config,
+                    "Publish": True,
+                    "Tags": {"source": "sfn-test"},
+                },
+                "ResultPath": "$.createResult",
+                "Next": "UpdateFunctionConfiguration",
+            },
+            "UpdateFunctionConfiguration": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:updateFunctionConfiguration",
+                "Parameters": {
+                    "FunctionName.$": "$.createResult.FunctionArn",
+                    "Runtime": "python3.12",
+                    "Role": _LAMBDA_ROLE,
+                    "Handler": "index.handler",
+                    "Timeout": 30,
+                },
+                "ResultPath": "$.updateConfigurationResult",
+                "Next": "UpdateFunctionCode",
+            },
+            "UpdateFunctionCode": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:updateFunctionCode",
+                "Parameters": {
+                    "FunctionName.$": "$.createResult.FunctionArn",
+                    "ZipFile": update_zip,
+                    "Publish": True,
+                },
+                "ResultPath": "$.publishedFunction",
+                "Next": "CreateAlias",
+            },
+            "CreateAlias": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:createAlias",
+                "Parameters": {
+                    "FunctionName.$": "$.createResult.FunctionArn",
+                    "Name": "live",
+                    "FunctionVersion.$": "$.createResult.Version",
+                },
+                "ResultPath": "$.aliasResult",
+                "Next": "UpdateAlias",
+            },
+            "UpdateAlias": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:updateAlias",
+                "Parameters": {
+                    "FunctionName.$": "$.createResult.FunctionArn",
+                    "Name": "live",
+                    "FunctionVersion.$": "$.publishedFunction.Version",
+                },
+                "ResultPath": "$.aliasResult",
+                "Next": "WaitForReady",
+            },
+            "WaitForReady": {
+                "Type": "Wait",
+                "Seconds": 1,
+                "Next": "ReadConfig",
+            },
+            "ReadConfig": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:getFunctionConfiguration",
+                "Parameters": {
+                    "FunctionName.$": "$.createResult.FunctionArn",
+                    "Qualifier.$": "$.aliasResult.FunctionVersion",
+                },
+                "ResultPath": "$.config",
+                "Next": "ReadAlias",
+            },
+            "ReadAlias": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:getAlias",
+                "Parameters": {
+                    "FunctionName.$": "$.createResult.FunctionArn",
+                    "Name": "live",
+                },
+                "ResultPath": "$.alias",
+                "End": True,
+            },
+        },
+    })
+
+    try:
+        sm_arn = sfn_sync.create_state_machine(
+            name=sm_name,
+            definition=definition,
+            roleArn="arn:aws:iam::000000000000:role/sfn-role",
+        )["stateMachineArn"]
+
+        resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
+        assert resp["status"] == "SUCCEEDED", f"Execution failed: {resp.get('error')} — {resp.get('cause')}"
+        output = json.loads(resp["output"])
+        assert output["createResult"]["FunctionArn"] == function_arn
+        assert output["createResult"]["Version"] == "1"
+        assert output["createResult"]["KmsKeyArn"] == kms_key_arn
+        assert output["createResult"]["VpcConfig"] == vpc_config
+        assert output["updateConfigurationResult"]["Timeout"] == 30
+        assert output["publishedFunction"]["FunctionArn"] == function_arn
+        assert output["publishedFunction"]["Version"] == "2"
+        assert output["aliasResult"]["FunctionVersion"] == "2"
+        assert output["alias"]["Name"] == "live"
+        assert output["alias"]["FunctionVersion"] == "2"
+        assert output["config"]["FunctionArn"] == function_arn
+        assert output["config"]["Version"] == "2"
+        assert output["config"]["Timeout"] == 30
+        assert output["config"]["State"] == "Active"
+        assert output["config"]["LastUpdateStatus"] == "Successful"
+        assert output["config"]["KmsKeyArn"] == kms_key_arn
+        assert output["config"]["VpcConfig"] == vpc_config
+    finally:
+        if sm_arn:
+            sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+        try:
+            lam.delete_function(FunctionName=fn)
+        except ClientError:
+            pass
+
+
+def test_sfn_aws_sdk_lambda_write_errors_are_prefixed_for_catch(sfn_sync, lam):
+    """Lambda write dispatcher keeps SDK error prefixes for Retry/Catch matching."""
+    suffix = _uuid_mod.uuid4().hex[:8]
+    fn = f"sfn-sdk-lambda-errors-{suffix}"
+    sm_name = f"sfn-sdk-lambda-errors-{suffix}"
+    zip_file = _make_zip_b64("def handler(e, c): return {'ok': True}")
+    sm_arn = None
+
+    definition = json.dumps({
+        "StartAt": "CreateFunction",
+        "States": {
+            "CreateFunction": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:createFunction",
+                "Parameters": {
+                    "FunctionName": fn,
+                    "Runtime": "python3.12",
+                    "Role": _LAMBDA_ROLE,
+                    "Handler": "index.handler",
+                    "Code": {"ZipFile": zip_file},
+                    "Publish": True,
+                },
+                "ResultPath": "$.createResult",
+                "Next": "CreateDuplicate",
+            },
+            "CreateDuplicate": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:createFunction",
+                "Parameters": {
+                    "FunctionName": fn,
+                    "Runtime": "python3.12",
+                    "Role": _LAMBDA_ROLE,
+                    "Handler": "index.handler",
+                    "Code": {"ZipFile": zip_file},
+                    "Publish": True,
+                },
+                "Catch": [
+                    {
+                        "ErrorEquals": ["Lambda.ResourceConflictException"],
+                        "ResultPath": "$.duplicateError",
+                        "Next": "UpdateMissingAlias",
+                    }
+                ],
+                "End": True,
+            },
+            "UpdateMissingAlias": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:lambda:updateAlias",
+                "Parameters": {
+                    "FunctionName.$": "$.createResult.FunctionArn",
+                    "Name": "missing",
+                    "FunctionVersion.$": "$.createResult.Version",
+                },
+                "Catch": [
+                    {
+                        "ErrorEquals": ["Lambda.ResourceNotFoundException"],
+                        "ResultPath": "$.missingAliasError",
+                        "Next": "Done",
+                    }
+                ],
+                "End": True,
+            },
+            "Done": {"Type": "Succeed"},
+        },
+    })
+
+    try:
+        sm_arn = sfn_sync.create_state_machine(
+            name=sm_name,
+            definition=definition,
+            roleArn="arn:aws:iam::000000000000:role/sfn-role",
+        )["stateMachineArn"]
+
+        resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
+        assert resp["status"] == "SUCCEEDED", f"Execution failed: {resp.get('error')} — {resp.get('cause')}"
+        output = json.loads(resp["output"])
+        assert output["duplicateError"]["Error"] == "Lambda.ResourceConflictException"
+        assert "Function already exist" in output["duplicateError"]["Cause"]
+        assert output["missingAliasError"]["Error"] == "Lambda.ResourceNotFoundException"
+        assert "Alias not found" in output["missingAliasError"]["Cause"]
+    finally:
+        if sm_arn:
+            sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+        try:
+            lam.delete_function(FunctionName=fn)
+        except ClientError:
+            pass
 
 
 def test_sfn_aws_sdk_lambda_respects_caller_account():
@@ -1329,6 +1820,288 @@ def test_sfn_aws_sdk_rds_remove_from_global_cluster(sfn, sfn_sync, rds):
             pass
         rds.delete_db_cluster(DBClusterIdentifier=cluster_id, SkipFinalSnapshot=True)
 
+
+def test_sfn_aws_sdk_rds_create_global_cluster_from_described_cluster_arn(sfn_sync, rds):
+    """aws-sdk:rds CreateGlobalCluster accepts a described DBClusterArn via JSONPath."""
+    primary_id = f"sfn-r2g-primary-{_uuid_mod.uuid4().hex[:8]}"
+    global_id = f"sfn-r2g-global-{_uuid_mod.uuid4().hex[:8]}"
+    sm_name = f"sdk-rds-r2g-{_uuid_mod.uuid4().hex[:8]}"
+    sm_arn = None
+
+    rds.create_db_cluster(
+        DBClusterIdentifier=primary_id,
+        Engine="aurora-postgresql",
+        MasterUsername="admin",
+        MasterUserPassword="testpass123",
+    )
+
+    definition = json.dumps({
+        "StartAt": "DescribePrimary",
+        "States": {
+            "DescribePrimary": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:rds:describeDBClusters",
+                "Parameters": {
+                    "DbClusterIdentifier": primary_id,
+                },
+                "ResultPath": "$.primary",
+                "Next": "AttachGlobal",
+            },
+            "AttachGlobal": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:rds:createGlobalCluster",
+                "Parameters": {
+                    "GlobalClusterIdentifier": global_id,
+                    "SourceDBClusterIdentifier.$": "$.primary.DbClusters[0].DbClusterArn",
+                },
+                "ResultPath": "$.attach",
+                "Next": "DescribeGlobal",
+            },
+            "DescribeGlobal": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:rds:describeGlobalClusters",
+                "Parameters": {
+                    "GlobalClusterIdentifier": global_id,
+                },
+                "ResultPath": "$.global",
+                "End": True,
+            },
+        },
+    })
+
+    try:
+        sm_arn = sfn_sync.create_state_machine(
+            name=sm_name,
+            definition=definition,
+            roleArn="arn:aws:iam::000000000000:role/sfn-role",
+        )["stateMachineArn"]
+
+        resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
+        assert resp["status"] == "SUCCEEDED", f"Execution failed: {resp.get('error')} — {resp.get('cause')}"
+        output = json.loads(resp["output"])
+        global_cluster = output["global"]["GlobalClusters"][0]
+        members = global_cluster["GlobalClusterMembers"]
+        assert len(members) == 1
+        assert members[0]["IsWriter"] is True
+        assert members[0]["DbClusterArn"] == output["primary"]["DbClusters"][0]["DbClusterArn"]
+        attached = rds.describe_db_clusters(
+            DBClusterIdentifier=primary_id,
+        )["DBClusters"][0]
+        assert attached["GlobalClusterIdentifier"] == global_id
+    finally:
+        if sm_arn:
+            sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+        try:
+            rds.remove_from_global_cluster(
+                GlobalClusterIdentifier=global_id,
+                DbClusterIdentifier=primary_id,
+            )
+        except ClientError:
+            pass
+        try:
+            rds.delete_global_cluster(GlobalClusterIdentifier=global_id)
+        except ClientError:
+            pass
+        try:
+            rds.delete_db_cluster(DBClusterIdentifier=primary_id, SkipFinalSnapshot=True)
+        except ClientError:
+            pass
+
+
+def test_sfn_aws_sdk_rds_switchover_global_cluster(sfn_sync):
+    """aws-sdk:rds SwitchoverGlobalCluster accepts a foreign-Region member ARN."""
+    east = _regional_rds("us-east-1")
+    west = _regional_rds("us-west-2")
+    suffix = _uuid_mod.uuid4().hex[:8]
+    primary_id = f"sfn-switch-primary-{suffix}"
+    secondary_id = f"sfn-switch-secondary-{suffix}"
+    global_id = f"sfn-switch-global-{suffix}"
+    sm_name = f"sdk-rds-switch-{suffix}"
+    sm_arn = None
+    primary_arn = None
+    secondary_arn = None
+
+    try:
+        primary = east.create_db_cluster(
+            DBClusterIdentifier=primary_id,
+            Engine="aurora-postgresql",
+            MasterUsername="admin",
+            MasterUserPassword="testpass123",
+        )["DBCluster"]
+        primary_arn = primary["DBClusterArn"]
+        east.create_global_cluster(
+            GlobalClusterIdentifier=global_id,
+            SourceDBClusterIdentifier=primary_arn,
+        )
+        secondary = west.create_db_cluster(
+            DBClusterIdentifier=secondary_id,
+            Engine="aurora-postgresql",
+            GlobalClusterIdentifier=global_id,
+            MasterUsername="admin",
+            MasterUserPassword="testpass123",
+        )["DBCluster"]
+        secondary_arn = secondary["DBClusterArn"]
+
+        definition = json.dumps({
+            "StartAt": "SwitchGlobal",
+            "States": {
+                "SwitchGlobal": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::aws-sdk:rds:switchoverGlobalCluster",
+                    "Parameters": {
+                        "GlobalClusterIdentifier": global_id,
+                        "TargetDbClusterIdentifier": secondary_arn,
+                    },
+                    "End": True,
+                },
+            },
+        })
+        sm_arn = sfn_sync.create_state_machine(
+            name=sm_name,
+            definition=definition,
+            roleArn="arn:aws:iam::000000000000:role/sfn-role",
+        )["stateMachineArn"]
+
+        resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
+        assert resp["status"] == "SUCCEEDED", f"Execution failed: {resp.get('error')} — {resp.get('cause')}"
+        output = json.loads(resp["output"])
+        assert output["GlobalCluster"]["Status"] == "switching-over"
+        assert output["GlobalCluster"]["FailoverState"]["Status"] == "pending"
+        assert output["GlobalCluster"]["FailoverState"]["IsDataLossAllowed"] is False
+        members = {
+            member["DbClusterArn"]: member
+            for member in output["GlobalCluster"]["GlobalClusterMembers"]
+        }
+        assert members[primary_arn]["IsWriter"] is False
+        assert members[secondary_arn]["IsWriter"] is True
+
+        final = east.describe_global_clusters(
+            GlobalClusterIdentifier=global_id,
+        )["GlobalClusters"][0]
+        final_members = {m["DBClusterArn"]: m for m in final["GlobalClusterMembers"]}
+        assert final["Status"] == "available"
+        assert final_members[primary_arn]["IsWriter"] is False
+        assert final_members[secondary_arn]["IsWriter"] is True
+    finally:
+        if sm_arn:
+            sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+        if primary_arn:
+            try:
+                east.switchover_global_cluster(
+                    GlobalClusterIdentifier=global_id,
+                    TargetDbClusterIdentifier=primary_arn,
+                )
+            except ClientError:
+                pass
+        for cluster_arn in (secondary_arn, primary_arn):
+            if cluster_arn:
+                try:
+                    east.remove_from_global_cluster(
+                        GlobalClusterIdentifier=global_id,
+                        DbClusterIdentifier=cluster_arn,
+                    )
+                except ClientError:
+                    pass
+        try:
+            east.delete_global_cluster(GlobalClusterIdentifier=global_id)
+        except ClientError:
+            pass
+        try:
+            west.delete_db_cluster(DBClusterIdentifier=secondary_id, SkipFinalSnapshot=True)
+        except ClientError:
+            pass
+        try:
+            east.delete_db_cluster(DBClusterIdentifier=primary_id, SkipFinalSnapshot=True)
+        except ClientError:
+            pass
+
+
+def test_sfn_aws_sdk_rds_global_cluster_readers_are_lists(sfn_sync, rds):
+    primary_id = f"sfn-global-primary-{_uuid_mod.uuid4().hex[:8]}"
+    secondary_id = f"sfn-global-secondary-{_uuid_mod.uuid4().hex[:8]}"
+    global_id = f"sfn-global-readers-{_uuid_mod.uuid4().hex[:8]}"
+    sm_name = f"sdk-rds-global-readers-{_uuid_mod.uuid4().hex[:8]}"
+    west_rds = _regional_rds("us-west-2")
+    sm_arn = None
+
+    try:
+        primary = rds.create_db_cluster(
+            DBClusterIdentifier=primary_id,
+            Engine="aurora-postgresql",
+            MasterUsername="admin",
+            MasterUserPassword="testpass123",
+        )["DBCluster"]
+        rds.create_global_cluster(
+            GlobalClusterIdentifier=global_id,
+            SourceDBClusterIdentifier=primary["DBClusterArn"],
+        )
+        secondary = west_rds.create_db_cluster(
+            DBClusterIdentifier=secondary_id,
+            Engine="aurora-postgresql",
+            GlobalClusterIdentifier=global_id,
+            MasterUsername="admin",
+            MasterUserPassword="testpass123",
+        )["DBCluster"]
+
+        definition = json.dumps({
+            "StartAt": "DescribeGlobal",
+            "States": {
+                "DescribeGlobal": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::aws-sdk:rds:DescribeGlobalClusters",
+                    "Parameters": {
+                        "GlobalClusterIdentifier": global_id,
+                    },
+                    "ResultPath": "$.describeResult",
+                    "End": True,
+                },
+            },
+        })
+        sm_arn = sfn_sync.create_state_machine(
+            name=sm_name,
+            definition=definition,
+            roleArn="arn:aws:iam::000000000000:role/sfn-role",
+        )["stateMachineArn"]
+
+        resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
+        assert resp["status"] == "SUCCEEDED", f"Execution failed: {resp.get('error')} — {resp.get('cause')}"
+        output = json.loads(resp["output"])
+        members = output["describeResult"]["GlobalClusters"][0]["GlobalClusterMembers"]
+        by_arn = {member["DbClusterArn"]: member for member in members}
+
+        assert by_arn[primary["DBClusterArn"]]["Readers"] == [secondary["DBClusterArn"]]
+        assert by_arn[secondary["DBClusterArn"]]["Readers"] == []
+    finally:
+        if sm_arn:
+            sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+        try:
+            west_rds.remove_from_global_cluster(
+                GlobalClusterIdentifier=global_id,
+                DbClusterIdentifier=secondary_id,
+            )
+        except ClientError:
+            pass
+        try:
+            rds.remove_from_global_cluster(
+                GlobalClusterIdentifier=global_id,
+                DbClusterIdentifier=primary_id,
+            )
+        except ClientError:
+            pass
+        try:
+            rds.delete_global_cluster(GlobalClusterIdentifier=global_id)
+        except ClientError:
+            pass
+        try:
+            west_rds.delete_db_cluster(DBClusterIdentifier=secondary_id, SkipFinalSnapshot=True)
+        except ClientError:
+            pass
+        try:
+            rds.delete_db_cluster(DBClusterIdentifier=primary_id, SkipFinalSnapshot=True)
+        except ClientError:
+            pass
+
+
 def test_sfn_xml_list_wrapper_single_element(sfn, sfn_sync):
     """DescribeDBClusters returns a JSON list even when only one cluster exists."""
     import uuid as _uuid
@@ -1410,9 +2183,120 @@ def test_sfn_aws_sdk_rds_not_found_error(sfn, sfn_sync):
 
     resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
     assert resp["status"] == "FAILED"
-    assert "DBClusterNotFoundFault" in (resp.get("error", "") + resp.get("cause", ""))
+    assert resp.get("error") == "Rds.DbClusterNotFoundException"
 
     sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+
+
+def test_sfn_aws_sdk_rds_foreign_region_arn_mismatch_is_generic_rds_exception(sfn_sync):
+    west_rds = _regional_rds("us-west-2")
+    cluster_id = f"sdk-rds-region-mismatch-{_uuid_mod.uuid4().hex[:8]}"
+    sm_name = f"sdk-rds-region-mismatch-{_uuid_mod.uuid4().hex[:8]}"
+    sm_arn = None
+
+    try:
+        cluster = west_rds.create_db_cluster(
+            DBClusterIdentifier=cluster_id,
+            Engine="aurora-mysql",
+            MasterUsername="admin",
+            MasterUserPassword="password123",
+        )["DBCluster"]
+
+        definition = json.dumps({
+            "StartAt": "DescribeForeignRegionArn",
+            "States": {
+                "DescribeForeignRegionArn": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::aws-sdk:rds:DescribeDBClusters",
+                    "Parameters": {
+                        "DBClusterIdentifier": cluster["DBClusterArn"],
+                    },
+                    "End": True,
+                },
+            },
+        })
+        sm_arn = sfn_sync.create_state_machine(
+            name=sm_name,
+            definition=definition,
+            roleArn="arn:aws:iam::000000000000:role/sfn-role",
+        )["stateMachineArn"]
+
+        resp = sfn_sync.start_sync_execution(
+            stateMachineArn=sm_arn,
+            input=json.dumps({}),
+        )
+        assert resp["status"] == "FAILED"
+        assert resp.get("error") == "Rds.RdsException"
+    finally:
+        if sm_arn:
+            sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+        try:
+            west_rds.delete_db_cluster(
+                DBClusterIdentifier=cluster_id,
+                SkipFinalSnapshot=True,
+            )
+        except ClientError:
+            pass
+
+
+def test_sfn_aws_sdk_rds_global_not_found_error_uses_aws_name(sfn, sfn_sync):
+    sm_name = f"sdk-rds-global-notfound-{_uuid_mod.uuid4().hex[:8]}"
+
+    definition = json.dumps({
+        "StartAt": "DescribeMissing",
+        "States": {
+            "DescribeMissing": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:rds:DescribeGlobalClusters",
+                "Parameters": {
+                    "GlobalClusterIdentifier": "this-global-cluster-does-not-exist",
+                },
+                "End": True,
+            },
+        },
+    })
+    sm_arn = sfn_sync.create_state_machine(
+        name=sm_name,
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/sfn-role",
+    )["stateMachineArn"]
+
+    resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
+    assert resp["status"] == "FAILED"
+    assert resp.get("error") == "Rds.GlobalClusterNotFoundException"
+
+    sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+
+
+def test_sfn_aws_sdk_rds_switchover_missing_global_uses_aws_name(sfn_sync):
+    sm_name = f"sdk-rds-switch-notfound-{_uuid_mod.uuid4().hex[:8]}"
+
+    definition = json.dumps({
+        "StartAt": "SwitchMissing",
+        "States": {
+            "SwitchMissing": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:rds:switchoverGlobalCluster",
+                "Parameters": {
+                    "GlobalClusterIdentifier": "this-global-cluster-does-not-exist",
+                    "TargetDbClusterIdentifier": "arn:aws:rds:us-east-1:000000000000:cluster:missing-secondary",
+                },
+                "End": True,
+            },
+        },
+    })
+    sm_arn = sfn_sync.create_state_machine(
+        name=sm_name,
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/sfn-role",
+    )["stateMachineArn"]
+
+    resp = sfn_sync.start_sync_execution(stateMachineArn=sm_arn, input=json.dumps({}))
+    assert resp["status"] == "FAILED"
+    assert resp.get("error") == "Rds.GlobalClusterNotFoundException"
+
+    sfn_sync.delete_state_machine(stateMachineArn=sm_arn)
+
 
 def test_sfn_start_sync_execution(sfn_sync):
     import uuid as _uuid
@@ -1496,6 +2380,132 @@ def test_sfn_integration_sqs_send_message(sfn, sqs):
     assert len(msgs.get("Messages", [])) == 1
     assert msgs["Messages"][0]["Body"] == "hello from sfn"
 
+def test_sfn_integration_sqs_send_message_wait_for_task_token(sfn, sqs):
+    """sqs:sendMessage.waitForTaskToken must actually deliver the message
+    (carrying the task token, serialised to JSON) and resume on
+    SendTaskSuccess. Previously the task was scheduled but nothing was sent and
+    the execution hung forever (#959)."""
+    import time
+
+    queue_url = sqs.create_queue(QueueName="sfn-sqs-wfett")["QueueUrl"]
+
+    definition = json.dumps(
+        {
+            "StartAt": "Send",
+            "States": {
+                "Send": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+                    "Parameters": {
+                        "QueueUrl": queue_url,
+                        "MessageBody": {"task_token.$": "$$.Task.Token"},
+                    },
+                    "End": True,
+                },
+            },
+        }
+    )
+    sm = sfn.create_state_machine(
+        name="sfn-sqs-wfett",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    ex = sfn.start_execution(stateMachineArn=sm["stateMachineArn"], input="{}")
+
+    # The integration must fire so a worker can read the token off the queue.
+    body = None
+    for _ in range(40):
+        msgs = sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=1)
+        if msgs.get("Messages"):
+            body = msgs["Messages"][0]["Body"]
+            break
+        time.sleep(0.25)
+    assert body is not None, "no SQS message delivered — task hung (#959)"
+    parsed = json.loads(body)  # object MessageBody must be valid JSON, not a repr
+    assert parsed["task_token"]
+
+    # The execution is paused at the task; SendTaskSuccess resumes it.
+    sfn.send_task_success(
+        taskToken=parsed["task_token"], output=json.dumps({"ok": True}))
+    desc = _wait_sfn(sfn, ex["executionArn"])
+    assert desc["status"] == "SUCCEEDED"
+
+def test_sfn_integration_lambda_invoke_wait_for_task_token(sfn, lam):
+    """lambda:invoke.waitForTaskToken must deliver the *unwrapped* Payload to
+    the handler, exactly like the synchronous lambda:invoke path.
+
+    Regression: the callback path forwarded the whole service-integration
+    envelope ({"FunctionName": ..., "Payload": {...}}) to the Lambda, so a
+    handler reading top-level keys (e.g. ``event["taskToken"]`` /
+    ``event["input"]``) saw them nested under ``Payload`` and could neither
+    find its task token nor its arguments, hanging the execution forever.
+    """
+    import uuid as _uuid
+
+    fn = f"intg-sfn-wfett-{_uuid.uuid4().hex[:8]}"
+    # The handler reads the token + input from the TOP LEVEL (as AWS delivers
+    # them) and completes the task itself, echoing back what it received.
+    code = (
+        "import json, os, boto3\n"
+        "def handler(event, context):\n"
+        "    token = event['taskToken']\n"
+        "    sfn = boto3.client('stepfunctions', endpoint_url=os.environ['AWS_ENDPOINT_URL'])\n"
+        "    sfn.send_task_success(\n"
+        "        taskToken=token,\n"
+        "        output=json.dumps({'top_keys': sorted(event.keys()), 'echo_input': event['input']}),\n"
+        "    )\n"
+        "    return {}\n"
+    )
+    lam.create_function(
+        FunctionName=fn,
+        Runtime="python3.12",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Code={"ZipFile": _make_zip(code)},
+    )
+    func_arn = f"arn:aws:lambda:us-east-1:000000000000:function:{fn}"
+
+    definition = json.dumps(
+        {
+            "StartAt": "CallbackTask",
+            "States": {
+                "CallbackTask": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+                    "Parameters": {
+                        "FunctionName": func_arn,
+                        "Payload": {
+                            "taskToken.$": "$$.Task.Token",
+                            "id.$": "$$.Execution.Name",
+                            "input.$": "$",
+                        },
+                    },
+                    "TimeoutSeconds": 30,
+                    "End": True,
+                },
+            },
+        }
+    )
+    sm = sfn.create_state_machine(
+        name=f"sfn-wfett-{_uuid.uuid4().hex[:8]}",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    ex = sfn.start_execution(
+        stateMachineArn=sm["stateMachineArn"],
+        input=json.dumps({"hello": "world"}),
+    )
+    desc = _wait_sfn(sfn, ex["executionArn"], timeout=30)
+    assert desc["status"] == "SUCCEEDED", (
+        f"execution did not succeed ({desc['status']}); the handler could not "
+        f"read its top-level taskToken/input — Payload was not unwrapped"
+    )
+    output = json.loads(desc["output"])
+    # The handler must have seen the unwrapped Payload: top-level taskToken/id/
+    # input, and NOT the service-integration wrapper keys.
+    assert output["top_keys"] == ["id", "input", "taskToken"], output["top_keys"]
+    assert output["echo_input"] == {"hello": "world"}
+
 def test_sfn_integration_sns_publish(sfn, sns):
     """Task state publishes to SNS via arn:aws:states:::sns:publish."""
     topic = sns.create_topic(Name="sfn-integ-sns-test")
@@ -1531,6 +2541,68 @@ def test_sfn_integration_sns_publish(sfn, sns):
     assert desc["status"] == "SUCCEEDED"
     output = json.loads(desc["output"])
     assert "MessageId" in output
+
+
+def test_sfn_integration_sns_publish_structured_payload(sfn, sns, sqs):
+    """Task state publishes a structured Message object via arn:aws:states:::sns:publish."""
+    topic = sns.create_topic(Name="sfn-integ-sns-json-payload")
+    topic_arn = topic["TopicArn"]
+    str1 = "string1"
+    str2 = "string2"
+
+    q_url = sqs.create_queue(QueueName="sfn-integ-sns-json-payload-q")["QueueUrl"]
+    q_arn = sqs.get_queue_attributes(
+        QueueUrl=q_url,
+        AttributeNames=["QueueArn"],
+    )["Attributes"]["QueueArn"]
+    sns.subscribe(TopicArn=topic_arn, Protocol="sqs", Endpoint=q_arn)
+
+    definition = json.dumps(
+        {
+            "StartAt": "Publish",
+            "States": {
+                "Publish": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::sns:publish",
+                    "Parameters": {
+                        "TopicArn": topic_arn,
+                        "Message": {
+                            "str1.$": "$.str1",
+                            "str2.$": "$.str2",
+                        },
+                    },
+                    "End": True,
+                },
+            },
+        }
+    )
+    sm = sfn.create_state_machine(
+        name="sfn-sns-json-payload",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    ex = sfn.start_execution(
+        stateMachineArn=sm["stateMachineArn"],
+        input=json.dumps({"str1": str1, "str2": str2}),
+    )
+
+    desc = _wait_sfn(sfn, ex["executionArn"])
+    assert desc["status"] == "SUCCEEDED"
+    output = json.loads(desc["output"])
+    assert "MessageId" in output
+
+    msgs = sqs.receive_message(
+        QueueUrl=q_url,
+        MaxNumberOfMessages=1,
+        WaitTimeSeconds=1,
+    )
+    assert len(msgs.get("Messages", [])) == 1
+    envelope = json.loads(msgs["Messages"][0]["Body"])
+    assert json.loads(envelope["Message"]) == {
+        "str1": str1,
+        "str2": str2,
+    }
+
 
 def test_sfn_integration_dynamodb_put_get(sfn, ddb):
     """Task states write and read from DynamoDB."""
@@ -1633,6 +2705,78 @@ def test_sfn_integration_dynamodb_error_catch(sfn, ddb):
     output = json.loads(desc["output"])
     assert output["recovered"] == "caught"
     assert "Error" in output["error"]
+
+def test_sfn_integration_lambda_invoke_failure_cause_is_json(sfn, lam):
+    """A failed lambda:invoke task must set Cause to a JSON-encoded error
+    payload, exactly like AWS.
+
+    Regression: Cause was set to the bare ``errorMessage`` string instead of
+    the JSON object ``{"errorType": ..., "errorMessage": ..., "trace": [...]}``.
+    Catch handlers and downstream tasks routinely ``json.loads(Cause)`` to read
+    ``errorType`` / ``errorMessage``; the bare string made that parse blow up.
+    """
+    import uuid as _uuid
+
+    fn = f"intg-sfn-failcause-{_uuid.uuid4().hex[:8]}"
+    code = (
+        "class WidgetError(Exception):\n"
+        "    pass\n"
+        "def handler(event, context):\n"
+        "    raise WidgetError('widget exploded')\n"
+    )
+    lam.create_function(
+        FunctionName=fn,
+        Runtime="python3.12",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Code={"ZipFile": _make_zip(code)},
+    )
+    func_arn = f"arn:aws:lambda:us-east-1:000000000000:function:{fn}"
+
+    definition = json.dumps(
+        {
+            "StartAt": "Boom",
+            "States": {
+                "Boom": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": func_arn, "Payload": {}},
+                    "Catch": [
+                        {
+                            "ErrorEquals": ["States.ALL"],
+                            "Next": "Fallback",
+                            "ResultPath": "$.error",
+                        }
+                    ],
+                    "End": True,
+                },
+                "Fallback": {
+                    "Type": "Pass",
+                    "Result": "caught",
+                    "ResultPath": "$.recovered",
+                    "End": True,
+                },
+            },
+        }
+    )
+    sm = sfn.create_state_machine(
+        name=f"sfn-failcause-{_uuid.uuid4().hex[:8]}",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    ex = sfn.start_execution(stateMachineArn=sm["stateMachineArn"], input="{}")
+
+    desc = _wait_sfn(sfn, ex["executionArn"], timeout=30)
+    assert desc["status"] == "SUCCEEDED", desc.get("status")
+    output = json.loads(desc["output"])
+
+    # Cause must be a JSON-encoded string, parseable into the AWS error shape.
+    cause_raw = output["error"]["Cause"]
+    assert isinstance(cause_raw, str)
+    cause = json.loads(cause_raw)
+    assert cause.get("errorType"), cause
+    assert cause["errorMessage"] == "widget exploded", cause
+
 
 def test_sfn_integration_ecs_run_task(sfn, ecs):
     """Task state triggers ecs:runTask (fire-and-forget, no Docker needed)."""
@@ -1798,6 +2942,81 @@ def test_sfn_integration_ecs_run_task_output_contains_status(sfn, ecs):
     assert task_out["containers"][0]["name"] == "app"
     assert task_out["lastStatus"] == "RUNNING"
     assert "failures" in output
+
+def test_sfn_integration_ecs_run_task_container_overrides_reach_the_task(sfn, ecs):
+    """PascalCase ContainerOverrides must survive the SFN->ECS hand-off instead of being silently dropped."""
+    ecs.create_cluster(clusterName="sfn-ecs-overrides")
+    ecs.register_task_definition(
+        family="sfn-overrides-task",
+        containerDefinitions=[
+            {
+                "name": "main",
+                "image": "alpine:latest",
+                "command": ["echo", "hi"],
+                "memory": 128,
+                "environment": [{"name": "FROM_TASKDEF", "value": "yes"}],
+            }
+        ],
+    )
+
+    definition = json.dumps(
+        {
+            "StartAt": "Run",
+            "States": {
+                "Run": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::ecs:runTask",
+                    "Parameters": {
+                        "Cluster": "sfn-ecs-overrides",
+                        "TaskDefinition": "sfn-overrides-task",
+                        "LaunchType": "FARGATE",
+                        "Overrides": {
+                            "ContainerOverrides": [
+                                {
+                                    "Name": "main",
+                                    "Environment": [
+                                        {"Name": "FROM_OVERRIDES", "Value": "yes"},
+                                        {"Name": "RUN_ID", "Value.$": "$$.Execution.Name"},
+                                    ],
+                                }
+                            ]
+                        },
+                    },
+                    "End": True,
+                },
+            },
+        }
+    )
+    sm = sfn.create_state_machine(
+        name="sfn-ecs-overrides",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    ex = sfn.start_execution(
+        stateMachineArn=sm["stateMachineArn"], name="overrides-exec-1", input="{}"
+    )
+
+    desc = _wait_sfn(sfn, ex["executionArn"])
+    assert desc["status"] == "SUCCEEDED"
+    output = json.loads(desc["output"])
+    task_out = output["tasks"][0]
+
+    env = {
+        e["name"]: e["value"]
+        for ov in task_out["overrides"]["containerOverrides"]
+        for e in ov["environment"]
+    }
+    assert env == {"FROM_OVERRIDES": "yes", "RUN_ID": "overrides-exec-1"}
+    assert task_out["overrides"]["containerOverrides"][0]["name"] == "main"
+
+    # boto3 parses DescribeTasks against the real ECS model (camelCase only)
+    described = ecs.describe_tasks(
+        cluster="sfn-ecs-overrides", tasks=[task_out["taskArn"]]
+    )
+    described_overrides = described["tasks"][0]["overrides"]["containerOverrides"]
+    assert described_overrides[0]["name"] == "main"
+    described_env = {e["name"]: e["value"] for e in described_overrides[0]["environment"]}
+    assert described_env == {"FROM_OVERRIDES": "yes", "RUN_ID": "overrides-exec-1"}
 
 def test_sfn_integration_nested_start_execution_sync_returns_string_output(sfn):
     """states:startExecution.sync should return the child Output as a JSON string."""
@@ -2067,6 +3286,49 @@ def test_sfn_integration_lambda_invoke(sfn, lam):
     assert desc["status"] == "SUCCEEDED"
     output = json.loads(desc["output"])
     assert output["result"]["doubled"] == 42
+
+
+def test_sfn_lambda_invoke_missing_non_arn_qualifier_fails(sfn, lam):
+    import uuid as _uuid
+
+    fn = f"sfn-lam-missing-alias-{_uuid.uuid4().hex[:8]}"
+    code = "def handler(event, context):\n    return {'called': True}\n"
+    lam.create_function(
+        FunctionName=fn,
+        Runtime="python3.12",
+        Role=_LAMBDA_ROLE,
+        Handler="index.handler",
+        Code={"ZipFile": _make_zip(code)},
+    )
+
+    definition = json.dumps(
+        {
+            "StartAt": "InvokeLambda",
+            "States": {
+                "InvokeLambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                        "FunctionName": f"{fn}:missingAlias",
+                        "Payload": {},
+                    },
+                    "End": True,
+                }
+            },
+        }
+    )
+    sm = sfn.create_state_machine(
+        name=f"sfn-lam-missing-alias-{_uuid.uuid4().hex[:8]}",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/R",
+    )
+    ex = sfn.start_execution(stateMachineArn=sm["stateMachineArn"], input="{}")
+
+    desc = _wait_sfn(sfn, ex["executionArn"], timeout=10)
+    assert desc["status"] == "FAILED"
+    assert desc["error"] == "Lambda.ResourceNotFoundException"
+    assert fn in desc["cause"]
+
 
 def test_sfn_choice_state(sfn):
     """Choice state routes to correct branch based on input."""
@@ -2518,6 +3780,126 @@ def test_sfn_mock_config_throw(sfn):
     assert desc["status"] == "FAILED"
     _kumostack_config({"stepfunctions._sfn_mock_config": {}})
 
+
+def test_sfn_mock_config_throw_routes_to_catch(sfn):
+    """SFN_MOCK_CONFIG Throw must route to a matching Catch (not bypass it). #903."""
+    from conftest import _ministack_config
+
+    mock_cfg = {
+        "StateMachines": {
+            "qa-sfn-mock-throw-catch": {
+                "TestCases": {"FailPath": {"CallService": "MockedFailure"}}
+            }
+        },
+        "MockedResponses": {
+            "MockedFailure": {
+                "0": {"Throw": {"Error": "ServiceDown", "Cause": "mocked failure"}},
+            }
+        },
+    }
+    _ministack_config({"stepfunctions._sfn_mock_config": mock_cfg})
+
+    definition = json.dumps({
+        "StartAt": "CallService",
+        "States": {
+            "CallService": {
+                "Type": "Task",
+                "Resource": "arn:aws:lambda:us-east-1:000000000000:function:nonexistent",
+                "Catch": [{"ErrorEquals": ["ServiceDown"], "Next": "Recovered"}],
+                "End": True,
+            },
+            "Recovered": {"Type": "Pass", "Result": {"recovered": True}, "End": True},
+        },
+    })
+    sm_arn = sfn.create_state_machine(
+        name="qa-sfn-mock-throw-catch",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/r",
+    )["stateMachineArn"]
+
+    exec_arn = sfn.start_execution(
+        stateMachineArn=sm_arn + "#FailPath", input="{}",
+    )["executionArn"]
+    for _ in range(20):
+        time.sleep(0.3)
+        desc = sfn.describe_execution(executionArn=exec_arn)
+        if desc["status"] != "RUNNING":
+            break
+
+    assert desc["status"] == "SUCCEEDED", f"Throw bypassed Catch: {desc.get('status')}"
+    # Reached the Catch's Next state ("Recovered"), proving the throw routed
+    # through Catch rather than failing the execution.
+    assert json.loads(desc["output"]) == {"recovered": True}
+    _ministack_config({"stepfunctions._sfn_mock_config": {}})
+
+
+def test_sfn_mock_config_jsonata_assign_applied(sfn):
+    """SFN_MOCK_CONFIG + JSONata Task with Assign — variable must be visible downstream.
+
+    Regression: the mock execution path called _apply_jsonata_output but never
+    called _apply_state_assign, so any Assign block was silently skipped.
+    A downstream state reading the assigned variable would fail with
+    States.QueryEvaluationError: Undefined variable.
+    """
+    from conftest import _ministack_config
+
+    mock_cfg = {
+        "StateMachines": {
+            "qa-sfn-mock-jsonata-assign": {
+                "TestCases": {
+                    "HappyPath": {
+                        "FetchData": "MockedData",
+                    }
+                }
+            }
+        },
+        "MockedResponses": {
+            "MockedData": {
+                "0": {"Return": {"value": 99}},
+            }
+        },
+    }
+    _ministack_config({"stepfunctions._sfn_mock_config": mock_cfg})
+
+    definition = json.dumps({
+        "QueryLanguage": "JSONata",
+        "StartAt": "FetchData",
+        "States": {
+            "FetchData": {
+                "Type": "Task",
+                "Resource": "arn:aws:lambda:us-east-1:000000000000:function:nonexistent",
+                "Assign": {"fetchedValue": "{% $states.result.value %}"},
+                "Next": "UseValue",
+            },
+            "UseValue": {
+                "Type": "Pass",
+                "Output": {"result": "{% $fetchedValue %}"},
+                "End": True,
+            },
+        },
+    })
+    sm_arn = sfn.create_state_machine(
+        name="qa-sfn-mock-jsonata-assign",
+        definition=definition,
+        roleArn="arn:aws:iam::000000000000:role/r",
+    )["stateMachineArn"]
+
+    exec_arn = sfn.start_execution(
+        stateMachineArn=sm_arn + "#HappyPath", input="{}",
+    )["executionArn"]
+    for _ in range(20):
+        time.sleep(0.3)
+        desc = sfn.describe_execution(executionArn=exec_arn)
+        if desc["status"] != "RUNNING":
+            break
+
+    assert desc["status"] == "SUCCEEDED", (
+        f"Execution failed — Assign likely not applied in mock path: {desc.get('cause')}"
+    )
+    output = json.loads(desc["output"])
+    assert output["result"] == 99, f"Expected 99 from assigned variable, got: {output}"
+    _ministack_config({"stepfunctions._sfn_mock_config": {}})
+
 def test_sfn_test_state_pass(sfn_sync):
     """TestState API — Pass state returns transformed output."""
     resp = sfn_sync.test_state(
@@ -2928,6 +4310,37 @@ def test_sfn_key_to_api_name_round_trip():
         assert back == wire, f"Round-trip failed: {wire} → {sfn} → {back}"
 
 
+def test_lambda_rest_input_normalization_is_top_level_and_wire_wins():
+    """Lambda REST input normalization avoids the query-protocol acronym map."""
+    from ministack.services.stepfunctions import _normalize_lambda_rest_input
+
+    normalized = _normalize_lambda_rest_input({
+        "KmsKeyArn": "sfn-key",
+        "VpcConfig": {
+            "SubnetIds": ["subnet-123"],
+            "SecurityGroupIds": ["sg-123"],
+        },
+        "Environment": {"Variables": {"KmsKeyArn": "nested-key"}},
+    })
+    assert normalized == {
+        "KMSKeyArn": "sfn-key",
+        "VpcConfig": {
+            "SubnetIds": ["subnet-123"],
+            "SecurityGroupIds": ["sg-123"],
+        },
+        "Environment": {"Variables": {"KmsKeyArn": "nested-key"}},
+    }
+
+    explicit_wire = _normalize_lambda_rest_input({
+        "KmsKeyArn": "sfn-key",
+        "KMSKeyArn": "wire-key",
+    })
+    assert explicit_wire == {
+        "KmsKeyArn": "sfn-key",
+        "KMSKeyArn": "wire-key",
+    }
+
+
 def test_convert_params_to_api_names_nested():
     """Verify _convert_params_to_api_names handles nested dicts and lists."""
     from kumostack.services.stepfunctions import _convert_params_to_api_names
@@ -2953,6 +4366,7 @@ def test_sfn_aws_sdk_rdsdata_execute_statement(sfn, sfn_sync, rds, sm):
     rds.create_db_cluster(
         DBClusterIdentifier=cluster_id,
         Engine="aurora-mysql",
+        EngineMode="serverless",
         MasterUsername="admin",
         MasterUserPassword="testpass123",
     )
@@ -3034,6 +4448,7 @@ def test_sfn_aws_sdk_rdsdata_output_uses_sfn_key_convention(sfn, sfn_sync, rds, 
     rds.create_db_cluster(
         DBClusterIdentifier=cluster_id,
         Engine="aurora-mysql",
+        EngineMode="serverless",
         MasterUsername="admin",
         MasterUserPassword="testpass123",
     )
@@ -3315,6 +4730,7 @@ def test_sfn_rest_json_pascal_to_camel_conversion(sfn, sfn_sync, rds, sm):
     rds.create_db_cluster(
         DBClusterIdentifier=cluster_id,
         Engine="aurora-mysql",
+        EngineMode="serverless",
         MasterUsername="admin",
         MasterUserPassword="testpass123",
     )
@@ -4112,10 +5528,10 @@ def test_sfn_execution_proceeds_under_non_default_account_id():
 
     When a caller uses a 12-digit access-key as their account ID (the
     documented per-account-isolation pattern), the execution record is stored
-    in AccountScopedDict under that account. Without contextvars propagation
-    into the threading.Thread that runs _run_execution, the worker thread
-    looks up the execution under the default account and silently returns,
-    leaving the execution stuck at ExecutionStarted forever.
+    under that account and region. Without contextvars propagation into the
+    threading.Thread that runs _run_execution, the worker thread looks up the
+    execution under the default scope and silently returns, leaving the
+    execution stuck at ExecutionStarted forever.
 
     Regression for #639. The fix wraps the background thread target with
     contextvars.copy_context().run so the request's account/region context

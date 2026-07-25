@@ -12,6 +12,27 @@ from botocore.exceptions import ClientError
 _endpoint = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
 _EXECUTE_PORT = urlparse(_endpoint).port or 4566
 
+
+def test_elbv2_arn_tail_helpers_require_elbv2_resource_scope():
+    from ministack.services import alb
+
+    assert alb._load_balancer_id_from_arn(
+        "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-lb/lb-id"
+    ) == "lb-id"
+    assert alb._listener_id_from_arn(
+        "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/my-lb/lb-id/listener-id"
+    ) == "listener-id"
+    assert alb._target_group_full_name_from_arn(
+        "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/my-tg/tg-id"
+    ) == "my-tg/tg-id"
+    assert alb._load_balancer_id_from_arn(
+        "arn:aws:sqs:us-east-1:000000000000:loadbalancer/app/my-lb/lb-id"
+    ) == ""
+    assert alb._listener_id_from_arn(
+        "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/my-tg/tg-id"
+    ) == ""
+
+
 def test_elbv2_create_describe_delete_lb(elbv2):
     resp = elbv2.create_load_balancer(Name="qa-alb", Type="application", Scheme="internet-facing")
     lb = resp["LoadBalancers"][0]
@@ -312,6 +333,52 @@ def test_elbv2_tags(elbv2):
 
     elbv2.delete_load_balancer(LoadBalancerArn=lb_arn)
 
+
+@pytest.mark.parametrize(
+    ("arn", "code"),
+    [
+        ("not-an-arn", "ValidationError"),
+        (
+            "arn:aws:sqs:us-east-1:000000000000:loadbalancer/app/qa-alb-tags/missing",
+            "ValidationError",
+        ),
+        (
+            "arn:aws:elasticloadbalancing:us-west-2:000000000000:loadbalancer/app/qa-alb-tags/missing",
+            "ValidationError",
+        ),
+        (
+            "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/qa-alb-tags/missing",
+            "LoadBalancerNotFound",
+        ),
+    ],
+)
+def test_elbv2_tag_arns_must_parse_to_local_resources(elbv2, arn, code):
+    with pytest.raises(ClientError) as exc:
+        elbv2.add_tags(ResourceArns=[arn], Tags=[{"Key": "env", "Value": "test"}])
+
+    assert exc.value.response["Error"]["Code"] == code
+
+
+def test_elbv2_add_tags_validates_all_arns_before_mutating(elbv2):
+    lb_arn = elbv2.create_load_balancer(Name="qa-alb-tags-atomic")["LoadBalancers"][0]["LoadBalancerArn"]
+    missing_arn = (
+        "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+        "loadbalancer/app/qa-alb-tags-atomic/missing"
+    )
+
+    with pytest.raises(ClientError) as exc:
+        elbv2.add_tags(
+            ResourceArns=[lb_arn, missing_arn],
+            Tags=[{"Key": "team", "Value": "infra"}],
+        )
+
+    assert exc.value.response["Error"]["Code"] == "LoadBalancerNotFound"
+    desc = elbv2.describe_tags(ResourceArns=[lb_arn])
+    assert desc["TagDescriptions"][0]["Tags"] == []
+
+    elbv2.delete_load_balancer(LoadBalancerArn=lb_arn)
+
+
 # Migrated from test_alb.py
 def _alb_zip(code: str) -> bytes:
     buf = io.BytesIO()
@@ -374,10 +441,12 @@ def _alb_teardown(elbv2, lam, lb_arn, tg_arn, l_arn, fn_name):
     except Exception:
         pass
 
-def test_elbv2_dataplane_forward_lambda(elbv2, lam):
+@pytest.mark.serial
+def test_elbv2_dataplane_forward_lambda(elbv2, lam, cw):
     """ALB forwards request to Lambda via /_alb/{lb-name}/ path prefix."""
     import urllib.request as _req
 
+    fn_name = "dp-alb-fwd-fn"
     fn_code = (
         "import json\n"
         "def handler(event, context):\n"
@@ -387,7 +456,7 @@ def test_elbv2_dataplane_forward_lambda(elbv2, lam):
         "        'body': json.dumps({'method': event['httpMethod'], 'path': event['path']}),\n"
         "    }\n"
     )
-    lb_arn, tg_arn, l_arn, fn_arn = _alb_setup(elbv2, lam, "dp-alb-fwd", "dp-alb-fwd-fn", fn_code)
+    lb_arn, tg_arn, l_arn, fn_arn = _alb_setup(elbv2, lam, "dp-alb-fwd", fn_name, fn_code)
     try:
         url = f"{_endpoint}/_alb/dp-alb-fwd/api/hello"
         resp = _req.urlopen(_req.Request(url, method="GET"))
@@ -395,8 +464,64 @@ def test_elbv2_dataplane_forward_lambda(elbv2, lam):
         body = json.loads(resp.read())
         assert body["method"] == "GET"
         assert body["path"] == "/api/hello"
+
+        end = time.time() + 60
+        start = end - 600
+        invocations = cw.get_metric_statistics(
+            Namespace="AWS/Lambda",
+            MetricName="Invocations",
+            Dimensions=[{"Name": "FunctionName", "Value": fn_name}],
+            StartTime=start,
+            EndTime=end,
+            Period=60,
+            Statistics=["Sum"],
+        )
+        total = sum(p["Sum"] for p in invocations["Datapoints"])
+        assert total >= 1, f"expected ALB Lambda target to emit metrics, got {total}"
     finally:
-        _alb_teardown(elbv2, lam, lb_arn, tg_arn, l_arn, "dp-alb-fwd-fn")
+        _alb_teardown(elbv2, lam, lb_arn, tg_arn, l_arn, fn_name)
+
+
+@pytest.mark.serial
+def test_elbv2_dataplane_lambda_target_emits_metrics(elbv2, lam, cw):
+    import urllib.request as _req
+
+    suffix = _uuid_mod.uuid4().hex[:8]
+    lb_name = f"alb-met-{suffix}"
+    fn_name = f"alb-met-fn-{suffix}"
+    fn_code = (
+        "def handler(event, context):\n"
+        "    return {'statusCode': 200, 'body': 'ok'}\n"
+    )
+    lb_arn, tg_arn, l_arn, _fn_arn = _alb_setup(elbv2, lam, lb_name, fn_name, fn_code)
+    try:
+        url = f"{_endpoint}/_alb/{lb_name}/metrics"
+        resp = _req.urlopen(_req.Request(url, method="GET"))
+        assert resp.status == 200
+
+        end = time.time() + 1
+        start = end - 600
+        invocations = cw.get_metric_statistics(
+            Namespace="AWS/Lambda",
+            MetricName="Invocations",
+            Dimensions=[{"Name": "FunctionName", "Value": fn_name}],
+            StartTime=start, EndTime=end,
+            Period=60, Statistics=["Sum"],
+        )
+        total = sum(p["Sum"] for p in invocations["Datapoints"])
+        assert total >= 1, f"expected >=1 invocation, got {total}"
+
+        duration = cw.get_metric_statistics(
+            Namespace="AWS/Lambda",
+            MetricName="Duration",
+            Dimensions=[{"Name": "FunctionName", "Value": fn_name}],
+            StartTime=start, EndTime=end,
+            Period=60, Statistics=["Average"],
+        )
+        assert duration["Datapoints"], "no Duration datapoints recorded"
+    finally:
+        _alb_teardown(elbv2, lam, lb_arn, tg_arn, l_arn, fn_name)
+
 
 def test_elbv2_dataplane_event_shape(elbv2, lam):
     """ALB event passed to Lambda contains all required fields."""
@@ -661,3 +786,96 @@ def test_alb_set_security_groups(elbv2):
     )["LoadBalancers"][0]["LoadBalancerArn"]
     resp = elbv2.set_security_groups(LoadBalancerArn=arn, SecurityGroups=["sg-bbb", "sg-ccc"])
     assert resp["SecurityGroupIds"] == ["sg-bbb", "sg-ccc"]
+
+
+def _alb_http_target_setup(elbv2, lb_name, target_id, target_port, target_type="ip"):
+    """Create LB + instance/ip TG + listener + register an HTTP target.
+    Returns (lb_arn, tg_arn, l_arn).
+    """
+    lb_arn = elbv2.create_load_balancer(Name=lb_name)["LoadBalancers"][0]["LoadBalancerArn"]
+    tg_arn = elbv2.create_target_group(
+        Name=f"{lb_name}-tg",
+        Protocol="HTTP",
+        Port=target_port,
+        VpcId="vpc-00000001",
+        TargetType=target_type,
+    )["TargetGroups"][0]["TargetGroupArn"]
+    elbv2.register_targets(TargetGroupArn=tg_arn, Targets=[{"Id": target_id, "Port": target_port}])
+    l_arn = elbv2.create_listener(
+        LoadBalancerArn=lb_arn,
+        Protocol="HTTP",
+        Port=80,
+        DefaultActions=[{"Type": "forward", "TargetGroupArn": tg_arn}],
+    )["Listeners"][0]["ListenerArn"]
+    return lb_arn, tg_arn, l_arn
+
+
+def _alb_http_target_teardown(elbv2, lb_arn, tg_arn, l_arn):
+    for fn, kwargs in (
+        (elbv2.delete_listener, {"ListenerArn": l_arn}),
+        (elbv2.delete_target_group, {"TargetGroupArn": tg_arn}),
+        (elbv2.delete_load_balancer, {"LoadBalancerArn": lb_arn}),
+    ):
+        try:
+            fn(**kwargs)
+        except Exception:
+            pass
+
+
+@pytest.mark.serial
+def test_elbv2_dataplane_forward_ip_target(elbv2):
+    """ALB data plane proxies instance/ip targets over HTTP.
+
+    The emulator's own health endpoint (127.0.0.1:4566 from inside the
+    server process) doubles as the backend, so the test needs no external
+    HTTP server and works both in-container and locally.
+    """
+    import urllib.request as _req
+
+    lb_name = "dp-alb-ip"
+    lb_arn, tg_arn, l_arn = _alb_http_target_setup(elbv2, lb_name, "127.0.0.1", 4566)
+    try:
+        url = f"{_endpoint}/_alb/{lb_name}/_ministack/health"
+        resp = _req.urlopen(_req.Request(url, method="GET"))
+        assert resp.status == 200
+        body = json.loads(resp.read())
+        assert "services" in body
+    finally:
+        _alb_http_target_teardown(elbv2, lb_arn, tg_arn, l_arn)
+
+
+@pytest.mark.serial
+def test_elbv2_dataplane_forward_instance_target_hostname(elbv2):
+    """Instance targets resolve the Id as a hostname (no EC2 metadata in an
+    emulator), so localhost works as an instance Id too."""
+    import urllib.request as _req
+
+    lb_name = "dp-alb-inst"
+    lb_arn, tg_arn, l_arn = _alb_http_target_setup(
+        elbv2, lb_name, "localhost", 4566, target_type="instance"
+    )
+    try:
+        url = f"{_endpoint}/_alb/{lb_name}/_ministack/health"
+        resp = _req.urlopen(_req.Request(url, method="GET"))
+        assert resp.status == 200
+    finally:
+        _alb_http_target_teardown(elbv2, lb_arn, tg_arn, l_arn)
+
+
+@pytest.mark.serial
+def test_elbv2_dataplane_ip_target_unreachable_returns_502(elbv2):
+    """Connection failures surface as 502 Bad Gateway, like a real ALB."""
+    import urllib.error as _err
+    import urllib.request as _req
+
+    lb_name = "dp-alb-dead"
+    lb_arn, tg_arn, l_arn = _alb_http_target_setup(elbv2, lb_name, "127.0.0.1", 59999)
+    try:
+        url = f"{_endpoint}/_alb/{lb_name}/anything"
+        with pytest.raises(_err.HTTPError) as exc_info:
+            _req.urlopen(_req.Request(url, method="GET"))
+        assert exc_info.value.code == 502
+        body = json.loads(exc_info.value.read())
+        assert "connect error" in body["message"]
+    finally:
+        _alb_http_target_teardown(elbv2, lb_arn, tg_arn, l_arn)

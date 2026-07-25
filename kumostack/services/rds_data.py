@@ -9,16 +9,14 @@ Routes SQL to real database containers managed by the RDS service emulator.
 
 import json
 import logging
-import os
 import re
 import threading
 import uuid
 
-from kumostack.core.responses import AccountScopedDict, error_response_json, get_account_id, get_region, json_response
+from kumostack.core.arn import ArnParseError, parse_arn
+from kumostack.core.responses import AccountScopedDict, error_response_json, get_account_id, json_response
 
 logger = logging.getLogger("rds-data")
-
-REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 
 # Active transactions: txn_id -> {conn, engine, resourceArn, database}
 _transactions: dict = {}
@@ -74,10 +72,13 @@ def _stub_success():
 
 
 def _cluster_id_from_arn(resource_arn):
-    """Extract cluster identifier from an ARN."""
-    parts = resource_arn.split(":")
-    if len(parts) >= 7:
-        return parts[6]
+    """Return a stable, region-qualified key for per-cluster stub state."""
+    try:
+        spec = parse_arn(resource_arn)
+    except ArnParseError:
+        return resource_arn
+    if spec.service == "rds":
+        return f"{spec.account_id}:{spec.region}:{spec.resource}"
     return resource_arn
 
 
@@ -228,33 +229,73 @@ def _resolve_cluster(resource_arn):
     """Find RDS cluster and a member instance from a resourceArn."""
     from kumostack.services import rds
 
-    # Parse ARN: arn:aws:rds:REGION:ACCOUNT:cluster:IDENTIFIER
-    parts = resource_arn.split(":")
-    if len(parts) >= 7 and parts[5] == "cluster":
-        cluster_id = parts[6]
-    elif len(parts) >= 7 and parts[5] == "db":
-        # Instance ARN: arn:aws:rds:REGION:ACCOUNT:db:IDENTIFIER
-        instance_id = parts[6]
-        instance = rds._instances.get(instance_id)
+    parsed = rds._parse_rds_arn(resource_arn)
+    if not parsed:
+        return None, None
+
+    spec, resource_type, resource_id = parsed
+    if resource_type == "db":
+        if spec.account_id != get_account_id():
+            return None, None
+        instance = rds._instances.get_scoped(spec.account_id, spec.region, resource_id)
         if instance:
             return instance, instance.get("Engine", "postgres")
         return None, None
-    else:
+
+    if resource_type != "cluster":
         return None, None
 
-    cluster = rds._clusters.get(cluster_id)
+    cluster = rds._resolve_cluster(resource_arn)
     if not cluster:
         return None, None
 
     engine = cluster.get("Engine", "postgres")
+    cluster_id = cluster["DBClusterIdentifier"]
+
+    # Aurora Serverless has no customer-managed DB instances and retains its
+    # intentional in-memory Data API stub. Provisioned clusters, however, must
+    # have an available member before SQL can run.
+    if cluster.get("EngineMode") == "serverless":
+        return cluster, engine
+
+    member_ids = {
+        member.get("DBInstanceIdentifier")
+        for member in cluster.get("DBClusterMembers", [])
+        if member.get("DBInstanceIdentifier")
+    }
+    if not member_ids or not cluster.get("_shared_container_ready", True):
+        return None, engine
 
     # Find an instance belonging to this cluster
-    for inst in rds._instances.values():
-        if inst.get("DBClusterIdentifier") == cluster_id:
+    for inst in rds._instances.values_scoped(spec.account_id, spec.region):
+        if (
+            inst.get("DBClusterIdentifier") == cluster_id
+            and inst.get("DBInstanceIdentifier") in member_ids
+            and inst.get("DBInstanceStatus") == "available"
+        ):
+            # Aurora members intentionally share one backing container. During
+            # creation, recover its endpoint from the cluster if this member's
+            # control-plane record has not been stamped yet.
+            if not inst.get("Endpoint") and cluster.get("_shared_endpoint"):
+                inst["Endpoint"] = dict(cluster["_shared_endpoint"])
+                inst["_docker_container_id"] = cluster.get("_shared_container_id")
+                inst["_internal_address"] = cluster.get("_shared_internal_address")
+                inst["_internal_port"] = cluster.get("_shared_internal_port")
             return inst, engine
 
-    # No instance found — return cluster info but no connectable instance
-    return cluster, engine
+    # The cluster exists, but it has no available compute to accept SQL.
+    return None, engine
+
+
+def _cluster_resolution_error(resource_arn, engine):
+    if engine:
+        return _transient_database_error(
+            f"Database cluster has no available DB instances: {resource_arn}",
+        )
+    return _error(
+        "BadRequestException",
+        f"Database cluster not found for ARN: {resource_arn}",
+    )
 
 
 def _get_secret_credentials(secret_arn):
@@ -265,29 +306,31 @@ def _get_secret_credentials(secret_arn):
     """
     from kumostack.services import secretsmanager
 
-    for _name, secret in secretsmanager._secrets.items():
-        if secret.get("ARN") == secret_arn or _name == secret_arn:
-            # Find the AWSCURRENT version
-            for _vid, ver in secret.get("Versions", {}).items():
-                if "AWSCURRENT" in ver.get("Stages", []):
-                    secret_string = ver.get("SecretString")
-                    if secret_string:
-                        try:
-                            parsed = json.loads(secret_string)
-                            return (parsed.get("username"),
-                                    parsed.get("password", secret_string))
-                        except (json.JSONDecodeError, TypeError):
-                            return None, secret_string
-            # Fallback to any version
-            for _vid, ver in secret.get("Versions", {}).items():
-                secret_string = ver.get("SecretString")
-                if secret_string:
-                    try:
-                        parsed = json.loads(secret_string)
-                        return (parsed.get("username"),
-                                parsed.get("password", secret_string))
-                    except (json.JSONDecodeError, TypeError):
-                        return None, secret_string
+    _name, secret = secretsmanager._resolve(secret_arn, use_arn_scope=True)
+    if not secret:
+        return None, None
+
+    # Find the AWSCURRENT version
+    for _vid, ver in secret.get("Versions", {}).items():
+        if "AWSCURRENT" in ver.get("Stages", []):
+            secret_string = ver.get("SecretString")
+            if secret_string:
+                try:
+                    parsed = json.loads(secret_string)
+                    return (parsed.get("username"),
+                            parsed.get("password", secret_string))
+                except (json.JSONDecodeError, TypeError):
+                    return None, secret_string
+    # Fallback to any version
+    for _vid, ver in secret.get("Versions", {}).items():
+        secret_string = ver.get("SecretString")
+        if secret_string:
+            try:
+                parsed = json.loads(secret_string)
+                return (parsed.get("username"),
+                        parsed.get("password", secret_string))
+            except (json.JSONDecodeError, TypeError):
+                return None, secret_string
     return None, None
 
 
@@ -327,16 +370,28 @@ def _connect(instance, engine, database=None, password=None,
     else:
         try:
             import psycopg2
+            import psycopg2.extras
         except ImportError:
             raise ImportError(
                 "psycopg2 is required for PostgreSQL/Aurora PostgreSQL rds-data support. "
                 "Install with: pip install psycopg2-binary"
             )
         pg_user = username or instance.get("MasterUsername", "admin")
-        return psycopg2.connect(
+        conn = psycopg2.connect(
             host=host, port=int(port), user=pg_user,
             password=pw, dbname=db or "postgres",
         )
+        # Parity with the pymysql branch: a non-transactional ExecuteStatement
+        # must commit, otherwise psycopg2's implicit transaction is rolled back
+        # when the connection closes and the write is lost.
+        conn.autocommit = True
+        # Aurora Data API returns json/jsonb as its stored JSON *text*. Stop
+        # psycopg2 from auto-parsing it into a dict/list (which _field_value
+        # would then emit as an invalid single-quoted Python repr). Scoped to
+        # this connection so other psycopg2 users are unaffected.
+        psycopg2.extras.register_default_json(conn_or_curs=conn, loads=lambda x: x)
+        psycopg2.extras.register_default_jsonb(conn_or_curs=conn, loads=lambda x: x)
+        return conn
 
 
 def _field_value(val, type_name=None):
@@ -380,6 +435,32 @@ def _column_metadata(description, engine):
             "typeName": "VARCHAR",
         })
     return metadata
+
+
+# A :name placeholder: a colon (not part of a "::" cast) followed by a word
+# token. Greedy \w+ consumes the whole name in one match, so ":1" and ":10"
+# are distinct tokens rather than one being a substring shadow of the other.
+_RE_NAMED_PARAM = re.compile(r"(?<!:):(\w+)")
+
+
+def _substitute_named_params(sql, param_names):
+    """Rewrite :name placeholders to DB-API %(name)s in a single pass.
+
+    AWS treats each :name as a distinct token, so a naive substring replace of
+    ":1" corrupts ":10" (the repro in #957). Matching whole tokens once, left to
+    right, makes them distinct regardless of length or order, leaves a "::type"
+    cast intact, and passes through any ":word" that is not a supplied parameter
+    (so it reaches the engine unchanged instead of becoming a bad placeholder).
+    """
+    if not param_names:
+        return sql
+    names = set(param_names)
+
+    def _repl(match):
+        name = match.group(1)
+        return f"%({name})s" if name in names else match.group(0)
+
+    return _RE_NAMED_PARAM.sub(_repl, sql)
 
 
 def _convert_parameters(parameters):
@@ -449,8 +530,7 @@ def _execute_statement(data):
 
     instance, engine = _resolve_cluster(resource_arn)
     if not instance:
-        return _error("BadRequestException",
-                       f"Database cluster not found for ARN: {resource_arn}")
+        return _cluster_resolution_error(resource_arn, engine)
 
     # Keep stub mode for intentional mock environments only. Once RDS has a
     # real container-backed endpoint, connection failures must surface as
@@ -463,10 +543,7 @@ def _execute_statement(data):
 
     # Convert :name placeholders to %(name)s for DB-API
     params = _convert_parameters(parameters)
-    exec_sql = sql
-    if params:
-        for name in params:
-            exec_sql = exec_sql.replace(f":{name}", f"%({name})s")
+    exec_sql = _substitute_named_params(sql, params)
 
     own_conn = False
     conn = None
@@ -532,8 +609,7 @@ def _begin_transaction(data):
 
     instance, engine = _resolve_cluster(resource_arn)
     if not instance:
-        return _error("BadRequestException",
-                       f"Database cluster not found for ARN: {resource_arn}")
+        return _cluster_resolution_error(resource_arn, engine)
 
     secret_user, password = _get_secret_credentials(secret_arn)
 
@@ -618,8 +694,7 @@ def _batch_execute_statement(data):
 
     instance, engine = _resolve_cluster(resource_arn)
     if not instance:
-        return _error("BadRequestException",
-                       f"Database cluster not found for ARN: {resource_arn}")
+        return _cluster_resolution_error(resource_arn, engine)
 
     secret_user, password = _get_secret_credentials(secret_arn)
 
@@ -642,11 +717,8 @@ def _batch_execute_statement(data):
             update_results.append({"generatedFields": []})
         else:
             # Convert :name placeholders to %(name)s for DB-API
-            exec_sql = sql
-            if parameter_sets:
-                sample = _convert_parameters(parameter_sets[0])
-                for name in sample:
-                    exec_sql = exec_sql.replace(f":{name}", f"%({name})s")
+            sample = _convert_parameters(parameter_sets[0])
+            exec_sql = _substitute_named_params(sql, sample)
 
             for param_set in parameter_sets:
                 params = _convert_parameters(param_set)

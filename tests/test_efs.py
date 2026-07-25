@@ -6,8 +6,21 @@ import uuid as _uuid_mod
 import zipfile
 from urllib.parse import urlparse
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
+
+
+def _efs_client(region):
+    return boto3.client(
+        "efs",
+        endpoint_url=os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566"),
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name=region,
+        config=Config(region_name=region, retries={"mode": "standard"}),
+    )
 
 
 def test_efs_create_and_describe_filesystem(efs):
@@ -32,6 +45,170 @@ def test_efs_creation_token_idempotency(efs):
     r1 = efs.create_file_system(CreationToken=token)
     r2 = efs.create_file_system(CreationToken=token)
     assert r1["FileSystemId"] == r2["FileSystemId"]
+
+
+def test_efs_resources_are_region_scoped():
+    east = _efs_client("us-east-1")
+    west = _efs_client("us-west-2")
+    token = f"regional-{_uuid_mod.uuid4().hex}"
+    east_fs = east.create_file_system(CreationToken=token)
+    west_fs = west.create_file_system(CreationToken=token)
+    east_mt = east.create_mount_target(
+        FileSystemId=east_fs["FileSystemId"],
+        SubnetId="subnet-00000001",
+    )
+    west_mt = west.create_mount_target(
+        FileSystemId=west_fs["FileSystemId"],
+        SubnetId="subnet-00000002",
+    )
+    east_ap = east.create_access_point(FileSystemId=east_fs["FileSystemId"])
+    west_ap = west.create_access_point(FileSystemId=west_fs["FileSystemId"])
+    east.put_lifecycle_configuration(
+        FileSystemId=east_fs["FileSystemId"],
+        LifecyclePolicies=[{"TransitionToIA": "AFTER_7_DAYS"}],
+    )
+    west.put_lifecycle_configuration(
+        FileSystemId=west_fs["FileSystemId"],
+        LifecyclePolicies=[{"TransitionToIA": "AFTER_30_DAYS"}],
+    )
+    east.put_backup_policy(
+        FileSystemId=east_fs["FileSystemId"],
+        BackupPolicy={"Status": "ENABLED"},
+    )
+    west.put_backup_policy(
+        FileSystemId=west_fs["FileSystemId"],
+        BackupPolicy={"Status": "DISABLED"},
+    )
+
+    try:
+        east_ids = {fs["FileSystemId"] for fs in east.describe_file_systems()["FileSystems"]}
+        west_ids = {fs["FileSystemId"] for fs in west.describe_file_systems()["FileSystems"]}
+        assert east_fs["FileSystemId"] in east_ids
+        assert east_fs["FileSystemId"] not in west_ids
+        assert west_fs["FileSystemId"] in west_ids
+        assert west_fs["FileSystemId"] not in east_ids
+        assert ":us-east-1:" in east_fs["FileSystemArn"]
+        assert ":us-west-2:" in west_fs["FileSystemArn"]
+
+        assert east.describe_mount_targets(FileSystemId=east_fs["FileSystemId"])["MountTargets"][0]["MountTargetId"] == east_mt["MountTargetId"]
+        assert west.describe_mount_targets(FileSystemId=west_fs["FileSystemId"])["MountTargets"][0]["MountTargetId"] == west_mt["MountTargetId"]
+        assert east.describe_access_points(FileSystemId=east_fs["FileSystemId"])["AccessPoints"][0]["AccessPointId"] == east_ap["AccessPointId"]
+        assert west.describe_access_points(FileSystemId=west_fs["FileSystemId"])["AccessPoints"][0]["AccessPointId"] == west_ap["AccessPointId"]
+        assert east.describe_lifecycle_configuration(FileSystemId=east_fs["FileSystemId"])["LifecyclePolicies"] == [{"TransitionToIA": "AFTER_7_DAYS"}]
+        assert west.describe_lifecycle_configuration(FileSystemId=west_fs["FileSystemId"])["LifecyclePolicies"] == [{"TransitionToIA": "AFTER_30_DAYS"}]
+        assert east.describe_backup_policy(FileSystemId=east_fs["FileSystemId"])["BackupPolicy"]["Status"] == "ENABLED"
+        assert west.describe_backup_policy(FileSystemId=west_fs["FileSystemId"])["BackupPolicy"]["Status"] == "DISABLED"
+    finally:
+        east.delete_access_point(AccessPointId=east_ap["AccessPointId"])
+        west.delete_access_point(AccessPointId=west_ap["AccessPointId"])
+        east.delete_mount_target(MountTargetId=east_mt["MountTargetId"])
+        west.delete_mount_target(MountTargetId=west_mt["MountTargetId"])
+        east.delete_file_system(FileSystemId=east_fs["FileSystemId"])
+        west.delete_file_system(FileSystemId=west_fs["FileSystemId"])
+
+
+def test_efs_restore_legacy_state_places_children_beside_parent():
+    from ministack.core.responses import (
+        AccountScopedDict,
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from ministack.services import efs as service
+
+    original_account = get_account_id()
+    original_region = get_region()
+    account_id = "111111111111"
+    boot_region = "us-east-1"
+    resource_region = "us-west-2"
+    fs_id = "fs-11111111111111111"
+    mt_id = "fsmt-11111111111111111"
+    ap_id = "fsap-11111111111111111"
+    payload = {}
+
+    set_request_account_id(account_id)
+    set_request_region(boot_region)
+    for state_key, resource_key, value in (
+        (
+            "file_systems",
+            fs_id,
+            {
+                "FileSystemId": fs_id,
+                "FileSystemArn": f"arn:aws:elasticfilesystem:{resource_region}:{account_id}:file-system/{fs_id}",
+            },
+        ),
+        (
+            "mount_targets",
+            mt_id,
+            {
+                "MountTargetId": mt_id,
+                "FileSystemId": fs_id,
+                "MountTargetArn": f"arn:aws:elasticfilesystem:{resource_region}:{account_id}:file-system/{fs_id}/mount-target/{mt_id}",
+            },
+        ),
+        (
+            "access_points",
+            ap_id,
+            {
+                "AccessPointId": ap_id,
+                "FileSystemId": fs_id,
+                "AccessPointArn": f"arn:aws:elasticfilesystem:{resource_region}:{account_id}:access-point/{ap_id}",
+            },
+        ),
+        ("lifecycle_configs", fs_id, [{"TransitionToIA": "AFTER_30_DAYS"}]),
+        ("backup_policies", fs_id, {"Status": "ENABLED"}),
+    ):
+        store = AccountScopedDict()
+        store[resource_key] = value
+        payload[state_key] = store
+
+    service.reset()
+    try:
+        service.restore_state(payload)
+        assert service._file_systems.get_scoped(account_id, resource_region, fs_id)["FileSystemId"] == fs_id
+        assert service._mount_targets.get_scoped(account_id, resource_region, mt_id)["FileSystemId"] == fs_id
+        assert service._access_points.get_scoped(account_id, resource_region, ap_id)["FileSystemId"] == fs_id
+        assert service._lifecycle_configs.get_scoped(account_id, resource_region, fs_id) == [{"TransitionToIA": "AFTER_30_DAYS"}]
+        assert service._backup_policies.get_scoped(account_id, resource_region, fs_id) == {"Status": "ENABLED"}
+        for store, key in (
+            (service._file_systems, fs_id),
+            (service._mount_targets, mt_id),
+            (service._access_points, ap_id),
+            (service._lifecycle_configs, fs_id),
+            (service._backup_policies, fs_id),
+        ):
+            assert store.get_scoped(account_id, boot_region, key) is None
+    finally:
+        service.reset()
+        set_request_account_id(original_account)
+        set_request_region(original_region)
+
+
+def test_efs_reset_clears_state_across_regions():
+    from ministack.core.responses import get_region, set_request_region
+    from ministack.services import efs as service
+
+    original_region = get_region()
+    stores = (
+        service._file_systems,
+        service._mount_targets,
+        service._access_points,
+        service._lifecycle_configs,
+        service._backup_policies,
+    )
+    service.reset()
+    try:
+        for region in ("us-east-1", "us-west-2"):
+            set_request_region(region)
+            for store in stores:
+                store[f"resource-{region}"] = {"region": region}
+        service.reset()
+        assert all(not store.has_any() for store in stores)
+    finally:
+        service.reset()
+        set_request_region(original_region)
+
 
 def test_efs_delete_filesystem(efs):
     resp = efs.create_file_system()
@@ -98,6 +275,53 @@ def test_efs_tags(efs):
     keys = [t["Key"] for t in tags_resp2["Tags"]]
     assert "env" not in keys
     assert "team" in keys
+
+
+def test_efs_access_point_tags_accept_arn(efs):
+    fs = efs.create_file_system(CreationToken=f"ap-tags-{_uuid_mod.uuid4().hex[:8]}")
+    ap = efs.create_access_point(FileSystemId=fs["FileSystemId"])
+    ap_arn = ap["AccessPointArn"]
+
+    efs.tag_resource(ResourceId=ap_arn, Tags=[{"Key": "team", "Value": "data"}])
+
+    tags_resp = efs.list_tags_for_resource(ResourceId=ap_arn)
+    tag_map = {t["Key"]: t["Value"] for t in tags_resp["Tags"]}
+    assert tag_map["team"] == "data"
+
+
+def test_efs_tag_resource_rejects_invalid_arns(efs):
+    fs = efs.create_file_system(CreationToken=f"invalid-tags-{_uuid_mod.uuid4().hex[:8]}")
+    fs_arn = fs["FileSystemArn"]
+    ap = efs.create_access_point(FileSystemId=fs["FileSystemId"])
+    invalid_cases = [
+        ("not-an-arn", "BadRequest"),
+        (fs_arn.replace(":elasticfilesystem:", ":s3:"), "BadRequest"),
+        (fs_arn.replace(":000000000000:", ":111111111111:"), "FileSystemNotFound"),
+        (fs_arn.replace(":us-east-1:", ":us-west-2:"), "FileSystemNotFound"),
+        (f"arn:aws:elasticfilesystem:us-east-1:000000000000:mount-target/{fs['FileSystemId']}", "BadRequest"),
+        (f"arn:aws:elasticfilesystem:us-east-1:000000000000:file-system/{ap['AccessPointId']}", "BadRequest"),
+        (f"arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/{fs['FileSystemId']}", "BadRequest"),
+    ]
+
+    for bad_resource_id, expected_code in invalid_cases:
+        with pytest.raises(ClientError) as exc:
+            efs.tag_resource(ResourceId=bad_resource_id, Tags=[{"Key": "bad", "Value": "value"}])
+        assert exc.value.response["Error"]["Code"] == expected_code
+
+    tags_resp = efs.list_tags_for_resource(ResourceId=fs_arn)
+    tag_map = {t["Key"]: t["Value"] for t in tags_resp["Tags"]}
+    assert "bad" not in tag_map
+
+
+def test_efs_list_and_untag_reject_invalid_arns(efs):
+    for operation, kwargs in [
+        (efs.list_tags_for_resource, {}),
+        (efs.untag_resource, {"TagKeys": ["missing"]}),
+    ]:
+        with pytest.raises(ClientError) as exc:
+            operation(ResourceId="arn:aws:s3:us-east-1:000000000000:file-system/fs-1234567890abcdef0", **kwargs)
+        assert exc.value.response["Error"]["Code"] == "BadRequest"
+
 
 def test_efs_lifecycle_configuration(efs):
     fs = efs.create_file_system()

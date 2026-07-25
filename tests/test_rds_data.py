@@ -10,8 +10,11 @@ Since no real DB containers are available in CI, these tests focus on:
 import json
 import os
 import urllib.request
+import uuid
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 ENDPOINT = os.environ.get("KUMOSTACK_ENDPOINT", "http://localhost:4566")
@@ -42,6 +45,17 @@ def _raw_post(path, body):
         return resp.status, json.loads(resp.read())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
+
+
+def _regional_client(service, region, access_key_id="test"):
+    return boto3.client(
+        service,
+        endpoint_url=ENDPOINT,
+        aws_access_key_id=access_key_id,
+        aws_secret_access_key="test",
+        region_name=region,
+        config=Config(region_name=region, retries={"mode": "standard"}),
+    )
 
 
 # ── Routing tests ──────────────────────────────────────────
@@ -127,6 +141,204 @@ def test_execute_nonexistent_cluster():
     })
     assert status == 400
     assert "not found" in body.get("message", body.get("Message", "")).lower()
+
+
+def test_rds_data_resolves_cluster_arn_by_arn_region(rds, sm):
+    east_rds = _regional_client("rds", "us-east-1")
+    west_rds = _regional_client("rds", "us-west-2")
+    east_data = _regional_client("rds-data", "us-east-1")
+    cluster_id = f"rds-data-region-{uuid.uuid4().hex[:8]}"
+    secret_arn = sm.create_secret(
+        Name=f"rds-data-region-secret-{uuid.uuid4().hex[:8]}",
+        SecretString='{"username":"admin","password":"testpass123"}',
+    )["ARN"]
+
+    try:
+        east_rds.create_db_cluster(
+            DBClusterIdentifier=cluster_id,
+            Engine="aurora-mysql",
+            EngineMode="serverless",
+            MasterUsername="admin",
+            MasterUserPassword="testpass123",
+        )
+        west_rds.create_db_cluster(
+            DBClusterIdentifier=cluster_id,
+            Engine="aurora-mysql",
+            EngineMode="serverless",
+            MasterUsername="admin",
+            MasterUserPassword="testpass123",
+        )
+        east_arn = east_rds.describe_db_clusters(DBClusterIdentifier=cluster_id)["DBClusters"][0]["DBClusterArn"]
+        west_arn = west_rds.describe_db_clusters(DBClusterIdentifier=cluster_id)["DBClusters"][0]["DBClusterArn"]
+
+        east_data.execute_statement(
+            resourceArn=west_arn,
+            secretArn=secret_arn,
+            sql="CREATE DATABASE west_only_db",
+        )
+        east_resp = east_data.execute_statement(
+            resourceArn=east_arn,
+            secretArn=secret_arn,
+            sql="SHOW DATABASES",
+        )
+        west_resp = east_data.execute_statement(
+            resourceArn=west_arn,
+            secretArn=secret_arn,
+            sql="SHOW DATABASES",
+        )
+
+        east_names = [r[0]["stringValue"] for r in east_resp.get("records", [])]
+        west_names = [r[0]["stringValue"] for r in west_resp.get("records", [])]
+        assert "west_only_db" not in east_names
+        assert "west_only_db" in west_names
+    finally:
+        for client in (east_rds, west_rds):
+            try:
+                client.delete_db_cluster(DBClusterIdentifier=cluster_id, SkipFinalSnapshot=True)
+            except ClientError:
+                pass
+
+
+def test_execute_rejects_foreign_account_cluster_arn():
+    """ExecuteStatement should not resolve a cluster ARN from another account."""
+    owner_account = "111111111111"
+    owner = _regional_client("rds", REGION, access_key_id=owner_account)
+    cluster_id = f"rds-data-foreign-account-{uuid.uuid4().hex[:8]}"
+
+    try:
+        cluster = owner.create_db_cluster(
+            DBClusterIdentifier=cluster_id,
+            Engine="aurora-mysql",
+            MasterUsername="admin",
+            MasterUserPassword="password123",
+        )["DBCluster"]
+
+        assert f":{owner_account}:" in cluster["DBClusterArn"]
+        status, body = _raw_post("/Execute", {
+            "resourceArn": cluster["DBClusterArn"],
+            "secretArn": FAKE_SECRET_ARN,
+            "sql": "SELECT 1",
+        })
+        assert status == 400
+        assert "not found" in body.get("message", body.get("Message", "")).lower()
+    finally:
+        try:
+            owner.delete_db_cluster(DBClusterIdentifier=cluster_id, SkipFinalSnapshot=True)
+        except ClientError:
+            pass
+
+
+def test_cluster_id_from_arn_includes_account_region_and_resource_tail():
+    from kumostack.services import rds_data
+
+    assert (
+        rds_data._cluster_id_from_arn(
+            "arn:aws:rds:us-east-1:000000000000:cluster:cluster-id:tail",
+        )
+        == "000000000000:us-east-1:cluster:cluster-id:tail"
+    )
+
+
+def test_rds_data_member_lookup_uses_resource_arn_region():
+    from kumostack.core.responses import (
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from kumostack.services import rds, rds_data
+
+    original_account = get_account_id()
+    original_region = get_region()
+    cluster_id = f"rds-data-member-{uuid.uuid4().hex[:8]}"
+    east_arn = f"arn:aws:rds:us-east-1:{ACCOUNT_ID}:cluster:{cluster_id}"
+    west_arn = f"arn:aws:rds:us-west-2:{ACCOUNT_ID}:cluster:{cluster_id}"
+    east_instance = {
+        "DBInstanceIdentifier": f"{cluster_id}-east",
+        "DBClusterIdentifier": cluster_id,
+        "DBInstanceStatus": "available",
+        "Engine": "aurora-mysql",
+        "Endpoint": {"Address": "east.example", "Port": 3306},
+    }
+    west_instance = {
+        "DBInstanceIdentifier": f"{cluster_id}-west",
+        "DBClusterIdentifier": cluster_id,
+        "DBInstanceStatus": "available",
+        "Engine": "aurora-mysql",
+    }
+
+    try:
+        set_request_account_id(ACCOUNT_ID)
+        rds.reset()
+        rds._clusters.set_scoped(
+            ACCOUNT_ID,
+            "us-east-1",
+            cluster_id,
+            {"DBClusterIdentifier": cluster_id, "DBClusterArn": east_arn, "Engine": "aurora-mysql"},
+        )
+        rds._clusters.set_scoped(
+            ACCOUNT_ID,
+            "us-west-2",
+            cluster_id,
+            {
+                "DBClusterIdentifier": cluster_id,
+                "DBClusterArn": west_arn,
+                "Engine": "aurora-mysql",
+                "EngineMode": "provisioned",
+                "DBClusterMembers": [{
+                    "DBInstanceIdentifier": west_instance["DBInstanceIdentifier"],
+                    "IsClusterWriter": True,
+                }],
+                "_shared_container_ready": True,
+                "_shared_endpoint": {"Address": "west.example", "Port": 3306},
+                "_shared_container_id": "west-shared-container",
+                "_shared_internal_address": "172.20.0.8",
+                "_shared_internal_port": 3306,
+            },
+        )
+        rds._instances.set_scoped(ACCOUNT_ID, "us-east-1", east_instance["DBInstanceIdentifier"], east_instance)
+        rds._instances.set_scoped(ACCOUNT_ID, "us-west-2", west_instance["DBInstanceIdentifier"], west_instance)
+
+        set_request_region("us-east-1")
+        instance, engine = rds_data._resolve_cluster(west_arn)
+
+        assert instance is west_instance
+        assert engine == "aurora-mysql"
+        assert instance["Endpoint"] == {"Address": "west.example", "Port": 3306}
+        assert instance["_docker_container_id"] == "west-shared-container"
+        assert instance["_internal_address"] == "172.20.0.8"
+        assert instance["_internal_port"] == 3306
+    finally:
+        rds.reset()
+        set_request_account_id(original_account)
+        set_request_region(original_region)
+
+
+def test_rds_data_db_arn_lookup_rejects_foreign_account():
+    from kumostack.core.responses import (
+        get_account_id,
+        set_request_account_id,
+    )
+    from kumostack.services import rds, rds_data
+
+    original_account = get_account_id()
+    db_id = f"rds-data-db-{uuid.uuid4().hex[:8]}"
+    db_arn = f"arn:aws:rds:us-east-1:111111111111:db:{db_id}"
+    instance = {
+        "DBInstanceIdentifier": db_id,
+        "Engine": "aurora-mysql",
+        "Endpoint": {"Address": "foreign.example", "Port": 3306},
+    }
+
+    try:
+        rds.reset()
+        rds._instances.set_scoped("111111111111", "us-east-1", db_id, instance)
+        set_request_account_id(ACCOUNT_ID)
+
+        assert rds_data._resolve_cluster(db_arn) == (None, None)
+    finally:
+        rds.reset()
+        set_request_account_id(original_account)
 
 
 def test_begin_transaction_nonexistent_cluster():
@@ -252,15 +464,45 @@ def test_convert_parameters_empty_value():
     assert result["x"] is None
 
 
+def test_substitute_named_params_distinct_numeric_tokens():
+    """:1 and :10 are distinct placeholders, not substring shadows (#957 bug 2).
+
+    A naive substring replace of ":1" first corrupts ":10" into "<val>0". Token
+    matching keeps them distinct regardless of supply order."""
+    from kumostack.services.rds_data import _substitute_named_params
+
+    params = {"1": "ONE", "10": "TEN"}
+    assert _substitute_named_params("SELECT :1 AS one, :10 AS ten", params) == \
+        "SELECT %(1)s AS one, %(10)s AS ten"
+    # Order of the names in the dict must not change the result.
+    assert _substitute_named_params("SELECT :10 AS ten, :1 AS one", {"10": "TEN", "1": "ONE"}) == \
+        "SELECT %(10)s AS ten, %(1)s AS one"
+
+
+def test_substitute_named_params_preserves_cast_and_unknowns():
+    """A ::type cast is left intact and a :word that is not a supplied parameter
+    passes through unchanged instead of becoming a bad placeholder."""
+    from kumostack.services.rds_data import _substitute_named_params
+
+    assert _substitute_named_params("SELECT :val::jsonb", {"val": "{}"}) == "SELECT %(val)s::jsonb"
+    assert _substitute_named_params("SELECT :foo", {"bar": 1}) == "SELECT :foo"
+    assert _substitute_named_params("SELECT 1", {}) == "SELECT 1"
+    # A longer unrelated :token must not be partially eaten by a shorter param
+    # name. Substring replace of ":id" would corrupt ":identity"; token matching
+    # leaves it whole because it is not a supplied parameter.
+    assert _substitute_named_params("SELECT :id, :identity", {"id": 1}) == "SELECT %(id)s, :identity"
+
+
 # ── Stub mode tests ────────────────────────────────────────
 
 def _setup_stub_cluster(rds, sm):
-    """Create an RDS cluster (no real DB container) and a secret for stub testing."""
+    """Create an Aurora Serverless cluster and secret for stub testing."""
     import uuid as _uuid
     cluster_id = f"stub-test-{_uuid.uuid4().hex[:8]}"
     rds.create_db_cluster(
         DBClusterIdentifier=cluster_id,
         Engine="aurora-mysql",
+        EngineMode="serverless",
         MasterUsername="admin",
         MasterUserPassword="testpass123",
     )
@@ -397,6 +639,44 @@ def test_rds_data_real_endpoint_connection_failure_is_transient(monkeypatch):
     assert "lost_write" not in rds_data._stub_users.get("real-cluster", set())
 
 
+def test_rds_data_provisioned_cluster_without_members_is_unavailable():
+    """An empty provisioned cluster exists but has no SQL compute."""
+    from kumostack.services import rds, rds_data
+
+    cluster_id = f"empty-provisioned-{uuid.uuid4().hex[:8]}"
+    resource_arn = f"arn:aws:rds:{REGION}:{ACCOUNT_ID}:cluster:{cluster_id}"
+    rds._clusters[cluster_id] = {
+        "DBClusterIdentifier": cluster_id,
+        "DBClusterArn": resource_arn,
+        "Engine": "aurora-mysql",
+        "EngineMode": "provisioned",
+        "Status": "available",
+        "DBClusterMembers": [],
+        "_shared_container_ready": False,
+    }
+
+    try:
+        assert rds_data._resolve_cluster(resource_arn) == (None, "aurora-mysql")
+        common = {
+            "resourceArn": resource_arn,
+            "secretArn": FAKE_SECRET_ARN,
+        }
+        cases = (
+            (rds_data._execute_statement, {"sql": "SELECT 1"}),
+            (rds_data._begin_transaction, {}),
+            (rds_data._batch_execute_statement, {"sql": "SELECT 1"}),
+        )
+        for handler, extra in cases:
+            status, headers, body = handler({**common, **extra})
+            payload = json.loads(body)
+            assert status == 504
+            assert headers["x-amzn-errortype"] == "DatabaseUnavailableException"
+            assert payload["__type"] == "DatabaseUnavailableException"
+            assert "no available DB instances" in payload["message"]
+    finally:
+        rds._clusters.pop(cluster_id, None)
+
+
 def test_rds_data_non_container_endpoint_keeps_stub_mode(monkeypatch):
     """Control-plane-only instances still use the lightweight SQL stub."""
     from kumostack.services import rds_data
@@ -419,7 +699,10 @@ def test_rds_data_non_container_endpoint_keeps_stub_mode(monkeypatch):
 
     assert status == 200
     assert payload["records"] == []
-    assert "stub_user" in rds_data._stub_users.get("stub-cluster", set())
+    assert "stub_user" in rds_data._stub_users.get(
+        rds_data._cluster_id_from_arn(resource_arn),
+        set(),
+    )
 
 
 def test_rds_data_lock_wait_timeout_is_not_connection_error():
@@ -461,8 +744,8 @@ def test_rds_cluster_status_tracks_member_readiness():
         rds._clusters.pop(cluster_id, None)
 
 
-def test_rds_cluster_endpoints_sync_to_backing_instance():
-    """Aurora cluster endpoints track the registered local writer instance."""
+def test_rds_cluster_endpoints_sync_to_shared_container():
+    """Aurora cluster endpoints track the cluster-owned shared container."""
     from kumostack.services import rds
 
     cluster_id = "endpoint-sync-cluster"
@@ -474,6 +757,10 @@ def test_rds_cluster_endpoints_sync_to_backing_instance():
         "ReaderEndpoint": "original-ro.cluster.local",
         "Port": 3306,
         "DBClusterMembers": [],
+        "_shared_endpoint": {
+            "Address": "10.0.0.15",
+            "Port": 3307,
+        },
     }
     rds._instances[instance_id] = {
         "DBInstanceIdentifier": instance_id,
@@ -490,9 +777,9 @@ def test_rds_cluster_endpoints_sync_to_backing_instance():
         rds._register_instance_in_cluster(rds._instances[instance_id])
 
         cluster = rds._clusters[cluster_id]
-        assert cluster["Endpoint"] == "10.0.0.12"
-        assert cluster["ReaderEndpoint"] == "10.0.0.12"
-        assert cluster["Port"] == 3306
+        assert cluster["Endpoint"] == "10.0.0.15"
+        assert cluster["ReaderEndpoint"] == "10.0.0.15"
+        assert cluster["Port"] == 3307
     finally:
         rds._instances.pop(instance_id, None)
         rds._clusters.pop(cluster_id, None)
@@ -500,9 +787,10 @@ def test_rds_cluster_endpoints_sync_to_backing_instance():
 
 def test_rds_data_secret_credentials_parsing():
     """_get_secret_credentials extracts username and password from secret."""
-    from kumostack.core.responses import set_request_account_id
+    from kumostack.core.responses import set_request_account_id, set_request_region
     from kumostack.services import rds_data, secretsmanager
-    set_request_account_id("test")
+    set_request_account_id("000000000000")
+    set_request_region("us-east-1")
     # Create a secret with JSON credentials
     secretsmanager._secrets["test-cred-secret"] = {
         "ARN": "arn:aws:secretsmanager:us-east-1:000000000000:secret:test-cred",
@@ -524,9 +812,10 @@ def test_rds_data_secret_credentials_parsing():
 
 def test_rds_data_secret_credentials_no_username():
     """_get_secret_credentials returns None username for password-only secret."""
-    from kumostack.core.responses import set_request_account_id
+    from kumostack.core.responses import set_request_account_id, set_request_region
     from kumostack.services import rds_data, secretsmanager
-    set_request_account_id("test")
+    set_request_account_id("000000000000")
+    set_request_region("us-east-1")
     secretsmanager._secrets["pw-only-secret"] = {
         "ARN": "arn:aws:secretsmanager:us-east-1:000000000000:secret:pw-only",
         "Name": "pw-only-secret",
@@ -542,3 +831,67 @@ def test_rds_data_secret_credentials_no_username():
     assert user is None
     assert pw == "just-a-password"
     del secretsmanager._secrets["pw-only-secret"]
+
+
+def test_rds_data_secret_credentials_use_secret_arn_region():
+    """_get_secret_credentials resolves ARN-scoped secrets outside the request region."""
+    from kumostack.core.responses import get_region, set_request_account_id, set_request_region
+    from kumostack.services import rds_data, secretsmanager
+
+    original_region = get_region()
+    set_request_account_id("test")
+    set_request_region("us-east-1")
+    secretsmanager._secrets["cross-region-cred"] = {
+        "ARN": "arn:aws:secretsmanager:us-east-1:000000000000:secret:cross-region-cred",
+        "Name": "cross-region-cred",
+        "Versions": {
+            "v1": {
+                "Stages": ["AWSCURRENT"],
+                "SecretString": '{"username":"app_rw","password":"p@ss123"}',
+            }
+        },
+    }
+    try:
+        set_request_region("us-west-2")
+        user, pw = rds_data._get_secret_credentials(
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:cross-region-cred"
+        )
+        assert user == "app_rw"
+        assert pw == "p@ss123"
+    finally:
+        set_request_region("us-east-1")
+        secretsmanager._secrets.pop("cross-region-cred", None)
+        set_request_region(original_region)
+
+
+def test_rds_data_secret_credentials_reject_cross_account_secret_arn():
+    from kumostack.core.responses import (
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from kumostack.services import rds_data, secretsmanager
+
+    original_account = get_account_id()
+    original_region = get_region()
+    set_request_account_id("000000000000")
+    set_request_region("us-east-1")
+    secretsmanager._secrets.set_scoped("111111111111", "us-east-1", "cross-account-cred", {
+        "ARN": "arn:aws:secretsmanager:us-east-1:111111111111:secret:cross-account-cred",
+        "Name": "cross-account-cred",
+        "Versions": {
+            "v1": {
+                "Stages": ["AWSCURRENT"],
+                "SecretString": '{"username":"app_rw","password":"p@ss123"}',
+            }
+        },
+    })
+    try:
+        assert rds_data._get_secret_credentials(
+            "arn:aws:secretsmanager:us-east-1:111111111111:secret:cross-account-cred"
+        ) == (None, None)
+    finally:
+        secretsmanager._secrets.pop_scoped("111111111111", "us-east-1", "cross-account-cred", None)
+        set_request_account_id(original_account)
+        set_request_region(original_region)

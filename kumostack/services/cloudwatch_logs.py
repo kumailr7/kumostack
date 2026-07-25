@@ -28,7 +28,9 @@ import logging
 import os
 import time
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
@@ -43,7 +45,7 @@ REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 
 from kumostack.core.persistence import PERSIST_STATE, load_state
 
-_log_groups = AccountScopedDict()
+_log_groups = AccountRegionScopedDict()
 # group_name -> {
 #   arn, creationTime, retentionInDays (int|None), tags: {str: str},
 #   subscriptionFilters: {filterName: {filterName, logGroupName, filterPattern,
@@ -53,23 +55,26 @@ _log_groups = AccountScopedDict()
 #             firstEventTimestamp, lastEventTimestamp, lastIngestionTime}},
 # }
 
-_destinations = AccountScopedDict()
+# Region-scoped: CW Logs destinations and the vended-logs delivery resources
+# are region-specific in AWS (were account-only → leaked across regions). Each
+# carries an ARN, so legacy account-scoped state migrates to its ARN's region.
+_destinations = AccountRegionScopedDict()
 # dest_name -> {destinationName, targetArn, roleArn, accessPolicy, arn, creationTime}
 
-_metric_filters = AccountScopedDict()
+_metric_filters = AccountRegionScopedDict()
 # (log_group_name, filter_name) -> {filterName, logGroupName, filterPattern, metricTransformations, creationTime}
 
 _queries = AccountScopedDict()
 # query_id -> {queryId, logGroupName, startTime, endTime, queryString, status}
 
-_delivery_sources = AccountScopedDict()
+_delivery_sources = AccountRegionScopedDict()
 # source_name -> {name, arn, resourceArns: [str], logType, service, tags}
 
-_delivery_destinations = AccountScopedDict()
+_delivery_destinations = AccountRegionScopedDict()
 # dest_name -> {name, arn, deliveryDestinationType, outputFormat,
 #               deliveryDestinationConfiguration: {destinationResourceArn}, tags}
 
-_deliveries = AccountScopedDict()
+_deliveries = AccountRegionScopedDict()
 # delivery_id -> {id, arn, deliverySourceName, deliveryDestinationArn,
 #                 deliveryDestinationType, recordFields, fieldDelimiter,
 #                 s3DeliveryConfiguration, tags}
@@ -89,11 +94,52 @@ def get_state():
     }
 
 
+def _region_for_log_group(account_id: str, log_group_name: str | None) -> str | None:
+    if not log_group_name:
+        return None
+    for (acct, region, name), _group in _log_groups.all_items():
+        if acct == account_id and name == log_group_name:
+            return region
+    return None
+
+
+def _metric_filter_log_group_name(key, value) -> str | None:
+    if isinstance(key, (list, tuple)) and key:
+        return key[0]
+    if isinstance(value, dict):
+        return value.get("logGroupName")
+    return None
+
+
+def _metric_filter_restore_region(account_id: str, key, value) -> str:
+    group_name = _metric_filter_log_group_name(key, value)
+    return (
+        _region_for_log_group(account_id, group_name)
+        or _metric_filters._region_for_legacy_value(key, value)
+    )
+
+
+def _restore_metric_filters(metric_filters):
+    if isinstance(metric_filters, AccountRegionScopedDict):
+        _metric_filters.update(metric_filters)
+        return
+    if isinstance(metric_filters, AccountScopedDict):
+        for (account_id, key), value in metric_filters._data.items():
+            region = _metric_filter_restore_region(account_id, key, value)
+            _metric_filters.set_scoped(account_id, region, key, value)
+        return
+    if isinstance(metric_filters, dict):
+        account_id = get_account_id()
+        for key, value in metric_filters.items():
+            region = _metric_filter_restore_region(account_id, key, value)
+            _metric_filters.set_scoped(account_id, region, key, value)
+
+
 def restore_state(data):
     if data:
         _log_groups.update(data.get("log_groups", {}))
         _destinations.update(data.get("destinations", {}))
-        _metric_filters.update(data.get("metric_filters", {}))
+        _restore_metric_filters(data.get("metric_filters", {}))
         _queries.update(data.get("queries", {}))
         _delivery_sources.update(data.get("delivery_sources", {}))
         _delivery_destinations.update(data.get("delivery_destinations", {}))
@@ -128,6 +174,26 @@ def _resolve_group_by_arn(arn):
         if g["arn"].rstrip(":*") == arn_normalized:
             return name
     return None
+
+
+def _log_group_name_from_identifier_arn(identifier: str) -> str | None:
+    try:
+        spec = parse_arn(identifier)
+    except ArnParseError:
+        return None
+    if (
+        spec.service != "logs"
+        or spec.account_id != get_account_id()
+        or spec.region != get_region()
+    ):
+        return None
+    prefix = "log-group:"
+    if not spec.resource.startswith(prefix):
+        return None
+    name = spec.resource[len(prefix):]
+    if name.endswith(":*"):
+        name = name[:-2]
+    return name or None
 
 
 def _decode_token(token):
@@ -427,7 +493,78 @@ def _put_log_events(data):
 
     token = str(int(s["uploadSequenceToken"]) + 1)
     s["uploadSequenceToken"] = token
+
+    _fanout_to_subscription_filters(group, stream, events)
     return json_response({"nextSequenceToken": token})
+
+
+def _subscription_pattern_matches(pattern, message):
+    """Minimal CloudWatch Logs filter-pattern match: an empty pattern matches
+    every event; otherwise every bare term in the pattern must appear in the
+    message. The full filter-pattern grammar is intentionally not implemented."""
+    if not pattern or not pattern.strip():
+        return True
+    import re
+    terms = re.findall(r"[A-Za-z0-9_./:-]+", pattern)
+    return all(t in (message or "") for t in terms) if terms else True
+
+
+def _fanout_to_subscription_filters(group_name, stream_name, events):
+    """Forward matching log events to each subscription filter's destination
+    Lambda, in AWS's `awslogs` gzip+base64 envelope (#896). Best-effort — a
+    delivery failure must never break log ingestion. Only Lambda destinations
+    are delivered; Kinesis/Firehose destinations are stored but not delivered."""
+    grp = _log_groups.get(group_name)
+    if not grp or not events:
+        return
+    filters = grp.get("subscriptionFilters") or {}
+    if not filters:
+        return
+    import gzip
+    import threading
+    now_ms = int(time.time() * 1000)
+    for f in filters.values():
+        # Best-effort per filter: a delivery error must NEVER break log
+        # ingestion (PutLogEvents / Lambda log emit both call this).
+        try:
+            dest = f.get("destinationArn", "")
+            if ":function:" not in dest:
+                continue  # only Lambda destinations are delivered
+            fn = dest.split(":function:")[-1].split(":")[0]
+            # Guard the self-feeding loop: a filter on /aws/lambda/<fn> pointing
+            # back at <fn> would invoke→log→invoke forever.
+            if group_name == f"/aws/lambda/{fn}":
+                continue
+            matched = [e for e in events
+                       if _subscription_pattern_matches(f.get("filterPattern", ""), e.get("message", ""))]
+            if not matched:
+                continue
+            payload = {
+                "messageType": "DATA_MESSAGE",
+                "owner": get_account_id(),
+                "logGroup": group_name,
+                "logStream": stream_name,
+                "subscriptionFilters": [f.get("filterName", "")],
+                "logEvents": [
+                    {"id": new_uuid().replace("-", ""),
+                     "timestamp": e.get("timestamp", now_ms),
+                     "message": e.get("message", "")}
+                    for e in matched
+                ],
+            }
+            awslogs_event = {"awslogs": {
+                "data": base64.b64encode(gzip.compress(json.dumps(payload).encode())).decode()
+            }}
+            from ministack.services import lambda_svc
+            rec = lambda_svc._functions.get(fn)
+            if rec:
+                threading.Thread(target=lambda_svc._execute_function,
+                                 args=(rec, awslogs_event), daemon=True).start()
+            else:
+                logger.warning("subscription filter %s: destination Lambda %s not found",
+                               f.get("filterName"), fn)
+        except Exception as exc:
+            logger.debug("subscription filter delivery failed: %s", exc)
 
 
 def _resolve_log_group_name(data):
@@ -441,11 +578,7 @@ def _resolve_log_group_name(data):
     if not ident:
         return None
     if ident.startswith("arn:"):
-        # arn:aws:logs:<region>:<account>:log-group:<name>[:*]
-        parts = ident.split(":log-group:", 1)
-        if len(parts) == 2:
-            tail = parts[1]
-            return tail[:-2] if tail.endswith(":*") else tail
+        return _log_group_name_from_identifier_arn(ident) or ident
     return ident
 
 
@@ -976,8 +1109,10 @@ def _make_delivery_arn(delivery_id):
 # not supply it; any value in the request is ignored. The field is
 # always server-computed so it stays stable across describe calls.
 def _derive_service_from_arn(arn):
-    parts = arn.split(":", 5)
-    return parts[2] if len(parts) >= 3 else ""
+    try:
+        return parse_arn(arn).service
+    except ArnParseError:
+        return ""
 
 
 # AWS derives deliveryDestinationType from the destination resource ARN
@@ -986,10 +1121,10 @@ def _derive_destination_type_from_arn(arn):
     """Parse arn:aws:<svc>:region:acct:<resource>/... and map to the
     deliveryDestinationType label AWS returns. Returns None if the ARN
     doesn't match a supported target service."""
-    parts = arn.split(":", 5)
-    if len(parts) < 3:
+    try:
+        svc = parse_arn(arn).service
+    except ArnParseError:
         return None
-    svc = parts[2]
     if svc == "s3":
         return "S3"
     if svc == "logs":
@@ -1000,6 +1135,61 @@ def _derive_destination_type_from_arn(arn):
 
 
 _VALID_OUTPUT_FORMATS = {"json", "plain", "w3c", "raw", "parquet"}
+_DELIVERY_SOURCE_NON_SOURCES = {"firehose", "lambda", "logs", "s3", "sns", "sqs"}
+
+
+def _validation_error(message):
+    return error_response_json("ValidationException", message, 400)
+
+
+def _delivery_source_spec(resource_arn):
+    try:
+        spec = parse_arn(resource_arn)
+    except ArnParseError:
+        return None, _validation_error("Invalid ARN provided.")
+    if spec.region and spec.region != get_region():
+        return None, _validation_error("Cross-region Delivery Source is not supported. Please use a different region.")
+    if spec.account_id and spec.account_id != get_account_id():
+        return None, _validation_error("Account id from identity does not match the resourceArn.")
+    if spec.service in _DELIVERY_SOURCE_NON_SOURCES:
+        return None, error_response_json("ResourceNotFoundException", "Cannot access provided service.", 400)
+    return spec, None
+
+
+def _delivery_destination_resource_spec(destination_resource_arn):
+    try:
+        spec = parse_arn(destination_resource_arn)
+    except ArnParseError:
+        return None, _validation_error("Invalid ARN provided.")
+    if spec.service not in ("firehose", "logs", "s3"):
+        return None, _validation_error("Delivery Destination Resource ARN is of unsupported service.")
+    if spec.service == "s3":
+        if spec.region or spec.account_id:
+            return None, _validation_error("Invalid ARN provided.")
+        return spec, None
+    if spec.region != get_region():
+        return None, _validation_error("Region from identity does not match the Destination Resource ARN.")
+    if spec.account_id != get_account_id():
+        return None, _validation_error("Account id from identity does not match the Destination Resource ARN.")
+    return spec, None
+
+
+def _delivery_destination_spec(delivery_destination_arn):
+    try:
+        spec = parse_arn(delivery_destination_arn)
+    except ArnParseError:
+        return None, _validation_error("Invalid ARN provided.")
+    if spec.service != "logs" or not spec.resource.startswith("delivery-destination:"):
+        return None, _validation_error("Action logs:CreateDelivery should have a valid resource ARN to authorize against.")
+    if spec.region != get_region():
+        return None, _validation_error("Cross-region Delivery Destination is not supported. Please use a different region.")
+    if spec.account_id != get_account_id():
+        return None, error_response_json(
+            "AccessDeniedException",
+            f"User is not authorized to perform: logs:CreateDelivery on resource: {delivery_destination_arn}",
+            400,
+        )
+    return spec, None
 
 
 def _put_delivery_source(data):
@@ -1015,7 +1205,10 @@ def _put_delivery_source(data):
 
     # AWS derives the service label from the resource ARN; ignore any
     # caller-supplied value.
-    derived_service = _derive_service_from_arn(resource_arn)
+    resource_spec, err = _delivery_source_spec(resource_arn)
+    if err:
+        return err
+    derived_service = resource_spec.service
 
     existing = _delivery_sources.get(name)
     if existing:
@@ -1091,6 +1284,9 @@ def _put_delivery_destination(data):
     # AWS derives deliveryDestinationType from the destination resource
     # ARN (s3 -> S3, logs -> CWL, firehose -> FH); callers cannot
     # override it.
+    _dest_resource_spec, err = _delivery_destination_resource_spec(destination_resource_arn)
+    if err:
+        return err
     derived_type = _derive_destination_type_from_arn(destination_resource_arn)
     if derived_type is None:
         return error_response_json(
@@ -1177,11 +1373,10 @@ def _create_delivery(data):
         return error_response_json("ValidationException", "deliverySourceName is required.", 400)
     if not dest_arn:
         return error_response_json("ValidationException", "deliveryDestinationArn is required.", 400)
-    if source_name not in _delivery_sources:
-        return error_response_json(
-            "ResourceNotFoundException",
-            f"Delivery source does not exist: {source_name}", 400,
-        )
+
+    _dest_spec, err = _delivery_destination_spec(dest_arn)
+    if err:
+        return err
 
     # AWS rejects CreateDelivery unless the destination ARN resolves to a
     # destination we've previously recorded via PutDeliveryDestination —
@@ -1194,7 +1389,12 @@ def _create_delivery(data):
     if dest_type is None:
         return error_response_json(
             "ResourceNotFoundException",
-            f"Delivery destination does not exist: {dest_arn}", 400,
+            "Requested Delivery Destination does not exist in this account.", 400,
+        )
+    if source_name not in _delivery_sources:
+        return error_response_json(
+            "ResourceNotFoundException",
+            f"Delivery source does not exist: {source_name}", 400,
         )
 
     # AWS allows at most one Delivery per (deliverySourceName,

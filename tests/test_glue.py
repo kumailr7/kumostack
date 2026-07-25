@@ -1,3 +1,5 @@
+import asyncio
+import importlib
 import io
 import json
 import os
@@ -9,6 +11,9 @@ from urllib.parse import urlparse
 
 import pytest
 from botocore.exceptions import ClientError
+
+import ministack.core.responses as _responses
+from ministack.core.router import detect_service
 
 
 def test_glue_catalog(glue):
@@ -237,6 +242,129 @@ def test_glue_tags_v2(glue):
     glue.untag_resource(ResourceArn=arn, TagsToRemove=["team"])
     resp2 = glue.get_tags(ResourceArn=arn)
     assert resp2["Tags"] == {"env": "test"}
+
+
+def _glue_json(response):
+    status, _headers, body = response
+    return status, json.loads(body)
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        "catalog",
+        "catalog/s3tablescatalog",
+        "blueprint/glue-tag-parser-blueprint",
+        "crawler/glue-tag-parser-crawler",
+        "customEntityType/glue-tag-parser-custom-entity",
+        "dataQualityRuleset/glue-tag-parser-ruleset",
+        "database/glue_tag_parser_db",
+        "database/glue_tag_parser_catalog/glue_tag_parser_db",
+        "table/glue_tag_parser_db/glue_tag_parser_table",
+        "table/glue_tag_parser_catalog/glue_tag_parser_db/glue_tag_parser_table",
+        "job/glue-tag-parser-job",
+        "connection/glue-tag-parser-connection",
+        "connectionType:glue-tag-parser-connection-type",
+        "devEndpoint/glue-tag-parser-endpoint",
+        "integration:glue-tag-parser-integration",
+        "integrationresourceproperty/glue_tag_parser_resource_type/glue_tag_parser_resource",
+        "mlTransform/glue-tag-parser-transform",
+        "registry/glue-tag-parser-registry",
+        "schema/glue-tag-parser-registry/glue-tag-parser-schema",
+        "security-configuration/glue-tag-parser-security",
+        "securityConfiguration/glue-tag-parser-security",
+        "session/glue-tag-parser-session",
+        "trigger/glue-tag-parser-trigger",
+        "usageProfile/glue-tag-parser-profile",
+        "userDefinedFunction/glue_tag_parser_db/glue_tag_parser_function",
+        "workflow/glue-tag-parser-workflow",
+    ],
+)
+def test_glue_tag_resource_accepts_supported_arn_shapes(resource):
+    from ministack.core.responses import (
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from ministack.services import glue as _glue
+
+    original_account = get_account_id()
+    original_region = get_region()
+    arn = f"arn:aws:glue:us-east-1:000000000000:{resource}"
+
+    try:
+        _glue._tags.clear()
+        set_request_account_id("000000000000")
+        set_request_region("us-east-1")
+
+        status, body = _glue_json(
+            _glue._tag_resource({"ResourceArn": arn, "TagsToAdd": {"env": "test"}})
+        )
+        assert status == 200
+        assert body == {}
+
+        status, body = _glue_json(_glue._get_tags({"ResourceArn": arn}))
+        assert status == 200
+        assert body["Tags"] == {"env": "test"}
+    finally:
+        _glue._tags.clear()
+        set_request_account_id(original_account)
+        set_request_region(original_region)
+
+
+@pytest.mark.parametrize(
+    "arn",
+    [
+        "not-an-arn",
+        "arn:notaws:glue:us-east-1:000000000000:database/glue_tag_parser_db",
+        "arn:aws:sns:us-east-1:000000000000:topic/glue-tag-parser",
+        "arn:aws:glue:us-west-2:000000000000:database/glue_tag_parser_db",
+        "arn:aws:glue:us-east-1:111111111111:database/glue_tag_parser_db",
+        "arn:aws:glue:us-east-1:000000000000:",
+        "arn:aws:glue:us-east-1:000000000000:database/",
+        "arn:aws:glue:us-east-1:000000000000:catalog/",
+        "arn:aws:glue:us-east-1:000000000000:schema/glue_tag_parser_schema",
+        "arn:aws:glue:us-east-1:000000000000:database//glue_tag_parser_db",
+        "arn:aws:glue:us-east-1:000000000000:database:glue_tag_parser_db",
+        "arn:aws:glue:us-east-1:000000000000:notAResource/glue_tag_parser_resource",
+    ],
+)
+def test_glue_tag_apis_reject_invalid_resource_arns_before_touching_tags(arn):
+    from ministack.core.responses import (
+        get_account_id,
+        get_region,
+        set_request_account_id,
+        set_request_region,
+    )
+    from ministack.services import glue as _glue
+
+    original_account = get_account_id()
+    original_region = get_region()
+    valid_arn = "arn:aws:glue:us-east-1:000000000000:database/glue_tag_parser_db"
+
+    try:
+        _glue._tags.clear()
+        set_request_account_id("000000000000")
+        set_request_region("us-east-1")
+        _glue._tag_resource({"ResourceArn": valid_arn, "TagsToAdd": {"env": "test"}})
+        before = dict(_glue._tags.items())
+
+        calls = [
+            _glue._tag_resource({"ResourceArn": arn, "TagsToAdd": {"bad": "tag"}}),
+            _glue._untag_resource({"ResourceArn": arn, "TagsToRemove": ["env"]}),
+            _glue._get_tags({"ResourceArn": arn}),
+        ]
+        for response in calls:
+            status, body = _glue_json(response)
+            assert status == 400
+            assert body["__type"] == "InvalidInputException"
+            assert "Invalid Glue resource ARN" in body["message"]
+            assert dict(_glue._tags.items()) == before
+    finally:
+        _glue._tags.clear()
+        set_request_account_id(original_account)
+        set_request_region(original_region)
 
 
 def test_glue_create_database_persists_tags(glue):
@@ -1201,8 +1329,8 @@ def test_glue_user_defined_function_crud(glue):
     got2 = glue.get_user_defined_function(DatabaseName="udf_db", FunctionName="upper_clean")["UserDefinedFunction"]
     assert got2["ClassName"] == "com.example.UpperClean2"
 
-    # Pattern is a required AWS field (botocore enforces) — "*" matches everything.
-    listed = glue.get_user_defined_functions(DatabaseName="udf_db", Pattern="*")["UserDefinedFunctions"]
+    # Pattern is a regex (RE2) over the function name in real Glue — ".*" matches all.
+    listed = glue.get_user_defined_functions(DatabaseName="udf_db", Pattern=".*")["UserDefinedFunctions"]
     names = [u["FunctionName"] for u in listed]
     assert "upper_clean" in names
 
@@ -1210,6 +1338,71 @@ def test_glue_user_defined_function_crud(glue):
     with pytest.raises(ClientError) as exc2:
         glue.get_user_defined_function(DatabaseName="udf_db", FunctionName="upper_clean")
     assert exc2.value.response["Error"]["Code"] == "EntityNotFoundException"
+
+
+def test_glue_get_user_defined_functions_pattern_is_regex(glue):
+    """GetUserDefinedFunctions treats Pattern as an RE2 regex over the function
+    name, not a glob — matches real AWS Glue (the semantics Trino's Glue connector
+    relies on when resolving a UDF via `trino__<name>__.*`)."""
+    glue.create_database(DatabaseInput={"Name": "regex_db"})
+    func_name = "trino__dw_clean_text__abc123"
+    glue.create_user_defined_function(
+        DatabaseName="regex_db",
+        FunctionInput={"FunctionName": func_name, "ClassName": "com.example.Clean"},
+    )
+
+    def names(**kwargs):
+        return [u["FunctionName"] for u in glue.get_user_defined_functions(**kwargs)["UserDefinedFunctions"]]
+
+    # `.*` matches everything (real Glue: 1; old glob behaviour: 0).
+    assert func_name in names(DatabaseName="regex_db", Pattern=".*")
+    # A Trino-style anchored regex matches the function (real Glue: 1; old glob: 0).
+    assert func_name in names(DatabaseName="regex_db", Pattern="trino__dw_clean_text__.*")
+    # A regex that cannot match returns nothing.
+    assert names(DatabaseName="regex_db", Pattern="nope__.*") == []
+
+    # A bare `*` is an INVALID regex and must raise InvalidInputException
+    # (real Glue: matched 1 under the old glob behaviour — now an error).
+    with pytest.raises(ClientError) as exc:
+        glue.get_user_defined_functions(DatabaseName="regex_db", Pattern="*")
+    assert exc.value.response["Error"]["Code"] == "InvalidInputException"
+    assert "Invalid pattern syntax" in exc.value.response["Error"]["Message"]
+
+    # DatabaseName omitted searches across all databases in the catalog.
+    assert func_name in names(Pattern="trino__.*")
+
+
+def test_glue_get_user_defined_functions_pattern_java_quote(glue):
+    r"""GetUserDefinedFunctions accepts java.util.regex `\Q...\E` literal-quote
+    spans, matching real AWS Glue (which compiles Pattern with java.util.regex).
+    Trino's Hive/Glue connector resolves a UDF with a pattern like
+    `trino__\Qdw_clean_text\E__.*`; Python `re` / Go RE2 reject `\Q` outright, so
+    ministack must translate the span before compiling."""
+    glue.create_database(DatabaseInput={"Name": "pq"})
+    func_name = "trino__dw_clean_text__abc"
+    glue.create_user_defined_function(
+        DatabaseName="pq",
+        FunctionInput={"FunctionName": func_name, "ClassName": "TrinoFunction"},
+    )
+
+    def names(**kwargs):
+        return [u["FunctionName"] for u in glue.get_user_defined_functions(**kwargs)["UserDefinedFunctions"]]
+
+    # The exact pattern Trino's Glue connector emits — must resolve the function,
+    # not raise `bad escape \Q`.
+    assert func_name in names(DatabaseName="pq", Pattern=r"trino__\Qdw_clean_text\E__.*")
+    # `.*` still matches everything (regex semantics unaffected).
+    assert func_name in names(DatabaseName="pq", Pattern=".*")
+    # The literal between \Q...\E is matched literally: regex metachars inside it
+    # do not apply, so a `.` in the quoted span only matches a literal dot.
+    glue.create_user_defined_function(
+        DatabaseName="pq",
+        FunctionInput={"FunctionName": "a.b", "ClassName": "TrinoFunction"},
+    )
+    assert names(DatabaseName="pq", Pattern=r"^\Qa.b\E$") == ["a.b"]
+    assert names(DatabaseName="pq", Pattern=r"^\Qaxb\E$") == []
+    # A trailing \Q with no closing \E quotes to end-of-string (Java semantics).
+    assert func_name in names(DatabaseName="pq", Pattern=r"trino__\Qdw_clean_text__abc")
 
 
 def test_glue_resolve_script_account_scoped(tmp_path, monkeypatch):
@@ -1220,8 +1413,8 @@ def test_glue_resolve_script_account_scoped(tmp_path, monkeypatch):
     match an object written by the canonical account-scoped writer.
     """
     from kumostack.core import responses as respmod
-    from kumostack.services import s3 as s3mod
     from kumostack.services import glue as gluemod
+    from kumostack.services import s3 as s3mod
 
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
@@ -1252,8 +1445,8 @@ def test_glue_start_job_run_resolves_script_in_worker_thread(tmp_path, monkeypat
     default account and a non-default account's script was never found.
     """
     from kumostack.core import responses as respmod
-    from kumostack.services import s3 as s3mod
     from kumostack.services import glue as gluemod
+    from kumostack.services import s3 as s3mod
 
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
@@ -1352,8 +1545,8 @@ def test_glue_resolve_script_isolated_per_account(tmp_path, monkeypatch):
     leak one tenant's on-disk objects to another.
     """
     from kumostack.core import responses as respmod
-    from kumostack.services import s3 as s3mod
     from kumostack.services import glue as gluemod
+    from kumostack.services import s3 as s3mod
 
     monkeypatch.setattr(s3mod, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(s3mod, "S3_PERSIST", True)
@@ -1378,3 +1571,482 @@ def test_glue_resolve_script_isolated_per_account(tmp_path, monkeypatch):
         assert gluemod._resolve_script(uri) is None
     finally:
         respmod._request_account_id.reset(tok_other)
+
+
+# ---- Column Statistics ----
+
+def _make_int_column_stats(column_name):
+    return {
+        "ColumnName": column_name,
+        "ColumnType": "int",
+        "AnalyzedTime": 1700000000,
+        "StatisticsData": {
+            "Type": "LONG",
+            "LongColumnStatisticsData": {
+                "MinimumValue": 1,
+                "MaximumValue": 100,
+                "NumberOfNulls": 0,
+                "NumberOfDistinctValues": 50,
+            },
+        },
+    }
+
+
+def _setup_stats_table(glue, db, table, partitioned=False):
+    glue.create_database(DatabaseInput={"Name": db})
+    table_input = {
+        "Name": table,
+        "StorageDescriptor": {
+            "Columns": [
+                {"Name": "id", "Type": "int"},
+                {"Name": "amount", "Type": "int"},
+            ],
+            "Location": f"s3://bucket/{db}/{table}/",
+            "InputFormat": "",
+            "OutputFormat": "",
+            "SerdeInfo": {},
+        },
+    }
+    if partitioned:
+        table_input["PartitionKeys"] = [{"Name": "dt", "Type": "string"}]
+    glue.create_table(DatabaseName=db, TableInput=table_input)
+
+
+def test_glue_column_statistics_for_table_crud(glue):
+    db, table = "qa-glue-colstats-tbl-db", "qa-glue-colstats-tbl"
+    _setup_stats_table(glue, db, table)
+
+    stats_id = _make_int_column_stats("id")
+    stats_amount = _make_int_column_stats("amount")
+    upd = glue.update_column_statistics_for_table(
+        DatabaseName=db, TableName=table,
+        ColumnStatisticsList=[stats_id, stats_amount],
+    )
+    assert upd.get("Errors", []) == []
+
+    got = glue.get_column_statistics_for_table(
+        DatabaseName=db, TableName=table, ColumnNames=["id", "amount"],
+    )
+    assert {s["ColumnName"] for s in got["ColumnStatisticsList"]} == {"id", "amount"}
+    assert got.get("Errors", []) == []
+
+    missing = glue.get_column_statistics_for_table(
+        DatabaseName=db, TableName=table, ColumnNames=["id", "missing"],
+    )
+    assert [s["ColumnName"] for s in missing["ColumnStatisticsList"]] == ["id"]
+    assert missing["Errors"][0]["ColumnName"] == "missing"
+
+    glue.delete_column_statistics_for_table(
+        DatabaseName=db, TableName=table, ColumnName="id",
+    )
+    after = glue.get_column_statistics_for_table(
+        DatabaseName=db, TableName=table, ColumnNames=["id", "amount"],
+    )
+    assert [s["ColumnName"] for s in after["ColumnStatisticsList"]] == ["amount"]
+
+
+def test_glue_column_statistics_for_table_missing_table(glue):
+    with pytest.raises(ClientError) as exc:
+        glue.get_column_statistics_for_table(
+            DatabaseName="nope-db", TableName="nope-tbl", ColumnNames=["id"],
+        )
+    assert exc.value.response["Error"]["Code"] == "EntityNotFoundException"
+
+
+def test_glue_delete_column_statistics_for_table_unknown_column_is_idempotent(glue):
+    db, table = "qa-glue-colstats-tbl-del-db", "qa-glue-colstats-tbl-del"
+    _setup_stats_table(glue, db, table)
+    # Real AWS Glue returns 200 / empty body when deleting stats for a column
+    # that never had any — Delete* operations are idempotent.
+    glue.delete_column_statistics_for_table(
+        DatabaseName=db, TableName=table, ColumnName="never-set",
+    )
+
+
+def test_glue_column_statistics_cleared_on_table_delete(glue):
+    db, table = "qa-glue-colstats-cleanup-db", "qa-glue-colstats-cleanup"
+    _setup_stats_table(glue, db, table)
+    glue.update_column_statistics_for_table(
+        DatabaseName=db, TableName=table,
+        ColumnStatisticsList=[_make_int_column_stats("id")],
+    )
+    glue.delete_table(DatabaseName=db, Name=table)
+    # Re-create the table with the same name; stats from the previous
+    # incarnation must not leak through.
+    glue.create_table(
+        DatabaseName=db,
+        TableInput={
+            "Name": table,
+            "StorageDescriptor": {
+                "Columns": [{"Name": "id", "Type": "int"}],
+                "Location": f"s3://bucket/{db}/{table}/",
+                "InputFormat": "", "OutputFormat": "", "SerdeInfo": {},
+            },
+        },
+    )
+    got = glue.get_column_statistics_for_table(
+        DatabaseName=db, TableName=table, ColumnNames=["id"],
+    )
+    assert got["ColumnStatisticsList"] == []
+    assert got["Errors"][0]["ColumnName"] == "id"
+
+
+def test_glue_column_statistics_for_partition_crud(glue):
+    db, table = "qa-glue-colstats-part-db", "qa-glue-colstats-part"
+    _setup_stats_table(glue, db, table, partitioned=True)
+    glue.create_partition(
+        DatabaseName=db, TableName=table,
+        PartitionInput={
+            "Values": ["2024-01-01"],
+            "StorageDescriptor": {
+                "Columns": [], "Location": f"s3://bucket/{db}/{table}/dt=2024-01-01",
+                "InputFormat": "", "OutputFormat": "", "SerdeInfo": {},
+            },
+        },
+    )
+
+    stats_id = _make_int_column_stats("id")
+    stats_amount = _make_int_column_stats("amount")
+    upd = glue.update_column_statistics_for_partition(
+        DatabaseName=db, TableName=table,
+        PartitionValues=["2024-01-01"],
+        ColumnStatisticsList=[stats_id, stats_amount],
+    )
+    assert upd.get("Errors", []) == []
+
+    got = glue.get_column_statistics_for_partition(
+        DatabaseName=db, TableName=table,
+        PartitionValues=["2024-01-01"], ColumnNames=["id", "amount"],
+    )
+    assert {s["ColumnName"] for s in got["ColumnStatisticsList"]} == {"id", "amount"}
+
+    glue.delete_column_statistics_for_partition(
+        DatabaseName=db, TableName=table,
+        PartitionValues=["2024-01-01"], ColumnName="amount",
+    )
+    after = glue.get_column_statistics_for_partition(
+        DatabaseName=db, TableName=table,
+        PartitionValues=["2024-01-01"], ColumnNames=["id", "amount"],
+    )
+    assert [s["ColumnName"] for s in after["ColumnStatisticsList"]] == ["id"]
+    assert after["Errors"][0]["ColumnName"] == "amount"
+
+
+def test_glue_column_statistics_for_partition_missing_partition(glue):
+    db, table = "qa-glue-colstats-nopart-db", "qa-glue-colstats-nopart"
+    _setup_stats_table(glue, db, table, partitioned=True)
+    with pytest.raises(ClientError) as exc:
+        glue.update_column_statistics_for_partition(
+            DatabaseName=db, TableName=table,
+            PartitionValues=["never"],
+            ColumnStatisticsList=[_make_int_column_stats("id")],
+        )
+    assert exc.value.response["Error"]["Code"] == "EntityNotFoundException"
+
+
+# ---------------------------------------------------------------------------
+# Iceberg REST catalog surface (in-process routing/config/load tests).
+# Folded from test_glue_iceberg_rest.py.
+# ---------------------------------------------------------------------------
+
+
+def _svc(name):
+    """Resolve a service module through sys.modules at call time.
+
+    NOT a module-level `from ministack.services import glue, s3` — the
+    persistence regression tests cold-reimport service modules
+    (`sys.modules.pop` + fresh import), so an import-time binding here can
+    end up pointing at a stale module object while glue.py's own lazy
+    `from ministack.services import s3` resolves the fresh one. State
+    seeded on the stale object is then invisible to production code (the
+    exact failure mode this replaced: 404 where 200 was expected, only
+    when test_persistence.py ran first in the same worker)."""
+    return importlib.import_module(f"ministack.services.{name}")
+
+
+def _call(method, path, query_params=None):
+    status, headers, body = asyncio.run(
+        _svc("glue").handle_request(method, path, {}, b"", query_params or {})
+    )
+    payload = json.loads(body) if body else None
+    return status, headers, payload
+
+
+@pytest.fixture(autouse=True)
+def _reset():
+    # Pin the per-request account so AccountScopedDict lookups land in the
+    # same bucket whether the caller is the test or production code.
+    _responses._request_account_id.set("000000000000")
+    _responses._request_region.set("us-east-1")
+    _svc("glue").reset()
+    _svc("s3")._buckets.clear()
+    yield
+    _svc("glue").reset()
+    _svc("s3")._buckets.clear()
+
+
+# ── Routing ──────────────────────────────────────────────────
+
+
+def test_glue_signed_iceberg_request_routes_to_glue_service():
+    """DuckDB signs Iceberg REST requests with the `glue` credential scope.
+    The router's existing scope dispatch must land them on the glue module —
+    no path-based special case required."""
+    headers = {
+        "authorization": (
+            "AWS4-HMAC-SHA256 Credential=test/20260610/us-east-1/glue/aws4_request, "
+            "SignedHeaders=host, Signature=abc"
+        )
+    }
+    assert detect_service("GET", "/iceberg/v1/config", headers, {}) == "glue"
+
+
+def test_s3tables_signed_iceberg_request_still_routes_to_s3tables():
+    """The S3 Tables Iceberg REST surface is a distinct AWS service; signing
+    as `s3tables` must keep landing on services/s3tables.py."""
+    headers = {
+        "authorization": (
+            "AWS4-HMAC-SHA256 Credential=test/20260610/us-east-1/s3tables/aws4_request, "
+            "SignedHeaders=host, Signature=abc"
+        )
+    }
+    assert detect_service("GET", "/iceberg/v1/config", headers, {}) == "s3tables"
+
+
+# ── /iceberg/v1/config ───────────────────────────────────────
+
+
+def test_config_returns_glue_catalogs_prefix_and_s3_overrides():
+    status, headers, payload = _call(
+        "GET", "/iceberg/v1/config", {"warehouse": ["000000000000"]}
+    )
+    assert status == 200
+    assert headers["Content-Type"] == "application/json"
+    # Glue's prefix shape — subsequent client URLs become
+    # /iceberg/v1/catalogs/000000000000/namespaces/...
+    assert payload["defaults"]["prefix"] == "catalogs/000000000000"
+    overrides = payload["overrides"]
+    assert overrides["s3.endpoint"].startswith("http://")
+    assert overrides["s3.path-style-access"] == "true"
+    assert "s3.region" in overrides
+    # Fixed creds, never echoed from the host env — emitting ambient
+    # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY into a response body would
+    # leak real credentials from a developer's shell.
+    assert overrides["s3.access-key-id"] == "test"
+    assert overrides["s3.secret-access-key"] == "test"
+
+
+def test_config_without_warehouse_returns_empty_defaults():
+    _, _, payload = _call("GET", "/iceberg/v1/config")
+    assert payload["defaults"] == {}
+    assert "overrides" in payload
+
+
+# ── Namespaces ───────────────────────────────────────────────
+
+
+def test_list_namespaces_returns_glue_databases():
+    _svc("glue")._databases["db_a"] = {"Name": "db_a"}
+    _svc("glue")._databases["db_b"] = {"Name": "db_b"}
+    _, _, payload = _call("GET", "/iceberg/v1/catalogs/000000000000/namespaces")
+    assert payload["namespaces"] == [["db_a"], ["db_b"]]
+
+
+def test_get_namespace_404s_when_database_missing():
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/nope"
+    )
+    assert status == 404
+    assert payload["error"]["type"] == "NoSuchNamespaceException"
+
+
+def test_get_namespace_returns_shape_when_database_exists():
+    _svc("glue")._databases["db"] = {"Name": "db"}
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/db"
+    )
+    assert status == 200
+    assert payload == {"namespace": ["db"], "properties": {}}
+
+
+# ── ListTables ───────────────────────────────────────────────
+
+
+def test_list_tables_404s_when_namespace_missing():
+    """Real Iceberg REST returns NoSuchNamespaceException for ListTables on
+    an unknown namespace — not an empty 200 list."""
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/nope/tables"
+    )
+    assert status == 404
+    assert payload["error"]["type"] == "NoSuchNamespaceException"
+
+
+def test_list_tables_hides_non_iceberg_glue_tables():
+    """A Glue table without `Parameters['metadata_location']` is a plain
+    Hive/CSV/Parquet table and must not appear on the Iceberg surface."""
+    _svc("glue")._databases["db"] = {"Name": "db"}
+    _svc("glue")._tables["db/iceberg_table"] = {
+        "Name": "iceberg_table",
+        "DatabaseName": "db",
+        "Parameters": {"metadata_location": "s3://lake/t/metadata/v0.metadata.json"},
+    }
+    _svc("glue")._tables["db/csv_table"] = {
+        "Name": "csv_table", "DatabaseName": "db", "Parameters": {},
+    }
+    _, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/db/tables"
+    )
+    assert [t["name"] for t in payload["identifiers"]] == ["iceberg_table"]
+    assert payload["identifiers"][0]["namespace"] == ["db"]
+
+
+# ── LoadTable hot path ───────────────────────────────────────
+
+
+_META_JSON = {
+    "format-version": 2,
+    "table-uuid": "11111111-2222-3333-4444-555555555555",
+    "location": "s3://lake/dim_application",
+    "schemas": [{"schema-id": 0, "type": "struct", "fields": []}],
+    "current-schema-id": 0,
+    "current-snapshot-id": 42,
+    "properties": {},
+}
+
+
+def _seed_glue_table_with_metadata():
+    key = "dim_application/metadata/00003-deadbeef.metadata.json"
+    _svc("s3")._buckets["lake"] = {"objects": {key: {"body": json.dumps(_META_JSON).encode()}}}
+    _svc("glue")._databases["db"] = {"Name": "db"}
+    _svc("glue")._tables["db/dim_application"] = {
+        "Name": "dim_application",
+        "DatabaseName": "db",
+        "Parameters": {"metadata_location": f"s3://lake/{key}"},
+    }
+
+
+def test_load_table_inlines_metadata_json_verbatim():
+    _seed_glue_table_with_metadata()
+    status, _, payload = _call(
+        "GET",
+        "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/dim_application",
+    )
+    assert status == 200
+    assert payload["metadata-location"].endswith("/00003-deadbeef.metadata.json")
+    assert payload["metadata"] == _META_JSON  # passthrough — no transformation
+    assert "s3.endpoint" in payload["config"]
+
+
+def test_load_table_404s_when_metadata_object_missing():
+    """Glue table exists and points at an S3 URI, but the metadata.json
+    object isn't there. 200-with-empty-metadata would make DuckDB treat it
+    as a real-but-empty table and silently return wrong results."""
+    _svc("glue")._databases["db"] = {"Name": "db"}
+    _svc("glue")._tables["db/orphan"] = {
+        "Name": "orphan",
+        "DatabaseName": "db",
+        "Parameters": {"metadata_location": "s3://lake/orphan/metadata/v0.metadata.json"},
+    }
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/orphan"
+    )
+    assert status == 404
+    assert payload["error"]["type"] == "NoSuchTableException"
+    assert payload["error"]["code"] == 404
+
+
+def test_load_table_404s_when_metadata_json_unparseable():
+    key = "broken/metadata/v0.metadata.json"
+    _svc("s3")._buckets["lake"] = {"objects": {key: {"body": b"<<not json>>"}}}
+    _svc("glue")._databases["db"] = {"Name": "db"}
+    _svc("glue")._tables["db/broken"] = {
+        "Name": "broken",
+        "DatabaseName": "db",
+        "Parameters": {"metadata_location": f"s3://lake/{key}"},
+    }
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/broken"
+    )
+    assert status == 404
+    assert payload["error"]["type"] == "NoSuchTableException"
+
+
+def test_load_table_404s_on_unknown_table():
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/missing"
+    )
+    assert status == 404
+    assert payload["error"]["type"] == "NoSuchTableException"
+
+
+def test_load_table_404s_on_non_iceberg_table():
+    _svc("glue")._databases["db"] = {"Name": "db"}
+    _svc("glue")._tables["db/csv"] = {"Name": "csv", "DatabaseName": "db", "Parameters": {}}
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/csv"
+    )
+    assert status == 404
+
+
+# ── HEAD / TableExists ───────────────────────────────────────
+
+
+def test_head_returns_200_for_iceberg_table():
+    _seed_glue_table_with_metadata()
+    status, _, _ = _call(
+        "HEAD",
+        "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/dim_application",
+    )
+    assert status == 200
+
+
+def test_head_returns_404_for_non_iceberg_table():
+    _svc("glue")._databases["db"] = {"Name": "db"}
+    _svc("glue")._tables["db/csv"] = {"Name": "csv", "DatabaseName": "db", "Parameters": {}}
+    status, _, _ = _call(
+        "HEAD", "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/csv"
+    )
+    assert status == 404
+
+
+# ── Fall-throughs ────────────────────────────────────────────
+
+
+def test_post_to_table_returns_501_unsupported():
+    """Read-only surface: writes get an explicit 501 envelope instead of a
+    silent success that never persisted anything."""
+    status, _, payload = _call(
+        "POST", "/iceberg/v1/catalogs/000000000000/namespaces/db/tables/t"
+    )
+    assert status == 501
+    assert payload["error"]["type"] == "UnsupportedOperationException"
+
+
+def test_non_catalogs_prefix_returns_501():
+    """Bare-warehouse prefixes (`/v1/{warehouse}/namespaces`) are the
+    S3 Tables shape, not Glue's — reject rather than guess."""
+    status, _, payload = _call(
+        "GET", "/iceberg/v1/000000000000/namespaces"
+    )
+    assert status == 501
+
+
+def test_unknown_version_prefix_404s():
+    status, _, _ = _call("GET", "/iceberg/v2/config")
+    assert status == 404
+
+
+def test_glue_json_rpc_surface_unaffected():
+    """The X-Amz-Target JSON RPC surface must keep working alongside the
+    Iceberg branch — same module, two protocols."""
+    status, _, body = asyncio.run(
+        _svc("glue").handle_request(
+            "POST", "/",
+            {"x-amz-target": "AWSGlue.CreateDatabase"},
+            json.dumps({"DatabaseInput": {"Name": "rpc_db"}}).encode(),
+            {},
+        )
+    )
+    assert status == 200
+    assert "rpc_db" in _svc("glue")._databases

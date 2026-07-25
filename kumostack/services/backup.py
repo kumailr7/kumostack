@@ -20,6 +20,7 @@ import json
 import logging
 import time
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import load_state
 from kumostack.core.responses import AccountScopedDict, get_account_id, get_region, new_uuid
 
@@ -478,12 +479,22 @@ def _list_jobs(query):
 
 def _resolve_resource(arn):
     """Return the mutable tag dict for a supported backup ARN, or None."""
-    if ":backup-vault:" in arn:
-        name = arn.split(":")[-1]
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError as exc:
+        raise ValueError("ResourceArn must be a Backup ARN.") from exc
+
+    if spec.service != "backup":
+        raise ValueError("ResourceArn must be a Backup ARN.")
+    if spec.region != get_region() or spec.account_id != get_account_id():
+        return None
+
+    if spec.resource.startswith("backup-vault:"):
+        name = spec.resource.removeprefix("backup-vault:")
         v = _vaults.get(name)
         return v["BackupVaultTags"] if v is not None else None
-    if ":backup-plan:" in arn:
-        pid = arn.split(":")[-1]
+    if spec.resource.startswith("backup-plan:"):
+        pid = spec.resource.removeprefix("backup-plan:")
         p = _plans.get(pid)
         return p["Tags"] if p is not None else None
     return None
@@ -491,7 +502,10 @@ def _resolve_resource(arn):
 
 def _tag_resource(arn, body):
     tags = body.get("Tags", {})
-    tag_dict = _resolve_resource(arn)
+    try:
+        tag_dict = _resolve_resource(arn)
+    except ValueError as exc:
+        return _err("InvalidParameterValueException", str(exc), 400)
     if tag_dict is None:
         return _err("ResourceNotFoundException", f"Resource '{arn}' not found.", 404)
     tag_dict.update(tags)
@@ -500,7 +514,10 @@ def _tag_resource(arn, body):
 
 def _untag_resource(arn, body):
     keys = body.get("TagKeyList", [])
-    tag_dict = _resolve_resource(arn)
+    try:
+        tag_dict = _resolve_resource(arn)
+    except ValueError as exc:
+        return _err("InvalidParameterValueException", str(exc), 400)
     if tag_dict is None:
         return _err("ResourceNotFoundException", f"Resource '{arn}' not found.", 404)
     for k in keys:
@@ -509,7 +526,10 @@ def _untag_resource(arn, body):
 
 
 def _list_tags(arn):
-    tag_dict = _resolve_resource(arn)
+    try:
+        tag_dict = _resolve_resource(arn)
+    except ValueError as exc:
+        return _err("InvalidParameterValueException", str(exc), 400)
     if tag_dict is None:
         return _err("ResourceNotFoundException", f"Resource '{arn}' not found.", 404)
     return _ok({"Tags": dict(tag_dict)})

@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.parse
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import load_state
 from kumostack.core.responses import (
     AccountScopedDict,
@@ -70,8 +71,20 @@ _oidc_keypair = None                  # (private_key, jwk_dict, kid)
 
 
 def _ministack_issuer_base():
+    """Base URL ministack advertises as the cluster's OIDC issuer.
+
+    The scheme tracks the gateway's actual protocol: the discovery/JWKS
+    documents are served by ministack's own gateway, so the issuer must say
+    https only when the gateway is serving TLS (``USE_SSL=1``) and http
+    otherwise. Advertising https on a plain-http gateway would make any client
+    that fetches the discovery document fail. Real EKS issuers are always
+    https, so run with ``USE_SSL=1`` for IRSA terraform, whose
+    ``aws_iam_openid_connect_provider`` client-side rejects non-https urls.
+    """
+    from ministack.core import tls as _tls
+    scheme = "https" if _tls.use_ssl_enabled() else "http"
     port = os.environ.get("GATEWAY_PORT", "4566")
-    return f"http://{_MINISTACK_HOST}:{port}/oidc"
+    return f"{scheme}://{_MINISTACK_HOST}:{port}/oidc"
 
 
 def _new_oidc_id():
@@ -156,14 +169,22 @@ def restore_state(data):
     _idp_configs.update(data.get("idp_configs", {}))
     if "port_counter" in data:
         _port_counter[0] = data["port_counter"]
-    # Restored clusters have no running k3s container — keep ACTIVE with mock endpoint
-    if isinstance(_clusters, AccountScopedDict):
-        for key in list(_clusters._data):
-            c = _clusters._data[key]
-            c["_docker_id"] = None
-    else:
-        for c in _clusters.values():
-            c["_docker_id"] = None
+    # Restored clusters have no running k3s container. Drop the stale docker id and
+    # normalize the endpoint to the stable host form (https://{MINISTACK_HOST}:{port},
+    # default localhost). The cluster is still reported ACTIVE, so the endpoint must
+    # stay non-empty: an ACTIVE cluster with an empty endpoint is a contradictory
+    # shape that breaks `aws eks update-kubeconfig` and Terraform drift detection.
+    # Any container IP persisted from the previous run is now dead, so the configured
+    # ministack host is the only address worth reporting after a restart.
+    # to_dict() yields every account's live record dict so the rewrite is applied
+    # across all tenants — the account-scoped views (values()/items()) would see
+    # only the default account because no request scope is set at import time.
+    clusters = _clusters.to_dict().values() if isinstance(_clusters, AccountScopedDict) else _clusters.values()
+    for c in clusters:
+        c["_docker_id"] = None
+        port = c.get("_port")
+        if port:
+            c["endpoint"] = f"https://{_MINISTACK_HOST}:{port}"
 
 
 
@@ -251,16 +272,15 @@ def _get_kumostack_network(client):
         return None
 
 
-def _wait_for_port(host, port, timeout=30):
-    import socket
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=2):
-                return True
-        except (OSError, ConnectionRefusedError):
-            time.sleep(0.5)
-    return False
+def _cluster_endpoint(port):
+    """The endpoint DescribeCluster advertises for the kube-apiserver — the
+    host-published port ``https://{MINISTACK_HOST}:{port}``. The k3s container
+    publishes 6443 to this host port (``ports={"6443/tcp": port}``), so it is
+    reachable from the host (``aws eks update-kubeconfig`` + kubectl) and from
+    containers that can route to ``MINISTACK_HOST``. The same value is used on
+    every path (create, restart, restore).
+    """
+    return f"https://{_MINISTACK_HOST}:{port}"
 
 
 def _collect_oidc_state(cluster_name: str):
@@ -355,8 +375,94 @@ def _k3s_run_kwargs(name: str, port: int, ms_network: str | None = None, oidc_ar
     )
     if ms_network:
         run_kwargs["network"] = ms_network
+    # host-gateway lets the k3s node reach a host-run MiniStack (the ECR
+    # registry mirror, #1054) even on Linux Docker where the name doesn't
+    # resolve natively. Harmless when a shared network is used instead.
+    run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
 
     return run_kwargs
+
+
+def _ecr_registry_hosts(cluster: dict) -> list[str]:
+    """The local ECR registry hostnames this cluster's nodes should resolve
+    to MiniStack — derived from the cluster ARN (not contextvars) so the
+    restore/restart paths, which run outside a request context, get the
+    same answer as create."""
+    try:
+        spec = parse_arn(cluster.get("arn", ""))
+        return [f"{spec.account_id}.dkr.ecr.{spec.region}.amazonaws.com"]
+    except ArnParseError:
+        return []
+
+
+def _k3s_registries_yaml(client, ms_network: str | None, ecr_hosts: list[str]) -> bytes | None:
+    """Build /etc/rancher/k3s/registries.yaml mapping this cluster's local
+    ECR registry hostnames to the MiniStack gateway, so pods with images
+    like ``<account>.dkr.ecr.<region>.amazonaws.com/repo:tag`` pull from
+    local ECR (#1054). ECR's Docker Registry V2 endpoints serve anonymously,
+    so no auth config is needed.
+
+    The mirror endpoint must be reachable from INSIDE the k3s container:
+    - shared user-defined network: MiniStack's own IP on that network
+      (``host-gateway`` resolves to docker0, which iptables typically
+      blocks from a sibling bridge — same reasoning as the ECS metadata
+      server wiring)
+    - otherwise: ``host.docker.internal``, resolvable through the
+      host-gateway extra_host added in ``_k3s_run_kwargs``
+    """
+    if not ecr_hosts:
+        return None
+    port = os.environ.get("GATEWAY_PORT") or os.environ.get("EDGE_PORT") or "4566"
+    host = None
+    if ms_network and client is not None:
+        try:
+            self_container = client.containers.get(os.environ.get("HOSTNAME", ""))
+            nets = self_container.attrs["NetworkSettings"]["Networks"]
+            host = (nets.get(ms_network) or {}).get("IPAddress") or None
+        except Exception:
+            host = None
+    if not host:
+        host = "host.docker.internal"
+    endpoint = f"http://{host}:{port}"
+    lines = ["mirrors:"]
+    for reg in ecr_hosts:
+        lines.append(f'  "{reg}":')
+        lines.append("    endpoint:")
+        lines.append(f'      - "{endpoint}"')
+    return ("\n".join(lines) + "\n").encode()
+
+
+def _start_k3s_container(client, run_kwargs: dict, registries_yaml: bytes | None):
+    """Start the k3s container, injecting registries.yaml before boot.
+
+    k3s reads /etc/rancher/k3s/registries.yaml once at startup, so the file
+    must exist before the entrypoint runs: create the container stopped,
+    upload the file with put_archive, then start it."""
+    if not registries_yaml:
+        return client.containers.run(**run_kwargs)
+    import io
+    import tarfile
+
+    create_kwargs = dict(run_kwargs)
+    create_kwargs.pop("detach", None)  # run()-only kwarg
+    try:
+        container = client.containers.create(**create_kwargs)
+    except Exception:
+        # create() does not auto-pull missing images the way run() does.
+        client.images.pull(create_kwargs["image"])
+        container = client.containers.create(**create_kwargs)
+    try:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("etc/rancher/k3s/registries.yaml")
+            info.size = len(registries_yaml)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(registries_yaml))
+        container.put_archive("/", buf.getvalue())
+    except Exception as e:
+        logger.warning("EKS: could not inject ECR registries.yaml: %s", e)
+    container.start()
+    return container
 
 
 def _stop_all_k3s():
@@ -415,7 +521,7 @@ def _create_cluster(body):
 
     # Build cluster record immediately (status CREATING) and return fast.
     # k3s startup happens in background thread to avoid blocking the event loop.
-    endpoint = f"https://localhost:{port}"
+    endpoint = f"https://{_MINISTACK_HOST}:{port}"
     cluster = {
         "name": name,
         "arn": arn,
@@ -463,37 +569,24 @@ def _create_cluster(body):
             cluster["status"] = "ACTIVE"
             logger.info("EKS: Docker unavailable — cluster %s created without k3s backend", name)
             return
+        ms_network = None
         try:
             ms_network = _get_kumostack_network(client)
             run_kwargs = _k3s_run_kwargs(name=name, port=port, ms_network=ms_network, oidc_args=oidc_args, node_labels=node_labels)
 
-            container = client.containers.run(**run_kwargs)
+            registries_yaml = _k3s_registries_yaml(client, ms_network, _ecr_registry_hosts(cluster))
+            container = _start_k3s_container(client, run_kwargs, registries_yaml)
             cluster["_docker_id"] = container.id
 
-            ep = ""
-            if ms_network:
-                container.reload()
-                networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-                container_ip = networks.get(ms_network, {}).get("IPAddress", "")
-                if container_ip and _wait_for_port(container_ip, 6443):
-                    ep = f"https://{container_ip}:6443"
-                    logger.info("EKS: k3s for %s ready at %s (network %s)", name, ep, ms_network)
-            if not ep:
-                if _wait_for_port("127.0.0.1", port):
-                    ep = f"https://localhost:{port}"
-                    logger.info("EKS: k3s for %s ready at %s", name, ep)
-                else:
-                    logger.warning("EKS: k3s for %s did not become ready on port %d", name, port)
-                    ep = f"https://localhost:{port}"
-
-            cluster["endpoint"] = ep
+            cluster["endpoint"] = _cluster_endpoint(port)
             cluster["certificateAuthority"]["data"] = _extract_ca_cert(container)
             cluster["status"] = "ACTIVE"
         except Exception as e:
             logger.warning("EKS: failed to start k3s for %s — falling back to mock: %s", name, e)
             cluster["status"] = "ACTIVE"
             cluster["certificateAuthority"]["data"] = base64.b64encode(b"MOCK-CA-CERTIFICATE").decode()
-            cluster["endpoint"] = f"https://localhost:{port}"
+            # No container came up — advertise the host-published endpoint.
+            cluster["endpoint"] = f"https://{_MINISTACK_HOST}:{port}"
 
     threading.Thread(target=_bg_start, daemon=True, name=f"eks-{name}").start()
     return _json_resp(200, {"cluster": _sanitize(cluster)})
@@ -967,7 +1060,7 @@ def _restart_k3s(cluster_name, oidc_args=None, idp_cfg_refs=None):
             cfg["status"] = "ACTIVE"
 
     def _bg_restart():
-        port = cluster["_port"]
+        ms_network = None
         try:
             docker_id = cluster.get("_docker_id")
             if docker_id:
@@ -980,34 +1073,20 @@ def _restart_k3s(cluster_name, oidc_args=None, idp_cfg_refs=None):
                 cluster["_docker_id"] = None
 
             ms_network = _get_kumostack_network(client)
-            run_kwargs = _k3s_run_kwargs(name=cluster_name, port=port, ms_network=ms_network, oidc_args=oidc_args, node_labels=node_labels)
+            run_kwargs = _k3s_run_kwargs(name=cluster_name, port=cluster["_port"], ms_network=ms_network, oidc_args=oidc_args, node_labels=node_labels)
 
-            container = client.containers.run(**run_kwargs)
+            registries_yaml = _k3s_registries_yaml(client, ms_network, _ecr_registry_hosts(cluster))
+            container = _start_k3s_container(client, run_kwargs, registries_yaml)
             cluster["_docker_id"] = container.id
 
-            ep = ""
-            if ms_network:
-                container.reload()
-                networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-                container_ip = networks.get(ms_network, {}).get("IPAddress", "")
-                if container_ip and _wait_for_port(container_ip, 6443):
-                    ep = f"https://{container_ip}:6443"
-                    logger.info("EKS: k3s for %s restarted and ready at %s (network %s)", cluster_name, ep, ms_network)
-            if not ep:
-                if _wait_for_port("127.0.0.1", port):
-                    ep = f"https://localhost:{port}"
-                    logger.info("EKS: k3s for %s restarted and ready at %s", cluster_name, ep)
-                else:
-                    logger.warning("EKS: k3s for %s restarted but did not become ready on port %d", cluster_name, port)
-                    ep = f"https://localhost:{port}"
-
-            cluster["endpoint"] = ep
+            cluster["endpoint"] = _cluster_endpoint(cluster["_port"])
             cluster["certificateAuthority"]["data"] = _extract_ca_cert(container)
             _mark_idp_active()
         except Exception as e:
             logger.warning("EKS: failed to restart k3s for %s — falling back to mock: %s", cluster_name, e)
             cluster["certificateAuthority"]["data"] = base64.b64encode(b"MOCK-CA-CERTIFICATE").decode()
-            cluster["endpoint"] = f"https://localhost:{port}"
+            # No container came up — advertise the host-published endpoint.
+            cluster["endpoint"] = f"https://{_MINISTACK_HOST}:{cluster['_port']}"
             _mark_idp_active()
 
     threading.Thread(target=_bg_restart, daemon=True, name=f"eks-restart-{cluster_name}").start()
@@ -1175,7 +1254,78 @@ def _oidc_jwks():
 # Tags
 # ---------------------------------------------------------------------------
 
+def _invalid_tag_resource_arn(arn):
+    return _error(400, "InvalidParameterException", f"Invalid resourceArn: {arn}")
+
+
+def _tag_resource_not_found(arn):
+    return _error(404, "ResourceNotFoundException", f"No resource found for ARN: {arn}.")
+
+
+def _resolve_tag_resource_arn(arn):
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return None, _invalid_tag_resource_arn(arn)
+
+    if (
+        spec.partition != "aws"
+        or spec.service != "eks"
+        or spec.account_id != get_account_id()
+        or spec.region != get_region()
+    ):
+        return None, _invalid_tag_resource_arn(arn)
+
+    parts = spec.resource.split("/")
+    resource_type = parts[0] if parts else ""
+
+    if resource_type == "cluster":
+        if len(parts) != 2 or not parts[1]:
+            return None, _invalid_tag_resource_arn(arn)
+        cluster = _clusters.get(parts[1])
+        if not cluster or cluster.get("arn") != arn:
+            return None, _tag_resource_not_found(arn)
+        return cluster["arn"], None
+
+    if resource_type == "nodegroup":
+        if len(parts) != 4 or not all(parts[1:]):
+            return None, _invalid_tag_resource_arn(arn)
+        nodegroup = _nodegroups.get(f"{parts[1]}/{parts[2]}")
+        if not nodegroup or nodegroup.get("nodegroupArn") != arn:
+            return None, _tag_resource_not_found(arn)
+        return nodegroup["nodegroupArn"], None
+
+    if resource_type == "addon":
+        if len(parts) != 4 or not all(parts[1:]):
+            return None, _invalid_tag_resource_arn(arn)
+        addon = _addons.get(f"{parts[1]}/{parts[2]}")
+        if not addon or addon.get("addonArn") != arn:
+            return None, _tag_resource_not_found(arn)
+        return addon["addonArn"], None
+
+    if resource_type == "access-entry":
+        if len(parts) != 3 or not all(parts[1:]):
+            return None, _invalid_tag_resource_arn(arn)
+        for entry in _access_entries.values():
+            if entry.get("clusterName") == parts[1] and entry.get("accessEntryArn") == arn:
+                return entry["accessEntryArn"], None
+        return None, _tag_resource_not_found(arn)
+
+    if resource_type == "identityproviderconfig":
+        if len(parts) != 5 or parts[2] != "oidc" or not all(parts[1:]):
+            return None, _invalid_tag_resource_arn(arn)
+        cfg = _idp_configs.get(f"{parts[1]}\x00{parts[3]}")
+        if not cfg or cfg.get("arn") != arn:
+            return None, _tag_resource_not_found(arn)
+        return cfg["arn"], None
+
+    return None, _invalid_tag_resource_arn(arn)
+
+
 def _tag_resource(arn, body):
+    arn, err = _resolve_tag_resource_arn(arn)
+    if err:
+        return err
     tags = body.get("tags", {})
     existing = _tags.get(arn, {})
     existing.update(tags)
@@ -1184,6 +1334,9 @@ def _tag_resource(arn, body):
 
 
 def _untag_resource(arn, query):
+    arn, err = _resolve_tag_resource_arn(arn)
+    if err:
+        return err
     keys = query.get("tagKeys", [])
     if isinstance(keys, str):
         keys = [keys]
@@ -1198,6 +1351,9 @@ def _untag_resource(arn, query):
 
 
 def _list_tags(arn):
+    arn, err = _resolve_tag_resource_arn(arn)
+    if err:
+        return err
     return _json_resp(200, {"tags": _tags.get(arn, {})})
 
 
@@ -1372,7 +1528,7 @@ async def handle_request(method, path, headers, body_bytes, query_params):
 
     # Tags: /tags/{arn+}
     if path.startswith("/tags/"):
-        arn = path[6:]
+        arn = urllib.parse.unquote(path[6:])
         if method == "GET":
             return _list_tags(arn)
         if method == "POST":

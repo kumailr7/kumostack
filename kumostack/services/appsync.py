@@ -27,14 +27,17 @@ import os
 import re
 import time
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.persistence import PERSIST_STATE, load_state
 from kumostack.core.responses import (
+    AccountRegionScopedDict,
     AccountScopedDict,
     error_response_json,
     get_account_id,
     get_region,
     json_response,
     new_uuid,
+    set_request_region,
 )
 
 logger = logging.getLogger("appsync")
@@ -45,11 +48,11 @@ REGION = os.environ.get("MINISTACK_REGION", "us-east-1")
 # In-memory state
 # ---------------------------------------------------------------------------
 
-_apis = AccountScopedDict()            # apiId -> api record
-_api_keys = AccountScopedDict()        # apiId -> {keyId -> key record}
-_data_sources = AccountScopedDict()    # apiId -> {name -> data source record}
-_resolvers = AccountScopedDict()       # apiId -> {typeName -> {fieldName -> resolver record}}
-_types = AccountScopedDict()           # apiId -> {typeName -> type record}
+_apis = AccountRegionScopedDict()            # apiId -> api record
+_api_keys = AccountRegionScopedDict()        # apiId -> {keyId -> key record}
+_data_sources = AccountRegionScopedDict()    # apiId -> {name -> data source record}
+_resolvers = AccountRegionScopedDict()       # apiId -> {typeName -> {fieldName -> resolver record}}
+_types = AccountRegionScopedDict()           # apiId -> {typeName -> type record}
 _tags = AccountScopedDict()            # resource_arn -> {key: value}
 
 # ---------------------------------------------------------------------------
@@ -75,6 +78,62 @@ def _now():
 
 def _api_arn(api_id):
     return f"arn:aws:appsync:{get_region()}:{get_account_id()}:apis/{api_id}"
+
+
+def _api_id_from_local_arn(arn):
+    try:
+        spec = parse_arn(arn)
+    except ArnParseError:
+        return None
+    if spec.service != "appsync" or spec.account_id != get_account_id() or spec.region != get_region():
+        return None
+
+    prefix = "apis/"
+    if not spec.resource.startswith(prefix):
+        return None
+    api_id = spec.resource[len(prefix):]
+    return api_id if api_id and "/" not in api_id else None
+
+
+def _validate_tag_resource_arn(arn):
+    api_id = _api_id_from_local_arn(arn)
+    api = _apis.get(api_id) if api_id else None
+    if not api or api.get("arn") != arn:
+        return error_response_json("NotFoundException", f"GraphQL API {api_id or arn} not found", 404)
+    return None
+
+
+def _select_api_region(api_id):
+    """Select the unique stored region for an unsigned GraphQL data request."""
+    if api_id in _apis:
+        return True
+
+    account_id = get_account_id()
+    matches = [
+        region
+        for (stored_account, region, stored_api_id), _api in _apis.all_items()
+        if stored_account == account_id and stored_api_id == api_id
+    ]
+    if len(matches) != 1:
+        return False
+    set_request_region(matches[0])
+    return True
+
+
+def _has_sigv4_credentials(headers, query_params):
+    """Return whether the data request carries an explicit SigV4 region."""
+    query_params = query_params or {}
+    auth = headers.get("authorization") or headers.get("Authorization") or ""
+    if auth.startswith("AWS4-HMAC-SHA256") and "Credential=" in auth:
+        return True
+
+    credential = (
+        query_params.get("X-Amz-Credential")
+        or query_params.get("x-amz-credential")
+    )
+    if isinstance(credential, (list, tuple)):
+        credential = credential[0] if credential else ""
+    return bool(credential)
 
 
 def _json(status, body):
@@ -445,11 +504,17 @@ def _list_types(api_id, query_params):
 def _tag_resource(body):
     arn = body.get("resourceArn", "")
     tags = body.get("tags", {})
+    validation_error = _validate_tag_resource_arn(arn)
+    if validation_error:
+        return validation_error
     _tags.setdefault(arn, {}).update(tags)
     return _json(200, {})
 
 
 def _untag_resource(arn, query_params):
+    validation_error = _validate_tag_resource_arn(arn)
+    if validation_error:
+        return validation_error
     tag_keys = query_params.get("tagKeys", [])
     if isinstance(tag_keys, str):
         tag_keys = [tag_keys]
@@ -460,6 +525,9 @@ def _untag_resource(arn, query_params):
 
 
 def _list_tags_for_resource(arn):
+    validation_error = _validate_tag_resource_arn(arn)
+    if validation_error:
+        return validation_error
     tags = _tags.get(arn, {})
     return _json(200, {"tags": tags})
 
@@ -507,7 +575,10 @@ async def handle_request(method, path, headers, body, query_params):
     # GraphQL data plane: POST /graphql or POST /v1/apis/{apiId}/graphql
     if path == "/graphql" and method == "POST":
         api_key = headers.get("x-api-key", "")
-        api_id = _resolve_api_by_key(api_key)
+        api_id = _resolve_api_by_key(
+            api_key,
+            allow_cross_region=not _has_sigv4_credentials(headers, query_params),
+        )
         if not api_id:
             return error_response_json("UnauthorizedException", "Valid API key required", 401)
         data = json.loads(body) if body else {}
@@ -517,6 +588,8 @@ async def handle_request(method, path, headers, body, query_params):
         parts = path.split("/")
         if len(parts) >= 5:
             api_id = parts[3]
+            if not _has_sigv4_credentials(headers, query_params):
+                _select_api_region(api_id)
             data = json.loads(body) if body else {}
             return _execute_graphql(api_id, data, request_headers=headers)
 
@@ -646,12 +719,40 @@ def get_state():
 
 def restore_state(data):
     """Restore state from persisted data."""
+    reset()
     _apis.update(data.get("apis", {}))
-    _api_keys.update(data.get("api_keys", {}))
-    _data_sources.update(data.get("data_sources", {}))
-    _resolvers.update(data.get("resolvers", {}))
-    _types.update(data.get("types", {}))
+    api_regions = {
+        (account_id, api_id): region
+        for (account_id, region, api_id), _api in _apis.all_items()
+    }
+    for store, key in (
+        (_api_keys, "api_keys"),
+        (_data_sources, "data_sources"),
+        (_resolvers, "resolvers"),
+        (_types, "types"),
+    ):
+        _restore_api_child_store(store, data.get(key, {}), api_regions)
     _tags.update(data.get("tags", {}))
+
+
+def _restore_api_child_store(store, restored, api_regions):
+    """Adopt legacy API children into their parent GraphQL API's region."""
+    if isinstance(restored, AccountRegionScopedDict):
+        store.update(restored)
+        return
+
+    if isinstance(restored, AccountScopedDict):
+        items = restored._data.items()
+    else:
+        account_id = get_account_id()
+        items = (((account_id, api_id), value) for api_id, value in restored.items())
+
+    for (account_id, api_id), value in items:
+        region = api_regions.get(
+            (account_id, api_id),
+            store._region_for_legacy_value(api_id, value),
+        )
+        store.set_scoped(account_id, region, api_id, value)
 
 
 # ---------------------------------------------------------------------------
@@ -668,15 +769,39 @@ _GQL_OP_RE = _re.compile(
 _GQL_FIELD_RE = _re.compile(r'(\w+)\s*(?:\(([^)]*)\))?\s*(?:\{([^}]*)\})?')
 
 
-def _resolve_api_by_key(api_key_value):
+def _resolve_api_by_key(api_key_value, allow_cross_region=True):
     """Find the API ID that owns this API key."""
     for api_id, keys in _api_keys.items():
         for kid, key in keys.items():
             if kid == api_key_value or key.get("id") == api_key_value:
                 return api_id
-    # Fallback: if only one API exists, use it
-    if len(_apis) == 1:
-        return next(iter(_apis))
+
+    if not allow_cross_region:
+        # Signed requests may use the sole API in their credential region,
+        # but must not discover an API stored in another region.
+        if len(_apis) == 1:
+            return next(iter(_apis))
+        return None
+
+    account_id = get_account_id()
+    for (stored_account, region, api_id), keys in _api_keys.all_items():
+        if stored_account != account_id:
+            continue
+        for kid, key in keys.items():
+            if kid == api_key_value or key.get("id") == api_key_value:
+                set_request_region(region)
+                return api_id
+
+    # Fallback: if only one API exists in this account, use its region.
+    matches = [
+        (region, api_id)
+        for (stored_account, region, api_id), _api in _apis.all_items()
+        if stored_account == account_id
+    ]
+    if len(matches) == 1:
+        region, api_id = matches[0]
+        set_request_region(region)
+        return api_id
     return None
 
 
@@ -717,10 +842,9 @@ def _invoke_lambda_authorizer(
 
     import kumostack.services.lambda_svc as _lambda_svc
 
-    func_name = func_arn.rsplit(":", 1)[-1]
-    func = _lambda_svc._functions.get(func_name)
-    if not func:
-        logger.warning("Lambda authorizer %s not found in kumostack", func_name)
+    func, func_config, func_name = _lambda_svc._get_func_record_for_ref(func_arn)
+    if not func or not func_config:
+        logger.warning("Lambda authorizer %s not found in kumostack", func_arn)
         raise _AuthorizerRejected("authorizer Lambda not found")
 
     # AWS-verified authorizer event shape — apiId / accountId / requestId /
@@ -740,7 +864,8 @@ def _invoke_lambda_authorizer(
     }
 
     try:
-        result = _lambda_svc._execute_function(func, authorizer_event)
+        exec_record = _lambda_svc._execution_record_for_config(func, func_config)
+        result = _lambda_svc._execute_function_with_config_scope(exec_record, authorizer_event)
     except Exception as e:
         logger.warning("Lambda authorizer invocation failed: %s", e)
         raise _AuthorizerRejected("authorizer invocation failed") from e
@@ -936,6 +1061,18 @@ def _resolve_field(api_id, resolver, args, sub_fields, variables,
 
 
 def _resolve_dynamodb(data_source, resolver, args, sub_fields):
+    """Execute a DynamoDB resolver in the data source's configured region."""
+    config = data_source.get("dynamodbConfig", {})
+    request_region = get_region()
+    data_source_region = config.get("awsRegion") or request_region
+    set_request_region(data_source_region)
+    try:
+        return _resolve_dynamodb_in_region(data_source, resolver, args, sub_fields)
+    finally:
+        set_request_region(request_region)
+
+
+def _resolve_dynamodb_in_region(data_source, resolver, args, sub_fields):
     """Execute a DynamoDB resolver — auto-detect operation from field name and args."""
     import kumostack.services.dynamodb as _ddb
 
@@ -1141,10 +1278,9 @@ def _resolve_lambda(api_id, resolver, data_source, args,
         return args or {}
 
     import kumostack.services.lambda_svc as _lambda_svc
-    func_name = func_arn.rsplit(":", 1)[-1]
-    func = _lambda_svc._functions.get(func_name)
-    if not func:
-        logger.warning("Lambda function %s not found", func_name)
+    func, func_config, func_name = _lambda_svc._get_func_record_for_ref(func_arn)
+    if not func or not func_config:
+        logger.warning("Lambda function %s not found", func_arn)
         return args or {}
 
     # AWS-standard AppSync resolver event — fieldName lives only under info.
@@ -1166,7 +1302,8 @@ def _resolve_lambda(api_id, resolver, data_source, args,
         event["identity"] = identity
 
     try:
-        result = _lambda_svc._execute_function(func, event)
+        exec_record = _lambda_svc._execution_record_for_config(func, func_config)
+        result = _lambda_svc._execute_function_with_config_scope(exec_record, event)
     except Exception as e:
         logger.error("Lambda %s invocation failed: %s", func_name, e)
         return {"errors": [f"Lambda invocation error: {str(e)}"]}

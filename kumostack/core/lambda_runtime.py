@@ -20,9 +20,26 @@ import threading
 import time
 import zipfile
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.responses import _12_DIGIT_RE
 
 logger = logging.getLogger("lambda_runtime")
+
+_RESERVED_RUNTIME_ENV_VARS = {
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_LAMBDA_FUNCTION_NAME",
+    "AWS_LAMBDA_FUNCTION_MEMORY_SIZE",
+    "AWS_LAMBDA_FUNCTION_VERSION",
+    "AWS_LAMBDA_LOG_STREAM_NAME",
+    "_LAMBDA_FUNCTION_ARN",
+    "_LAMBDA_TIMEOUT",
+    "LAMBDA_TASK_ROOT",
+}
+
 
 def _account_from_arn(arn: str) -> str:
     """Extract the 12-digit account ID from a Lambda function ARN.
@@ -38,6 +55,27 @@ def _account_from_arn(arn: str) -> str:
     return os.environ.get("AWS_ACCESS_KEY_ID", "test")
 
 
+def _lambda_function_account_region_from_arn(arn: str) -> tuple[str, str]:
+    spec = parse_arn(arn)
+    if spec.service != "lambda":
+        raise ArnParseError("arn: expected lambda service")
+    if not _12_DIGIT_RE.match(spec.account_id):
+        raise ArnParseError("arn: expected 12-digit account id")
+    if not spec.region:
+        raise ArnParseError("arn: expected region")
+    parts = spec.resource.split(":", 2)
+    if len(parts) < 2 or parts[0] != "function" or not parts[1]:
+        raise ArnParseError("arn: expected lambda function resource")
+    return spec.account_id, spec.region
+
+
+def _account_region_from_function_config(config: dict) -> tuple[str, str]:
+    arn = config.get("FunctionArn", "")
+    if not arn:
+        raise ArnParseError("arn: missing lambda function arn")
+    return _lambda_function_account_region_from_arn(arn)
+
+
 _workers: dict = {}
 _lock = threading.Lock()
 
@@ -46,7 +84,7 @@ _lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 _PYTHON_WORKER_SCRIPT = '''
-import sys, json, importlib, traceback, os
+import sys, json, importlib, traceback, os, time
 
 def run():
     # Redirect print() to stderr so stdout stays clean for JSON-line protocol
@@ -64,6 +102,16 @@ def run():
         _py = os.path.join(_ld, "python")
         if os.path.isdir(_py):
             sys.path.insert(0, _py)
+            # AWS exposes <layer>/python/lib/python<ver>/site-packages as a
+            # site directory (processes .pth files / namespace packages), where
+            # `pip install -t` dependency layers land (#888).
+            _lib = os.path.join(_py, "lib")
+            if os.path.isdir(_lib):
+                import site as _site
+                for _v in os.listdir(_lib):
+                    _sp = os.path.join(_lib, _v, "site-packages")
+                    if os.path.isdir(_sp):
+                        _site.addsitedir(_sp)
         sys.path.insert(0, _ld)
     try:
         mod = importlib.import_module(module_name)
@@ -88,11 +136,19 @@ def run():
             os.environ["_X_AMZN_TRACE_ID"] = _xray_tid
         elif "_X_AMZN_TRACE_ID" in os.environ:
             del os.environ["_X_AMZN_TRACE_ID"]
+        _function_name = init.get("function_name", "")
+        _deadline = time.time() + float(os.environ.get("_LAMBDA_TIMEOUT", "3"))
         context = type("Context", (), {
             "function_name": init.get("function_name", ""),
+            "function_version": os.environ.get("AWS_LAMBDA_FUNCTION_VERSION", "$LATEST"),
             "memory_limit_in_mb": init.get("memory", 128),
             "invoked_function_arn": init.get("arn", ""),
             "aws_request_id": event.pop("_request_id", ""),
+            "log_group_name": os.environ.get("AWS_LAMBDA_LOG_GROUP_NAME", "/aws/lambda/" + _function_name),
+            "log_stream_name": os.environ.get("AWS_LAMBDA_LOG_STREAM_NAME", ""),
+            "identity": None,
+            "client_context": None,
+            "get_remaining_time_in_millis": lambda self: max(0, int((_deadline - time.time()) * 1000)),
         })()
         try:
             result = handler_fn(event, context)
@@ -117,10 +173,25 @@ const url = require("url");
 const Module = require("module");
 
 // Redirect stdout to stderr so stdout stays clean for JSON-line protocol
+const fs = require("fs");
 const _realStdoutWrite = process.stdout.write.bind(process.stdout);
 const _stderrWrite = process.stderr.write.bind(process.stderr);
 process.stdout.write = function(chunk, encoding, callback) {
   return _stderrWrite(chunk, encoding, callback);
+};
+const _stdoutFd = process.stdout.fd;
+const _realWriteSync = fs.writeSync.bind(fs);
+const _realWrite = fs.write.bind(fs);
+function _isStdoutFd(fd) {
+  return fd === 1 || fd === _stdoutFd;
+}
+fs.writeSync = function(fd, ...args) {
+  if (_isStdoutFd(fd)) fd = 2;
+  return _realWriteSync(fd, ...args);
+};
+fs.write = function(fd, ...args) {
+  if (_isStdoutFd(fd)) fd = 2;
+  return _realWrite(fd, ...args);
 };
 
 // Synthetic AWS SDK v3 stubs — real AWS Lambda (Node.js 18+) ships these
@@ -180,6 +251,190 @@ process.stdout.write = function(chunk, encoding, callback) {
     }
     async function waitUntilFunctionActiveV2() { return { state: "SUCCESS" }; }
     return { Lambda, LambdaClient, InvokeCommand, waitUntilFunctionActiveV2 };
+  }
+
+  // ── OpenSearch stub (REST-JSON, not JSON-RPC) ─────────────────────────
+  function _openSearchRequest(opName, params) {
+    const ep = new URL(process.env.AWS_ENDPOINT_URL || "http://127.0.0.1:4566");
+    const input = Object.assign({}, params || {});
+    const domainName = input.DomainName;
+    const encodedName = encodeURIComponent(domainName || "");
+    let method = "GET";
+    let requestPath;
+    let body;
+
+    switch (opName) {
+      case "CreateDomain":
+        method = "POST";
+        requestPath = "/2021-01-01/opensearch/domain";
+        body = input;
+        break;
+      case "DescribeDomain":
+        requestPath = "/2021-01-01/opensearch/domain/" + encodedName;
+        break;
+      case "DescribeDomains":
+        method = "POST";
+        requestPath = "/2021-01-01/opensearch/domain-info";
+        body = input;
+        break;
+      case "DeleteDomain":
+        method = "DELETE";
+        requestPath = "/2021-01-01/opensearch/domain/" + encodedName;
+        break;
+      case "ListDomainNames":
+        requestPath = "/2021-01-01/opensearch/domain";
+        if (input.EngineType) {
+          requestPath += "?engineType=" + encodeURIComponent(input.EngineType);
+        }
+        break;
+      case "UpdateDomainConfig":
+        method = "POST";
+        requestPath = "/2021-01-01/opensearch/domain/" + encodedName + "/config";
+        delete input.DomainName;
+        body = input;
+        break;
+      case "DescribeDomainConfig":
+        requestPath = "/2021-01-01/opensearch/domain/" + encodedName + "/config";
+        break;
+      case "DescribeDomainChangeProgress":
+        requestPath = "/2021-01-01/opensearch/domain/" + encodedName + "/progress";
+        if (input.ChangeId) {
+          requestPath += "?changeId=" + encodeURIComponent(input.ChangeId);
+        }
+        break;
+      case "ListVersions": {
+        requestPath = "/2021-01-01/opensearch/versions";
+        const query = new URLSearchParams();
+        if (input.MaxResults !== undefined) query.set("maxResults", input.MaxResults);
+        if (input.NextToken) query.set("nextToken", input.NextToken);
+        const suffix = query.toString();
+        if (suffix) requestPath += "?" + suffix;
+        break;
+      }
+      case "GetCompatibleVersions":
+        requestPath = "/2021-01-01/opensearch/compatibleVersions";
+        if (input.DomainName) {
+          requestPath += "?domainName=" + encodeURIComponent(input.DomainName);
+        }
+        break;
+      case "AddTags":
+        method = "POST";
+        requestPath = "/2021-01-01/tags";
+        body = input;
+        break;
+      case "ListTags":
+        requestPath = "/2021-01-01/tags?arn=" + encodeURIComponent(input.ARN || "");
+        break;
+      case "RemoveTags":
+        method = "POST";
+        requestPath = "/2021-01-01/tags-removal";
+        body = input;
+        break;
+      default:
+        return Promise.reject(new Error("Unsupported OpenSearch operation: " + opName));
+    }
+
+    const encodedBody = body === undefined ? "" : JSON.stringify(body);
+    return new Promise((resolve, reject) => {
+      // REST-JSON requests do not carry X-Amz-Target. The lightweight shim
+      // does not cryptographically sign them, but supplies the credential
+      // scope MiniStack's router uses to select OpenSearch. Let Node set Host
+      // from the endpoint: a synthetic ``opensearch.localhost`` host is
+      // indistinguishable from a virtual-hosted S3 bucket at the edge.
+      const headers = {
+        "Accept": "application/json",
+      };
+      const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
+      const accessKey = process.env.AWS_ACCESS_KEY_ID || "test";
+      headers["Authorization"] =
+        "AWS4-HMAC-SHA256 Credential=" + accessKey + "/19700101/" + region
+        + "/es/aws4_request, SignedHeaders=host, Signature=ministack";
+      if (encodedBody) {
+        headers["Content-Type"] = "application/json";
+        headers["Content-Length"] = Buffer.byteLength(encodedBody);
+      }
+      const req = http.request(
+        {
+          hostname: ep.hostname,
+          port: parseInt(ep.port || "4566", 10),
+          method: method,
+          path: requestPath,
+          headers: headers,
+        },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString();
+            let parsed;
+            try { parsed = text ? JSON.parse(text) : {}; } catch (_) { parsed = {}; }
+            if (res.statusCode >= 400) {
+              const type = parsed.__type || parsed.Code || "OpenSearchServiceError";
+              const code = String(type).split("#").pop();
+              const err = new Error(
+                parsed.Message || parsed.message || text || "OpenSearch service error"
+              );
+              err.statusCode = res.statusCode;
+              err.code = code;
+              err.name = code;
+              reject(err);
+            } else {
+              resolve(parsed);
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      if (encodedBody) req.write(encodedBody);
+      req.end();
+    });
+  }
+
+  function _makeOpenSearchClientModule() {
+    class OpenSearchClient {
+      constructor(cfg) {
+        const clientConfig = cfg || {};
+        this.config = {
+          apiVersion: clientConfig.apiVersion,
+          region: async () => clientConfig.region
+            || process.env.AWS_REGION
+            || process.env.AWS_DEFAULT_REGION
+            || "us-east-1",
+        };
+      }
+      send(cmd) { return cmd._run(); }
+    }
+
+    class OpenSearch {
+      constructor(_cfg) {}
+    }
+
+    const operations = [
+      "CreateDomain",
+      "DescribeDomain",
+      "DescribeDomains",
+      "DeleteDomain",
+      "ListDomainNames",
+      "UpdateDomainConfig",
+      "DescribeDomainConfig",
+      "DescribeDomainChangeProgress",
+      "ListVersions",
+      "GetCompatibleVersions",
+      "AddTags",
+      "ListTags",
+      "RemoveTags",
+    ];
+    const exports = { OpenSearch, OpenSearchClient };
+    for (const opName of operations) {
+      OpenSearch.prototype[opName[0].toLowerCase() + opName.slice(1)] = function(params) {
+        return _openSearchRequest(opName, params);
+      };
+      exports[opName + "Command"] = class {
+        constructor(params) { this._params = params; }
+        _run() { return _openSearchRequest(opName, this._params); }
+      };
+    }
+    return exports;
   }
 
   // ── Generic JSON-RPC stub (covers SSM, SFN, STS, CloudWatch, Logs, etc.) ─
@@ -317,6 +572,7 @@ process.stdout.write = function(chunk, encoding, callback) {
   // ── require() intercept ────────────────────────────────────────────────
   const _SPECIFIC_STUBS = {
     "@aws-sdk/client-lambda": _makeLambdaClientModule(),
+    "@aws-sdk/client-opensearch": _makeOpenSearchClientModule(),
   };
   const _SDK_CLIENT_RE = /^@aws-sdk\/client-(.+)$/;
 
@@ -602,6 +858,9 @@ class Worker:
 
     def _spawn(self):
         """Extract zip and start worker process."""
+        # Clean up any previous tmpdir before creating a new one (respawn scenario)
+        if self._tmpdir and os.path.exists(self._tmpdir):
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
         self._tmpdir = tempfile.mkdtemp(prefix=f"kumostack-lambda-{self.func_name}-")
         runtime = self.config.get("Runtime", "python3.12")
         binary, worker_script = _detect_runtime_binary(runtime)
@@ -680,17 +939,22 @@ class Worker:
         # because they don't use Python module resolution.
         if runtime.startswith("python"):
             module_name = module_name.replace("/", ".")
-        env_vars = self.config.get("Environment", {}).get("Variables", {})
+        env_vars = {
+            key: value
+            for key, value in self.config.get("Environment", {}).get("Variables", {}).items()
+            if key not in _RESERVED_RUNTIME_ENV_VARS
+        }
         spawn_env = {**os.environ, **env_vars}
         # Inject standard Lambda runtime env vars to match the Docker and
         # provided-runtime execution paths in lambda_svc.py.  Real AWS
         # Lambda always injects these; the warm-worker path was missing them.
         # Per AWS docs:
         #   https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html
-        from kumostack.core.responses import get_region, new_uuid
-        spawn_env.setdefault("AWS_REGION", get_region())
-        spawn_env.setdefault("AWS_DEFAULT_REGION", get_region())
-        spawn_env.setdefault("AWS_ACCESS_KEY_ID", _account_from_arn(self.config.get("FunctionArn", "")))
+        from kumostack.core.responses import new_uuid
+        account_id, region = _account_region_from_function_config(self.config)
+        spawn_env["AWS_REGION"] = region
+        spawn_env["AWS_DEFAULT_REGION"] = region
+        spawn_env["AWS_ACCESS_KEY_ID"] = account_id
         spawn_env.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("AWS_SECRET_ACCESS_KEY", "test"))
         spawn_env.setdefault("AWS_SESSION_TOKEN", os.environ.get("AWS_SESSION_TOKEN", ""))
         # AWS_ENDPOINT_URL precedence matches real AWS: function
@@ -871,8 +1135,9 @@ class Worker:
                         if response_line.startswith("{"):
                             try:
                                 response = json.loads(response_line)
-                                result_box.append(response)
-                                return
+                                if response.get("status") in ("ok", "error"):
+                                    result_box.append(response)
+                                    return
                             except json.JSONDecodeError:
                                 continue
                     result_box.append({"status": "error", "error": "No JSON response from worker after 200 lines"})
@@ -902,6 +1167,8 @@ class Worker:
 
             response = result_box[0]
             if response.get("status") == "error":
+                if self._proc and self._proc.poll() is None:
+                    self._proc.terminate()
                 self._proc = None
             response["cold_start"] = cold
             # Bounded drain — replaces the fixed 50ms sleep that was paid
@@ -919,10 +1186,11 @@ class Worker:
 
 def get_or_create_worker(func_name: str, config: dict, code_zip: bytes,
                          qualifier: str = "$LATEST") -> Worker:
-    # Include account ID in the key to isolate workers across accounts.
-    # Two accounts deploying the same function name must not share a worker.
-    account = _account_from_arn(config.get("FunctionArn", ""))
-    key = f"{account}:{func_name}:{qualifier}"
+    # Include account ID and region in the key to isolate workers across
+    # accounts and regions. Two regions deploying the same function name must
+    # not share a worker.
+    account, region = _account_region_from_function_config(config)
+    key = f"{account}:{region}:{func_name}:{qualifier}"
     with _lock:
         worker = _workers.get(key)
         if worker is not None:
@@ -932,23 +1200,32 @@ def get_or_create_worker(func_name: str, config: dict, code_zip: bytes,
         return worker
 
 
-def invalidate_worker(func_name: str, qualifier: str = None, account: str = None):
+def invalidate_worker(func_name: str, qualifier: str = None,
+                      account: str = None, region: str = None):
     """Kill and remove workers for a function.
 
     If qualifier is provided, only kill that specific version/alias worker.
     Otherwise kill all workers for the function (used on delete).
-    If account is provided, scope the invalidation to that account.
+    If account or region is provided, scope the invalidation to that account
+    and/or region.
     """
-    # Worker keys are "{account}:{func_name}:{qualifier}". Lambda function names
-    # cannot contain ':' (AWS naming rule), so splitting on ':' is unambiguous.
+    # Worker keys are "{account}:{region}:{func_name}:{qualifier}". Older
+    # in-process keys may be "{account}:{func_name}:{qualifier}" during local
+    # development, so tolerate both shapes.
     def _matches(k: str) -> bool:
         parts = k.split(":")
-        if len(parts) != 3:
+        if len(parts) == 4:
+            k_account, k_region, k_func, k_qualifier = parts
+        elif len(parts) == 3:
+            k_account, k_func, k_qualifier = parts
+            k_region = None
+        else:
             return False
-        k_account, k_func, k_qualifier = parts
         if k_func != func_name:
             return False
         if account is not None and k_account != account:
+            return False
+        if region is not None and k_region is not None and k_region != region:
             return False
         if qualifier is not None and k_qualifier != qualifier:
             return False

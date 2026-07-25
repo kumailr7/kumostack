@@ -5,7 +5,7 @@
 AWS Batch stub (rest-json).
 
 Endpoints under ``/v1/``. Stores compute environments, job queues, job
-definitions, and jobs in account-scoped state. Submitted jobs immediately
+definitions, and jobs in account-and-region-scoped state. Submitted jobs immediately
 transition to ``SUCCEEDED`` — Batch is a control-plane/scheduler emulator
 here, not a real container runner.
 """
@@ -13,10 +13,13 @@ here, not a real container runner.
 import copy
 import json
 import logging
+import re
 import time
 
+from kumostack.core.arn import ArnParseError, parse_arn
+from kumostack.core.persistence import load_state
 from kumostack.core.responses import (
-    AccountScopedDict,
+    AccountRegionScopedDict,
     error_response_json,
     get_account_id,
     get_region,
@@ -25,10 +28,12 @@ from kumostack.core.responses import (
 
 logger = logging.getLogger("batch")
 
-_compute_envs = AccountScopedDict()   # name -> dict
-_job_queues = AccountScopedDict()     # name -> dict
-_job_definitions = AccountScopedDict()  # name -> [revisions]
-_jobs = AccountScopedDict()           # job_id -> dict
+_compute_envs = AccountRegionScopedDict()   # name -> dict
+_job_queues = AccountRegionScopedDict()     # name -> dict
+_job_definitions = AccountRegionScopedDict()  # name -> [revisions]
+_jobs = AccountRegionScopedDict()           # job_id -> dict
+
+_JOB_QUEUE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def reset():
@@ -57,8 +62,17 @@ def restore_state(data):
         (_jobs, "jobs"),
     ):
         store.clear()
-        for k, v in (data.get(key) or {}).items():
-            store[k] = v
+        restored = data.get(key)
+        if restored is not None:
+            store.update(restored)
+
+
+try:
+    _restored = load_state("batch")
+    if _restored:
+        restore_state(_restored)
+except Exception:
+    logger.exception("Failed to restore persisted state; continuing with fresh store")
 
 
 def _json(status, body):
@@ -79,6 +93,75 @@ def _jd_arn(name, revision):
 
 def _job_arn(job_id):
     return f"arn:aws:batch:{get_region()}:{get_account_id()}:job/{job_id}"
+
+
+_CE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _compute_environment_name_from_ref(ref):
+    if not ref:
+        return "", error_response_json(
+            "ClientException", "computeEnvironment is required", 400
+        )
+    if not ref.startswith("arn:"):
+        return ref, None
+    try:
+        spec = parse_arn(ref)
+    except ArnParseError:
+        return "", error_response_json(
+            "ClientException", f"Object does not exist: {ref}", 400
+        )
+    if spec.service != "batch" or spec.account_id != get_account_id():
+        return "", error_response_json(
+            "ClientException", f"Object does not exist: {ref}", 400
+        )
+    if spec.region != get_region():
+        return "", error_response_json(
+            "ClientException", f"Object does not exist: {ref}", 400
+        )
+    if not spec.resource.startswith("compute-environment/"):
+        return "", error_response_json(
+            "ClientException", f"Object does not exist: {ref}", 400
+        )
+    name = spec.resource.split("/", 1)[1]
+    if not _CE_NAME_RE.fullmatch(name):
+        return "", error_response_json(
+            "ClientException", f"Object does not exist: {ref}", 400
+        )
+    return name, None
+
+
+def _job_queue_name_from_ref(ref):
+    if not ref or not ref.startswith("arn:"):
+        return ref, None
+    try:
+        spec = parse_arn(ref)
+    except ArnParseError:
+        return "", _batch_client_exception(ref)
+    if spec.service != "batch" or spec.account_id != get_account_id():
+        return "", _batch_client_exception(ref)
+    if spec.region != get_region():
+        return None, None
+    if not spec.resource.startswith("job-queue/"):
+        return "", _batch_client_exception(ref)
+    name = spec.resource.split("/", 1)[1]
+    if not _JOB_QUEUE_NAME_RE.fullmatch(name):
+        return "", _batch_client_exception(ref)
+    return name, None
+
+
+def _batch_client_exception(identifier):
+    return error_response_json(
+        "ClientException",
+        f"Invalid job queue identifier: {identifier}",
+        400,
+    )
+
+
+def _job_queue_matches(stored_ref, query_ref, queue_name):
+    if not queue_name:
+        return False
+    return stored_ref in {query_ref, queue_name, _jq_arn(queue_name)}
 
 
 def _now_ms():
@@ -105,9 +188,45 @@ def _create_compute_environment(p):
         "serviceRole": p.get("serviceRole", ""),
         "tags": p.get("tags", {}),
     }
+    if "unmanagedvCpus" in p:
+        rec["unmanagedvCpus"] = p["unmanagedvCpus"]
+    if "context" in p:
+        rec["context"] = p["context"]
     _compute_envs[name] = rec
     return _json(200, {"computeEnvironmentName": name,
                        "computeEnvironmentArn": rec["computeEnvironmentArn"]})
+
+
+def _update_compute_environment(p):
+    name, error = _compute_environment_name_from_ref(p.get("computeEnvironment"))
+    if error:
+        return error
+    rec = _compute_envs.get(name)
+    if rec is None:
+        return error_response_json(
+            "ClientException", f"Object does not exist: {name}", 400
+        )
+    if "state" in p:
+        rec["state"] = p["state"]
+    if "serviceRole" in p:
+        rec["serviceRole"] = p["serviceRole"]
+    if "computeResources" in p and p["computeResources"] is not None:
+        existing = rec.get("computeResources") or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = dict(existing)
+        merged.update(p["computeResources"])
+        rec["computeResources"] = merged
+    if "updatePolicy" in p:
+        rec["updatePolicy"] = p["updatePolicy"]
+    if "unmanagedvCpus" in p:
+        rec["unmanagedvCpus"] = p["unmanagedvCpus"]
+    if "context" in p:
+        rec["context"] = p["context"]
+    return _json(200, {
+        "computeEnvironmentName": name,
+        "computeEnvironmentArn": rec["computeEnvironmentArn"],
+    })
 
 
 def _describe_compute_environments(p):
@@ -147,7 +266,9 @@ def _describe_job_queues(p):
         out = []
         for n in names:
             # Accept both name and ARN per AWS behaviour.
-            short = n.split("/")[-1]
+            short, error = _job_queue_name_from_ref(n)
+            if error:
+                return error
             if short in _job_queues:
                 out.append(_job_queues[short])
     else:
@@ -220,10 +341,13 @@ def _describe_jobs(p):
 
 def _list_jobs(p):
     queue = p.get("jobQueue", "")
+    queue_name, queue_error = _job_queue_name_from_ref(queue) if queue else ("", None)
+    if queue_error:
+        return queue_error
     status_filter = p.get("jobStatus")
     out = []
     for j in _jobs.values():
-        if queue and j.get("jobQueue") not in (queue, _jq_arn(queue.split("/")[-1])):
+        if queue and not _job_queue_matches(j.get("jobQueue"), queue, queue_name):
             continue
         if status_filter and j.get("status") != status_filter:
             continue
@@ -236,6 +360,7 @@ def _list_jobs(p):
 
 _DISPATCH = {
     "/v1/createcomputeenvironment": _create_compute_environment,
+    "/v1/updatecomputeenvironment": _update_compute_environment,
     "/v1/describecomputeenvironments": _describe_compute_environments,
     "/v1/createjobqueue": _create_job_queue,
     "/v1/describejobqueues": _describe_job_queues,

@@ -54,6 +54,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from kumostack.core.arn import ArnParseError, parse_arn
 from kumostack.core.responses import AccountScopedDict, error_response_json, get_account_id, get_region, new_uuid
 
 _HOST = os.environ.get("MINISTACK_HOST", "localhost")
@@ -93,6 +94,7 @@ _JWKS_TIMEOUT_SECONDS = _timeout_from_env("MINISTACK_APIGW_JWKS_TIMEOUT_SECONDS"
 
 # ---- Module-level state ----
 _apis = AccountScopedDict()          # api_id -> api object
+_api_regions = AccountScopedDict()   # api_id -> owning region
 _routes = AccountScopedDict()        # api_id -> {route_id -> route object}
 _integrations = AccountScopedDict()  # api_id -> {integration_id -> integration object}
 _stages = AccountScopedDict()        # api_id -> {stage_name -> stage object}
@@ -170,7 +172,12 @@ def _apigw_error(code: str, message: str, status: int) -> tuple:
 
 
 def _api_arn(api_id: str) -> str:
-    return f"arn:aws:apigateway:{get_region()}::/apis/{api_id}"
+    return _api_resource_arn(api_id)
+
+
+def _api_resource_arn(api_id: str, *segments: str) -> str:
+    suffix = "".join(f"/{segment}" for segment in segments)
+    return f"arn:aws:apigateway:{get_region()}::/apis/{api_id}{suffix}"
 
 
 def _extract_lambda_ref_from_integration_uri(uri: str) -> str:
@@ -210,6 +217,7 @@ def get_state() -> dict:
     import copy
     return {
         "apis": copy.deepcopy(_apis),
+        "api_regions": copy.deepcopy(_api_regions),
         "routes": copy.deepcopy(_routes),
         "integrations": copy.deepcopy(_integrations),
         "stages": copy.deepcopy(_stages),
@@ -224,6 +232,7 @@ def get_state() -> dict:
 def load_persisted_state(data: dict) -> None:
     """Restore module state from a previously persisted snapshot."""
     _apis.update(data.get("apis", {}))
+    _api_regions.update(data.get("api_regions", {}))
     _routes.update(data.get("routes", {}))
     _integrations.update(data.get("integrations", {}))
     _stages.update(data.get("stages", {}))
@@ -259,7 +268,7 @@ async def handle_request(method, path, headers, body, query_params):
     # /v2/tags/{resourceArn} — tags endpoint
     if resource == "tags":
         # resourceArn may contain slashes; rejoin everything after "tags/"
-        resource_arn = "/".join(parts[2:]) if len(parts) > 2 else ""
+        resource_arn = urllib.parse.unquote("/".join(parts[2:])) if len(parts) > 2 else ""
         if method == "GET":
             return _get_tags(resource_arn)
         if method == "POST":
@@ -519,9 +528,15 @@ async def _fetch_oidc_jwks_uri(issuer: str) -> str | None:
         jwks_uri = (json.loads(body or b"{}") or {}).get("jwks_uri")
     except (OSError, ValueError, json.JSONDecodeError):
         jwks_uri = None
-    # Mirror _fetch_jwks (line ~543) which hardcodes `now + 7200`; no separate
-    # env knob for OIDC discovery — it shares the JWT-auth external-fetch path.
-    _oidc_config_cache[issuer] = {"jwks_uri": jwks_uri, "expiresAt": now + 7200}
+    if not isinstance(jwks_uri, str) or not jwks_uri.strip():
+        jwks_uri = None
+    if jwks_uri is not None:
+        # Mirror _fetch_jwks (line ~543) which hardcodes `now + 7200`; no
+        # separate env knob for OIDC discovery — it shares the JWT-auth
+        # external-fetch path.
+        _oidc_config_cache[issuer] = {"jwks_uri": jwks_uri, "expiresAt": now + 7200}
+    else:
+        _oidc_config_cache[issuer] = {"jwks_uri": None, "expiresAt": now + 60}
     return jwks_uri
 
 
@@ -869,6 +884,8 @@ async def handle_execute(api_id, stage, path, method, headers, body, query_param
             (path_params or None),
             authorizer_claims=authorizer_claims,
             authorizer_scopes=authorizer_scopes,
+            owner_account_id=get_account_id(),
+            owner_region=_api_regions.get(api_id, get_region()),
         )
     elif integration_type == "HTTP_PROXY":
         mapped_headers, mapped_query, mapped_path = _apply_request_parameter_mappings(
@@ -984,6 +1001,8 @@ async def _invoke_lambda_proxy(
     *,
     authorizer_claims=None,
     authorizer_scopes=None,
+    owner_account_id=None,
+    owner_region=None,
 ):
     """Invoke a Lambda function using the API Gateway v2 proxy event format."""
     from kumostack.services import lambda_svc
@@ -993,19 +1012,27 @@ async def _invoke_lambda_proxy(
     # Unwrap to the inner Lambda ARN before parsing name + qualifier (#409).
     # Bare Lambda ARNs and plain function names keep working via the fallback.
     lambda_ref = _extract_lambda_ref_from_integration_uri(integration.get("integrationUri", ""))
-    func_name, qualifier = lambda_svc._resolve_name_and_qualifier(lambda_ref)
-    func_data, func_config = lambda_svc._get_func_record_for_qualifier(func_name, qualifier)
-    if func_data is None:
+    func_data, func_config, func_name = lambda_svc._get_func_record_for_ref_in_scope(
+        lambda_ref,
+        account_id=owner_account_id,
+        region=owner_region,
+    )
+    if func_data is None or func_config is None:
         return 502, {"Content-Type": "application/json"}, json.dumps({
-            "message": f"Lambda function '{func_name}'" +
-                       (f" (qualifier '{qualifier}')" if qualifier else "") +
-                       " not found"
+            "message": f"Lambda function '{lambda_ref or func_name}' not found"
         }).encode()
 
     # Build API Gateway v2 proxy event (payload format 2.0)
     # AWS API Gateway v2 joins multi-value query params with commas
     qs = {k: ",".join(v) for k, v in query_params.items()} if query_params else None
-    raw_qs = "&".join(f"{k}={val}" for k, vals in query_params.items() for val in vals)
+    # rawQueryString must stay percent-encoded like real AWS. query_params here are
+    # already URL-decoded, so re-encode each key/value: a raw space breaks lambda_http
+    # (http::Uri rejects it -> 502), and a decoded '='/'&' inside a value would corrupt
+    # the query structure. safe="" encodes everything except RFC-3986 unreserved (#1035).
+    raw_qs = "&".join(
+        f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(val, safe='')}"
+        for k, vals in query_params.items() for val in vals
+    )
     # Binary request bodies are base64-encoded with isBase64Encoded=true; only
     # the text content types AWS recognizes are passed through as UTF-8 strings.
     if body:
@@ -1021,7 +1048,6 @@ async def _invoke_lambda_proxy(
         "rawPath": path,
         "rawQueryString": raw_qs,
         "headers": dict(headers),
-        "queryStringParameters": qs,
         "requestContext": {
             "accountId": get_account_id(),
             "apiId": api_id,
@@ -1040,9 +1066,21 @@ async def _invoke_lambda_proxy(
             "timeEpoch": int(time.time() * 1000),
         },
         "pathParameters": path_params,
-        "body": req_body,
         "isBase64Encoded": req_is_base64,
     }
+    # Real AWS omits body entirely for a bodyless request rather than sending
+    # it as null — same isAPIGatewayProxyEventV2 rejection as
+    # queryStringParameters below (undefined/a string are accepted, null is
+    # not), so this broke every GET/DELETE-style request with no payload.
+    if req_body is not None:
+        event["body"] = req_body
+    # Real AWS omits queryStringParameters entirely when there is no query
+    # string, rather than sending it as null — strict event-shape validators
+    # (e.g. Powertools' isAPIGatewayProxyEventV2) accept undefined/a record
+    # but reject null, so a present-but-null key fails every request lacking
+    # a query string.
+    if qs:
+        event["queryStringParameters"] = qs
     if authorizer_claims is not None:
         event["requestContext"]["authorizer"] = {
             "jwt": {
@@ -1056,8 +1094,8 @@ async def _invoke_lambda_proxy(
     # Response shaping (throttle→429, error→502, body→envelope) goes through
     # the shared helper so v1/v2 stay consistent and we get 429s on
     # ConcurrentInvocationLimitExceeded.
-    exec_record = {"config": func_config, "code_zip": func_data.get("code_zip")}
-    result = await asyncio.to_thread(lambda_svc._execute_function, exec_record, event)
+    exec_record = lambda_svc._execution_record_for_config(func_data, func_config)
+    result = await asyncio.to_thread(lambda_svc._execute_function_with_config_scope, exec_record, event)
     lambda_response, _ = lambda_svc.lambda_execute_result_to_api_proxy_response(result)
 
     status = lambda_response.get("statusCode", 200)
@@ -1189,6 +1227,7 @@ def _create_api(data):
     if data.get("corsConfiguration"):
         api["corsConfiguration"] = data["corsConfiguration"]
     _apis[api_id] = api
+    _api_regions[api_id] = get_region()
     _routes[api_id] = {}
     _integrations[api_id] = {}
     _stages[api_id] = {}
@@ -1199,22 +1238,30 @@ def _create_api(data):
 
 def _get_api(api_id):
     api = _apis.get(api_id)
-    if not api:
+    # APIs are region-specific; an API owned by another region must not be
+    # visible from this one (the execute path already enforces this — keep the
+    # control plane consistent).
+    if not api or _api_regions.get(api_id, get_region()) != get_region():
         return _apigw_error("NotFoundException", f"API {api_id} not found", 404)
     return _apigw_response(api)
 
 
 def _get_apis():
-    return _apigw_response({"items": list(_apis.values())})
+    items = [
+        api for api_id, api in _apis.items()
+        if _api_regions.get(api_id, get_region()) == get_region()
+    ]
+    return _apigw_response({"items": items})
 
 
 def _delete_api(api_id):
+    _delete_api_tag_resources(api_id)
     _apis.pop(api_id, None)
+    _api_regions.pop(api_id, None)
     _routes.pop(api_id, None)
     _integrations.pop(api_id, None)
     _stages.pop(api_id, None)
     _deployments.pop(api_id, None)
-    _api_tags.pop(_api_arn(api_id), None)
     return 204, {}, b""
 
 
@@ -1307,6 +1354,7 @@ def _update_route(api_id, route_id, data):
 
 def _delete_route(api_id, route_id):
     _routes.get(api_id, {}).pop(route_id, None)
+    _api_tags.pop(_api_resource_arn(api_id, "routes", route_id), None)
     return 204, {}, b""
 
 
@@ -1380,6 +1428,7 @@ def _update_integration(api_id, int_id, data):
 
 def _delete_integration(api_id, int_id):
     _integrations.get(api_id, {}).pop(int_id, None)
+    _api_tags.pop(_api_resource_arn(api_id, "integrations", int_id), None)
     return 204, {}, b""
 
 
@@ -1401,6 +1450,8 @@ def _create_stage(api_id, data):
         "tags": data.get("tags", {}),
     }
     _stages.setdefault(api_id, {})[stage_name] = stage
+    if data.get("tags"):
+        _api_tags[_api_resource_arn(api_id, "stages", stage_name)] = dict(data.get("tags", {}))
     return _apigw_response(stage, 201)
 
 
@@ -1429,6 +1480,7 @@ def _update_stage(api_id, stage_name, data):
 
 def _delete_stage(api_id, stage_name):
     _stages.get(api_id, {}).pop(stage_name, None)
+    _api_tags.pop(_api_resource_arn(api_id, "stages", stage_name), None)
     return 204, {}, b""
 
 
@@ -1461,24 +1513,98 @@ def _get_deployment(api_id, deployment_id):
 
 def _delete_deployment(api_id, deployment_id):
     _deployments.get(api_id, {}).pop(deployment_id, None)
+    _api_tags.pop(_api_resource_arn(api_id, "deployments", deployment_id), None)
     return 204, {}, b""
 
 
 # ---- Control plane: Tags ----
 
+def _invalid_tag_resource_arn(resource_arn: str):
+    return _apigw_error(
+        "BadRequestException",
+        f"Invalid API Gateway v2 ResourceArn: {resource_arn}",
+        400,
+    )
+
+
+def _tag_resource_not_found(resource_arn: str):
+    return _apigw_error(
+        "NotFoundException",
+        f"API Gateway v2 resource not found: {resource_arn}",
+        404,
+    )
+
+
+def _api_exists_in_request_region(api_id: str) -> bool:
+    return api_id in _apis and _api_regions.get(api_id, get_region()) == get_region()
+
+
+def _validate_tag_resource_arn(resource_arn: str) -> tuple[str | None, tuple | None]:
+    try:
+        spec = parse_arn(resource_arn)
+    except ArnParseError:
+        return None, _invalid_tag_resource_arn(resource_arn)
+
+    if (
+        spec.partition != "aws"
+        or spec.service != "apigateway"
+        or not spec.region
+        or spec.region != get_region()
+        or spec.account_id != ""
+        or not spec.resource.startswith("/")
+    ):
+        return None, _invalid_tag_resource_arn(resource_arn)
+
+    segments = spec.resource[1:].split("/")
+    if not segments or any(segment == "" for segment in segments):
+        return None, _invalid_tag_resource_arn(resource_arn)
+    if len(segments) not in (2, 4) or segments[0] != "apis":
+        return None, _invalid_tag_resource_arn(resource_arn)
+
+    api_id = segments[1]
+    if not _api_exists_in_request_region(api_id):
+        return None, _tag_resource_not_found(resource_arn)
+    if len(segments) == 2:
+        return _api_arn(api_id), None
+
+    resource_type, resource_id = segments[2], segments[3]
+    if resource_type != "stages":
+        return None, _invalid_tag_resource_arn(resource_arn)
+    if resource_id not in _stages.get(api_id, {}):
+        return None, _tag_resource_not_found(resource_arn)
+    return _api_resource_arn(api_id, resource_type, resource_id), None
+
+
+def _delete_api_tag_resources(api_id: str):
+    api_arn = _api_arn(api_id)
+    nested_prefix = f"{api_arn}/"
+    for resource_arn in list(_api_tags):
+        if resource_arn == api_arn or resource_arn.startswith(nested_prefix):
+            _api_tags.pop(resource_arn, None)
+
+
 def _get_tags(resource_arn: str):
-    tags = _api_tags.get(resource_arn, {})
+    canonical_arn, err = _validate_tag_resource_arn(resource_arn)
+    if err:
+        return err
+    tags = _api_tags.get(canonical_arn, {})
     return _apigw_response({"tags": tags})
 
 
 def _tag_resource(resource_arn: str, data: dict):
+    canonical_arn, err = _validate_tag_resource_arn(resource_arn)
+    if err:
+        return err
     tags = data.get("tags", {})
-    _api_tags.setdefault(resource_arn, {}).update(tags)
+    _api_tags.setdefault(canonical_arn, {}).update(tags)
     return 201, {}, b""
 
 
 def _untag_resource(resource_arn: str, tag_keys: list):
-    existing = _api_tags.get(resource_arn, {})
+    canonical_arn, err = _validate_tag_resource_arn(resource_arn)
+    if err:
+        return err
+    existing = _api_tags.get(canonical_arn, {})
     for key in tag_keys:
         existing.pop(key, None)
     return 204, {}, b""
@@ -1531,11 +1657,13 @@ def _update_authorizer(api_id, auth_id, data):
 
 def _delete_authorizer(api_id, auth_id):
     _authorizers.get(api_id, {}).pop(auth_id, None)
+    _api_tags.pop(_api_resource_arn(api_id, "authorizers", auth_id), None)
     return 204, {}, b""
 
 
 def reset():
     _apis.clear()
+    _api_regions.clear()
     _routes.clear()
     _integrations.clear()
     _stages.clear()
@@ -1662,19 +1790,23 @@ def _api_protocol(api_id: str) -> str | None:
 
     WebSocket connections arrive on the execute-api host before we've resolved
     which account owns the api. We scan every AccountScopedDict bucket to find
-    the owning account, then return (protocol, account_id).
+    the owning account and region.
     """
     info = _api_owner(api_id)
     return info[0] if info else None
 
 
 def _api_owner(api_id: str):
-    """Return (protocolType, owner_account_id) for an API or None if unknown."""
+    """Return (protocolType, owner_account_id, owner_region) for an API or None."""
     # AccountScopedDict stores keys as (account_id, original_key). Walk internals
     # so we can find the owning account without knowing it up front.
     for (acct, key), api in _apis._data.items():
         if key == api_id:
-            return (api.get("protocolType", "HTTP"), acct)
+            return (
+                api.get("protocolType", "HTTP"),
+                acct,
+                _api_regions.get_scoped(acct, None, api_id, get_region()),
+            )
     return None
 
 
@@ -1716,7 +1848,7 @@ def _evaluate_route_selection(expr: str, payload_text: str) -> str:
     return "$default"
 
 
-async def _invoke_ws_lambda(api_id: str, account_id: str, route: dict, stage: str,
+async def _invoke_ws_lambda(api_id: str, account_id: str, region: str, route: dict, stage: str,
                             connection_id: str, event_type: str, message_id: str,
                             body_text: str, source_ip: str, headers: dict,
                             query_params: dict | None = None, **kwargs) -> dict | None:
@@ -1774,9 +1906,13 @@ async def _invoke_ws_lambda(api_id: str, account_id: str, route: dict, stage: st
     # Same unwrap path as HTTP (#409): APIGW integrationUri is the wrapper form
     # that nests the Lambda ARN between /functions/ and /invocations.
     lambda_ref = _extract_lambda_ref_from_integration_uri(integration.get("integrationUri", ""))
-    func_name, qualifier = lambda_svc._resolve_name_and_qualifier(lambda_ref)
-    func_data, func_config = lambda_svc._get_func_record_for_qualifier(func_name, qualifier)
-    if func_data is None:
+    _parsed_name, qualifier = lambda_svc._resolve_name_and_qualifier(lambda_ref)
+    func_data, func_config, func_name = lambda_svc._get_func_record_for_ref_in_scope(
+        lambda_ref,
+        account_id=account_id,
+        region=region,
+    )
+    if func_data is None or func_config is None:
         return None
 
     request_context = {
@@ -1821,6 +1957,14 @@ async def _invoke_ws_lambda(api_id: str, account_id: str, route: dict, stage: st
         else:
             event["queryStringParameters"] = None
             event["multiValueQueryStringParameters"] = None
+        authorizer_claims = kwargs.get("authorizer_claims")
+        if authorizer_claims is not None:
+            request_context["authorizer"] = {
+                "jwt": {
+                    "claims": authorizer_claims,
+                    "scopes": kwargs.get("authorizer_scopes") or [],
+                }
+            }
 
     runtime = func_config.get("Runtime", "")
     code_zip = func_data.get("code_zip")
@@ -1832,11 +1976,18 @@ async def _invoke_ws_lambda(api_id: str, account_id: str, route: dict, stage: st
         # SDK invoke path populates and forcing a cold start on every WS
         # message. That's why pre-warming the function via the SDK didn't
         # help WebSocket dispatch — keys didn't match.
-        worker = get_or_create_worker(
-            func_name, func_config, code_zip,
-            qualifier=qualifier or "$LATEST",
+        def _invoke_worker():
+            worker = get_or_create_worker(
+                func_name, func_config, code_zip,
+                qualifier=qualifier or "$LATEST",
+            )
+            return worker.invoke(event, message_id)
+
+        result = await asyncio.to_thread(
+            lambda_svc._run_with_function_config_scope,
+            func_config,
+            _invoke_worker,
         )
-        result = await asyncio.to_thread(worker.invoke, event, message_id)
         if result.get("status") == "error":
             return {"statusCode": 500, "body": result.get("error", "")}
         return result.get("result", {})
@@ -1868,7 +2019,7 @@ async def handle_websocket(scope, receive, send, api_id: str, path_override: str
         await send({"type": "websocket.close", "code": 1008})
         return
 
-    protocol, account_id = owner
+    protocol, account_id, owner_region = owner
 
     # Stage parsing: Host-based URLs look like wss://{apiId}.execute-api.../stage;
     # path-based compat URLs (#401) use path_override with the rewritten path.
@@ -1907,16 +2058,38 @@ async def handle_websocket(scope, receive, send, api_id: str, path_override: str
     connection_id = new_uuid().replace("-", "")[:16]
 
     # Set account context so downstream Lambda invocations see the right tenant.
-    from kumostack.core.responses import _request_account_id
-    token = _request_account_id.set(account_id)
+    from kumostack.core.responses import _request_account_id, _request_region
+    account_token = _request_account_id.set(account_id)
+    region_token = _request_region.set(owner_region)
     try:
         # $connect hook
         connect_route = _match_ws_route(api_id, "$connect")
         if connect_route is not None:
+            # JWT authorizer validation (mirrors the HTTP API path).
+            auth_type = (connect_route.get("authorizationType") or "NONE").upper()
+            ws_authorizer_claims = None
+            ws_authorizer_scopes = []
+            if auth_type == "JWT":
+                authorizer_id = connect_route.get("authorizerId")
+                authorizer = _authorizers.get(api_id, {}).get(authorizer_id) if authorizer_id else None
+                if not authorizer:
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                claims, scopes, auth_error = await _validate_jwt_authorizer(
+                    connect_route, authorizer, headers, query_params or {},
+                )
+                if auth_error:
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                ws_authorizer_claims = claims or {}
+                ws_authorizer_scopes = scopes or []
+
             resp = await _invoke_ws_lambda(
-                api_id, account_id, connect_route, stage, connection_id,
+                api_id, account_id, owner_region, connect_route, stage, connection_id,
                 "CONNECT", new_uuid(), "", source_ip, headers,
                 query_params=query_params,
+                authorizer_claims=ws_authorizer_claims,
+                authorizer_scopes=ws_authorizer_scopes,
             )
             status = int((resp or {}).get("statusCode", 200))
             if status < 200 or status >= 300:
@@ -1990,7 +2163,7 @@ async def handle_websocket(scope, receive, send, api_id: str, path_override: str
                     continue
                 msg_id = new_uuid()
                 resp = await _invoke_ws_lambda(
-                    api_id, account_id, route, stage, connection_id, "MESSAGE",
+                    api_id, account_id, owner_region, route, stage, connection_id, "MESSAGE",
                     msg_id, payload, source_ip, headers,
                 )
                 if resp is None:
@@ -2015,7 +2188,7 @@ async def handle_websocket(scope, receive, send, api_id: str, path_override: str
             if disconnect_route is not None:
                 try:
                     await _invoke_ws_lambda(
-                        api_id, account_id, disconnect_route, stage, connection_id,
+                        api_id, account_id, owner_region, disconnect_route, stage, connection_id,
                         "DISCONNECT", new_uuid(), "", source_ip, headers,
                         disconnect_code=disconnect_code,
                         disconnect_reason=disconnect_reason,
@@ -2028,7 +2201,8 @@ async def handle_websocket(scope, receive, send, api_id: str, path_override: str
                 pass
     finally:
         try:
-            _request_account_id.reset(token)
+            _request_region.reset(region_token)
+            _request_account_id.reset(account_token)
         except Exception:
             pass
 

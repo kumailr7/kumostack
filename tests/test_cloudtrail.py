@@ -12,6 +12,7 @@ Tests are split into two sections:
 """
 
 import time
+from datetime import datetime, timedelta, timezone
 
 import boto3
 import pytest
@@ -22,13 +23,13 @@ ENDPOINT = "http://localhost:4566"
 REGION = "us-east-1"
 
 
-def _client(service):
+def _client(service, region=REGION):
     return boto3.client(
         service,
         endpoint_url=ENDPOINT,
         aws_access_key_id="test",
         aws_secret_access_key="test",
-        region_name=REGION,
+        region_name=region,
     )
 
 
@@ -99,10 +100,70 @@ def test_get_trail(ct):
     assert "TrailARN" in resp["Trail"]
 
 
+def test_get_trail_by_arn(ct):
+    name = f"trail-get-arn-{_uid()}"
+    created = ct.create_trail(Name=name, S3BucketName="bucket")
+    resp = ct.get_trail(Name=created["TrailARN"])
+    assert resp["Trail"]["Name"] == name
+
+
+def test_get_trail_rejects_wrong_service_arn(ct):
+    name = f"trail-wrong-service-{_uid()}"
+    ct.create_trail(Name=name, S3BucketName="bucket")
+    with pytest.raises(ClientError) as exc:
+        ct.get_trail(Name=f"arn:aws:sns:{REGION}:000000000000:trail/{name}")
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+def test_get_trail_rejects_malformed_arn_identifier(ct):
+    with pytest.raises(ClientError) as exc:
+        ct.get_trail(Name="arn:nope")
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+@pytest.mark.parametrize("partition", ["aws-cn", "notaws"])
+def test_get_trail_rejects_non_aws_partition_as_invalid_trail_name(ct, partition):
+    arn = f"arn:{partition}:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.get_trail(Name=arn)
+    assert exc.value.response["Error"]["Code"] == "InvalidTrailNameException"
+
+
+def test_get_trail_does_not_resolve_foreign_region_arn_by_tail(ct):
+    name = f"trail-foreign-region-{_uid()}"
+    arn = ct.create_trail(Name=name, S3BucketName="bucket")["TrailARN"]
+    foreign_arn = arn.replace(f":{REGION}:", ":us-west-2:")
+    with pytest.raises(ClientError) as exc:
+        ct.get_trail(Name=foreign_arn)
+    assert exc.value.response["Error"]["Code"] == "TrailNotFoundException"
+
+
+def test_read_trail_by_arn_from_different_request_region(ct):
+    name = f"trail-cross-region-read-{_uid()}"
+    arn = ct.create_trail(Name=name, S3BucketName="bucket")["TrailARN"]
+    west_ct = _client("cloudtrail", region="us-west-2")
+
+    get_resp = west_ct.get_trail(Name=arn)
+    assert get_resp["Trail"]["Name"] == name
+
+    status_resp = west_ct.get_trail_status(Name=arn)
+    assert status_resp["IsLogging"] is True
+
+    desc_resp = west_ct.describe_trails(trailNameList=[arn])
+    assert [trail["TrailARN"] for trail in desc_resp["trailList"]] == [arn]
+
+
 def test_get_trail_not_found(ct):
     with pytest.raises(ClientError) as exc:
         ct.get_trail(Name=f"nonexistent-{_uid()}")
     assert "TrailNotFoundException" in str(exc.value)
+
+
+def test_get_trail_missing_aws_partition_arn_returns_not_found(ct):
+    arn = f"arn:aws:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.get_trail(Name=arn)
+    assert exc.value.response["Error"]["Code"] == "TrailNotFoundException"
 
 
 def test_delete_trail(ct):
@@ -201,6 +262,84 @@ def test_update_trail_persists_fields(ct):
     assert desc["IsMultiRegionTrail"] is True
 
 
+def test_create_trail_persists_kms_key_id(ct):
+    """CreateTrail persists KmsKeyId so DescribeTrails/GetTrail echo it. Without this a
+    CMK-encrypted trail reads back with no KmsKeyId, so Terraform's aws_cloudtrail does
+    not converge in one apply (the value only lands via a later UpdateTrail)."""
+    name = f"trail-kms-{_uid()}"
+    kms_arn = f"arn:aws:kms:{REGION}:000000000000:key/{_uid()}"
+    resp = ct.create_trail(Name=name, S3BucketName="bucket", KmsKeyId=kms_arn)
+    assert resp["KmsKeyId"] == kms_arn
+
+    desc = ct.describe_trails(trailNameList=[name])["trailList"][0]
+    assert desc["KmsKeyId"] == kms_arn
+
+    got = ct.get_trail(Name=name)["Trail"]
+    assert got["KmsKeyId"] == kms_arn
+
+
+def test_create_trail_normalizes_bare_kms_key_id(ct):
+    """A bare KMS key id is returned as a full key ARN, matching real AWS, which
+    always echoes the CMK as an ARN — so a trail created with a key id shows no diff."""
+    name = f"trail-kmsid-{_uid()}"
+    key_id = f"{_uid()}-{_uid()}"
+    resp = ct.create_trail(Name=name, S3BucketName="bucket", KmsKeyId=key_id)
+    assert resp["KmsKeyId"] == f"arn:aws:kms:{REGION}:000000000000:key/{key_id}"
+    desc = ct.describe_trails(trailNameList=[name])["trailList"][0]
+    assert desc["KmsKeyId"] == resp["KmsKeyId"]
+
+
+def test_create_trail_without_cmk_omits_kms_key_id(ct):
+    """A trail created without a CMK omits KmsKeyId entirely rather than returning "".
+    Real AWS omits unset optional fields; emitting an empty string for an ARN-typed
+    field makes the Terraform aws provider fail (`parsing ... ARN (): arn: invalid
+    prefix`), so guard that neither the create response nor the read-back carries one."""
+    name = f"trail-nocmk-{_uid()}"
+    resp = ct.create_trail(Name=name, S3BucketName="bucket")
+    assert "KmsKeyId" not in resp
+    assert "SnsTopicARN" not in resp
+
+    desc = ct.describe_trails(trailNameList=[name])["trailList"][0]
+    assert "KmsKeyId" not in desc
+    assert "SnsTopicARN" not in desc
+
+
+def test_create_trail_keeps_kms_alias(ct):
+    """An ``alias/...`` reference is echoed verbatim — real AWS resolves it to the
+    target key ARN, but the emulator keeps the caller's value rather than fabricate a
+    wrong ARN (resolving the alias would need a KMS lookup it does not do)."""
+    name = f"trail-alias-{_uid()}"
+    alias = f"alias/ct-{_uid()}"
+    resp = ct.create_trail(Name=name, S3BucketName="bucket", KmsKeyId=alias)
+    assert resp["KmsKeyId"] == alias
+    assert ct.describe_trails(trailNameList=[name])["trailList"][0]["KmsKeyId"] == alias
+
+
+def test_update_trail_normalizes_kms_key_id(ct):
+    """UpdateTrail normalizes KmsKeyId the same way CreateTrail does: a bare key id
+    becomes a full key ARN; an already-full ARN is left as-is."""
+    name = f"trail-upkms-{_uid()}"
+    ct.create_trail(Name=name, S3BucketName="bucket")
+    key_id = f"{_uid()}-{_uid()}"
+    out = ct.update_trail(Name=name, KmsKeyId=key_id)
+    assert out["KmsKeyId"] == f"arn:aws:kms:{REGION}:000000000000:key/{key_id}"
+    assert ct.describe_trails(trailNameList=[name])["trailList"][0]["KmsKeyId"] == out["KmsKeyId"]
+    full = f"arn:aws:kms:{REGION}:000000000000:key/{_uid()}"
+    assert ct.update_trail(Name=name, KmsKeyId=full)["KmsKeyId"] == full
+
+
+def test_update_trail_without_cmk_omits_kms_key_id(ct):
+    """UpdateTrail on a trail with no CMK omits KmsKeyId rather than returning "".
+    AWS omits unset optional fields; an empty ARN makes the Terraform aws provider fail
+    (`parsing ... ARN (): arn: invalid prefix`), so neither the UpdateTrail response nor
+    the read-back may carry one — matching CreateTrail and DescribeTrails/GetTrail."""
+    name = f"trail-upnocmk-{_uid()}"
+    ct.create_trail(Name=name, S3BucketName="bucket")
+    out = ct.update_trail(Name=name, S3KeyPrefix="logs/")
+    assert "KmsKeyId" not in out
+    assert "KmsKeyId" not in ct.describe_trails(trailNameList=[name])["trailList"][0]
+
+
 def test_start_logging_not_found(ct):
     with pytest.raises(ClientError) as exc:
         ct.start_logging(Name=f"nonexistent-{_uid()}")
@@ -226,6 +365,31 @@ def test_put_get_event_selectors(ct):
     assert get_resp["AdvancedEventSelectors"] == []
 
 
+def test_put_event_selectors_rejects_foreign_region_trail_arn(ct):
+    name = f"trail-sel-foreign-{_uid()}"
+    arn = ct.create_trail(Name=name, S3BucketName="bucket")["TrailARN"]
+    foreign_arn = arn.replace(f":{REGION}:", ":us-west-2:")
+    selectors = [{"ReadWriteType": "All", "IncludeManagementEvents": True, "DataResources": []}]
+
+    with pytest.raises(ClientError) as exc:
+        ct.put_event_selectors(TrailName=foreign_arn, EventSelectors=selectors)
+    assert exc.value.response["Error"]["Code"] == "TrailNotFoundException"
+
+    assert ct.get_event_selectors(TrailName=name)["EventSelectors"] == []
+
+
+def test_get_event_selectors_by_arn_from_different_request_region(ct):
+    name = f"trail-sel-cross-region-{_uid()}"
+    arn = ct.create_trail(Name=name, S3BucketName="bucket")["TrailARN"]
+    selectors = [{"ReadWriteType": "All", "IncludeManagementEvents": True, "DataResources": []}]
+    ct.put_event_selectors(TrailName=name, EventSelectors=selectors)
+
+    west_ct = _client("cloudtrail", region="us-west-2")
+    resp = west_ct.get_event_selectors(TrailName=arn)
+    assert resp["TrailARN"] == arn
+    assert resp["EventSelectors"] == selectors
+
+
 def test_get_event_selectors_empty(ct):
     name = f"trail-nosel-{_uid()}"
     ct.create_trail(Name=name, S3BucketName="bucket")
@@ -249,6 +413,73 @@ def test_add_list_remove_tags(ct):
     tags2 = {t["Key"]: t["Value"] for item in list_resp2["ResourceTagList"] for t in item["TagsList"]}
     assert "env" not in tags2
     assert tags2["team"] == "ops"
+
+
+def test_add_tags_rejects_malformed_trail_arn(ct):
+    with pytest.raises(ClientError) as exc:
+        ct.add_tags(ResourceId="not-an-arn", TagsList=[{"Key": "env", "Value": "test"}])
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+@pytest.mark.parametrize("partition", ["aws-cn", "notaws"])
+def test_add_tags_rejects_non_aws_partition_trail_arn(ct, partition):
+    arn = f"arn:{partition}:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.add_tags(ResourceId=arn, TagsList=[{"Key": "env", "Value": "test"}])
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+def test_add_tags_missing_aws_partition_trail_arn_returns_resource_not_found(ct):
+    arn = f"arn:aws:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.add_tags(ResourceId=arn, TagsList=[{"Key": "env", "Value": "test"}])
+    assert exc.value.response["Error"]["Code"] == "ResourceNotFoundException"
+
+
+def test_add_tags_rejects_foreign_region_trail_arn(ct):
+    name = f"trail-tags-foreign-{_uid()}"
+    arn = ct.create_trail(Name=name, S3BucketName="bucket")["TrailARN"]
+    foreign_arn = arn.replace(f":{REGION}:", ":us-west-2:")
+
+    with pytest.raises(ClientError) as exc:
+        ct.add_tags(ResourceId=foreign_arn, TagsList=[{"Key": "env", "Value": "test"}])
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+def test_list_tags_rejects_wrong_service_trail_arn(ct):
+    with pytest.raises(ClientError) as exc:
+        ct.list_tags(ResourceIdList=[f"arn:aws:sns:{REGION}:000000000000:trail/not-a-trail"])
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+@pytest.mark.parametrize("partition", ["aws-cn", "notaws"])
+def test_list_tags_rejects_non_aws_partition_trail_arn(ct, partition):
+    arn = f"arn:{partition}:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.list_tags(ResourceIdList=[arn])
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+def test_list_tags_missing_aws_partition_trail_arn_returns_resource_not_found(ct):
+    arn = f"arn:aws:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.list_tags(ResourceIdList=[arn])
+    assert exc.value.response["Error"]["Code"] == "ResourceNotFoundException"
+
+
+@pytest.mark.parametrize("partition", ["aws-cn", "notaws"])
+def test_remove_tags_rejects_non_aws_partition_trail_arn(ct, partition):
+    arn = f"arn:{partition}:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.remove_tags(ResourceId=arn, TagsList=[{"Key": "env"}])
+    assert exc.value.response["Error"]["Code"] == "CloudTrailARNInvalidException"
+
+
+def test_remove_tags_missing_aws_partition_trail_arn_returns_resource_not_found(ct):
+    arn = f"arn:aws:cloudtrail:{REGION}:000000000000:trail/missing-{_uid()}"
+    with pytest.raises(ClientError) as exc:
+        ct.remove_tags(ResourceId=arn, TagsList=[{"Key": "env"}])
+    assert exc.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +592,6 @@ def test_lookup_no_match(ct):
 
 def test_lookup_time_range_match(ct, s3):
     bucket = f"ct-time-{_uid()}"
-    from datetime import datetime, timezone, timedelta
 
     before = datetime.now(timezone.utc) - timedelta(seconds=2)
     s3.create_bucket(Bucket=bucket)
@@ -376,8 +606,6 @@ def test_lookup_time_range_match(ct, s3):
 
 
 def test_lookup_time_range_future_empty(ct):
-    from datetime import datetime, timezone, timedelta
-
     future_start = datetime.now(timezone.utc) + timedelta(hours=1)
     future_end = datetime.now(timezone.utc) + timedelta(hours=2)
     resp = ct.lookup_events(StartTime=future_start, EndTime=future_end)
